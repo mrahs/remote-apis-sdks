@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/client"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -122,7 +121,7 @@ func (s *Exec) GetCapabilities(ctx context.Context, req *repb.GetCapabilitiesReq
 			ActionCacheUpdateCapabilities: &repb.ActionCacheUpdateCapabilities{
 				UpdateEnabled: true,
 			},
-			MaxBatchTotalSizeBytes:      client.DefaultMaxBatchSize,
+			MaxBatchTotalSizeBytes:      4*1024*1024 - 1024, // matches client.DefaultMaxBatchSize, hardcoded here to avoid a cyclic import.
 			SymlinkAbsolutePathStrategy: repb.SymlinkAbsolutePathStrategy_DISALLOWED,
 		},
 	}

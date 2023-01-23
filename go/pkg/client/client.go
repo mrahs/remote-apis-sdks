@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/user"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/actas"
@@ -168,6 +169,26 @@ type Client struct {
 	casDownloadRequests chan *downloadRequest
 	rpcTimeouts         RPCTimeouts
 	creds               credentials.PerRPCCredentials
+
+	// uploadv2 fields
+	CASConfig           CASClientConfig
+	semFindMissingBlobs *semaphore.Weighted
+	semBatchUpdateBlobs *semaphore.Weighted
+	semByteStreamWrite  *semaphore.Weighted
+	// TODO(nodir): ensure it does not hurt streaming.
+	semFileIO *semaphore.Weighted
+	// semLargeFile ensures only few large files are read/written at a time.
+	// TODO(nodir): ensure this doesn't hurt performance on SSDs.
+	semLargeFile *semaphore.Weighted
+	// fileBufReaders is a pool of reusable *bufio.Readers
+	// with buffer size = ClientConfig.FileIOSize, so e.g. 4MiB.
+	// Use fileBufReaders.Get(), then reset the reader with bufio.Reader.Reset,
+	// and put back to the when done.
+	fileBufReaders sync.Pool
+	// streamBufs is a pool of []byte slices used for ByteStream read/write RPCs.
+	streamBufs sync.Pool
+	// Mockable functions.
+	testScheduleCheck func(ctx context.Context, item *uploadItem) error
 }
 
 const (
