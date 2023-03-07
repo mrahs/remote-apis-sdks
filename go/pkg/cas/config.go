@@ -110,18 +110,18 @@ type Stats struct {
 	// It may be larger than (retries) or smaller than (cache hits or partial response) the requested bytes.
 	BytesMoved int64
 
-	// LogicalBytesMoved is the total number of bytes for the processed items, regardless what actually moved over the wire.
+	// LogicalBytesMoved is the total number of bytes for the processed items, regardless of what actually moved over the wire.
 	// It cannot be larger than the requested bytes, but may be smaller in case of a partial response.
 	LogicalBytesMoved int64
 
 	// BytesCached is the total number of bytes not moved over the wire due to caching (either remotely or locally).
 	BytesCached int64
 
-	// BytesStreamed is the total number of bytes moved by the streaming API (large files).
+	// BytesStreamed is the total number of logical bytes moved by the streaming API.
 	// It may be larger than (retries) or smaller than (cache hits or partial response) than the requested size.
 	BytesStreamed int64
 
-	// BytesBatched is the total number of bytes moved by the batching API (small and medium files).
+	// BytesBatched is the total number of logical bytes moved by the batching API.
 	// It may be larger than (retries) or smaller than (cache hits or partial response) the requested size.
 	BytesBatched int64
 
@@ -143,10 +143,11 @@ type Stats struct {
 	// DigestCount is the number of processed digests.
 	DigestCount int64
 
-	// BatchedCount is the number of small and medium files processed.
+	// BatchedCount is the number of batched files.
 	BatchedCount int64
 
-	// StreamedCount is the number of large files processed.
+	// StreamedCount is the number of streamed files.
+  // For methods that accept bytes, the value is 1 upon success, 0 otherwise.
 	StreamedCount int64
 }
 
