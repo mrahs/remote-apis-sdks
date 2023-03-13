@@ -36,7 +36,7 @@ func (p *Rel) ToString() string {
 	return p.path
 }
 
-// Abs creates a new absolute and clean path from the specified path.
+// NewAbs creates a new absolute and clean path from the specified path.
 // If the specified path is not absolute, ErrBadPath is returned.
 func NewAbs(path string) (*Abs, error) {
 	if filepath.IsAbs(path) {
@@ -45,7 +45,7 @@ func NewAbs(path string) (*Abs, error) {
 	return nil, ErrBadPath
 }
 
-// Rel creates a new relative and clean path from the specified path which must not be absolute.
+// NewRel creates a new relative and clean path from the specified path which must not be absolute.
 // If the specified path is not relative, ErrBadPath is returned.
 func NewRel(path string) (*Rel, error) {
 	if filepath.IsAbs(path) {

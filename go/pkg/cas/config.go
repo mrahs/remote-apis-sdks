@@ -56,6 +56,7 @@ type RPCCfg struct {
 	ItemsLimit int
 
 	// Timeout sets the upper bound of the total time spent processing a request.
+	// For streaming calls, this applies to each Send/Recv call individually, not the whole streaming session.
 	// This does not take into account the time it takes to abort the request upon timeout.
 	Timeout time.Duration
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
+	iow "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/wrappers"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	regrpc "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -158,41 +159,46 @@ func (u *batchingUploader) Upload(ctx context.Context, blobs []blob.Blob, symlin
 }
 
 // WriteBytes uploads all of the specified bytes directly to the specified resource name starting remotely at the specified offset.
-// If finish is true, the server is notified to finalize the resource name and no further writes are allowed.
-func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte, offset int64, finish bool) (stats Stats, err error) {
-	stats = Stats{}
+// If finish is true, the server is notified to finalize the resource name and further writes may not succeed.
+func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte, offset int64, finish bool) (Stats, error) {
+	stats := Stats{}
 
-	if err = u.streamSem.Acquire(ctx, 1); err != nil {
+	if err := u.streamSem.Acquire(ctx, 1); err != nil {
 		// err is always ctx.Err(), so abort immediately.
 		return stats, err
 	}
 	defer u.streamSem.Release(1)
 
-	rawBytesReader := bytes.NewReader(b)
-	var src io.Reader = rawBytesReader
+	rawBytesReader := iow.NewBytesReadCloser(bytes.NewReader(b))
+	var src io.ReadCloser = rawBytesReader
 	eg, ctx := errgroup.WithContext(ctx)
 
+	// If compression is enabled, plug in the encoder via a pipe.
 	if len(b) >= int(u.ioCfg.CompressionSizeThreshold) {
 		pr, pw := io.Pipe()
 		// Closing pr always returns a nil error, but also sends ErrClosedPipe to pw.
 		defer pr.Close()
 		src = pr
-		enc := zstdEncoders.Get().(*zstd.Encoder)
-		defer func() {
-			encErr := enc.Close()
-			err = errors.Join(ErrCompression, encErr, err)
-			zstdEncoders.Put(enc)
-		}()
 
+		enc := zstdEncoders.Get().(*zstd.Encoder)
+		defer zstdEncoders.Put(enc)
 		// (Re)initialize the encoder with this writer.
 		enc.Reset(pw)
 		// Get it going.
-		eg.Go(func() error {
+		eg.Go(func() (errCompr error) {
 			// Closing pw always returns a nil error, but also sends an EOF to pr.
 			defer pw.Close()
+
+			// Closing the encoder is necessary to flush remaining bytes.
+			defer func() {
+				if errClose := enc.Close(); errClose != nil {
+					errCompr = errors.Join(ErrCompression, errClose, errCompr)
+				}
+			}()
+
 			// The encoder will theoretically read continuously. However, pw will block it
 			// while pr is not reading from the other side.
-			// In other words, the chunk/block size is controlled by the reader.
+			// In other words, the chunk size of the encoder's output is controlled by the reader.
 			switch _, errEnc := enc.ReadFrom(rawBytesReader); {
 			case errEnc == io.ErrClosedPipe:
 				// pr was closed first, which means the actual error is on that end.
@@ -201,13 +207,12 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 				return errors.Join(ErrCompression, errEnc)
 			}
 
-			// Closing the encoder is necessary to flush remaining bytes.
-			if errEnc := enc.Close(); errEnc != nil {
-				return errors.Join(ErrCompression, errEnc)
-			}
 			return nil
 		})
 	}
+
+	ctx, ctxCancel := context.WithCancel(ctx)
+	defer ctxCancel()
 
 	stream, errStream := u.byteStream.Write(ctx)
 	if errStream != nil {
@@ -224,16 +229,21 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 	defer u.buffers.Put(buf)
 
 	cacheHit := false
+	var err error
 	for {
 		n, errRead := src.Read(buf)
-		// TODO: how to retry the n bytes?
 		if errRead != nil && errRead != io.EOF {
 			err = errors.Join(ErrIO, errRead, err)
 			break
 		}
 
 		req.Data = buf[:n]
-		errStream := stream.Send(req)
+		errStream := u.withTimeout(u.streamRpcConfig.Timeout, ctxCancel, func() error {
+			return u.withRetry(ctx, func() error {
+				stats.BytesMoved += int64(n)
+				return stream.Send(req)
+			})
+		})
 		if errStream != nil && errStream != io.EOF {
 			err = errors.Join(ErrGRPC, errStream, err)
 			break
@@ -245,23 +255,25 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 			break
 		}
 
-		// Increment here to use it as a bytes-moved counter.
 		req.WriteOffset += int64(n)
 
-		// All bytes processed.
+		// The reader is done (all bytes processed or interrupted).
 		if errRead == io.EOF {
 			break
 		}
 	}
 
-  // TODO: close the reader to terminate the encoder's goroutine.
+	// Close the reader to signal to the encoder's goroutine to terminate.
+	if errClose := src.Close(); errClose != nil {
+		err = errors.Join(ErrIO, errClose, err)
+	}
 
-  // Check if the encoder sent EOF due to an error.
-  // This theoratically will block until the encoder's goroutine returns.
-  // However, closing the reader eventually terminates that goroutine.
+	// Check if the encoder sent EOF due to an error.
+	// This theoratically will block until the encoder's goroutine returns.
+	// However, closing the reader eventually terminates that goroutine.
 	if errEnc := eg.Wait(); errEnc != nil {
-	err = errors.Join(ErrCompression, errEnc, err)
-  }
+		err = errors.Join(ErrCompression, errEnc, err)
+	}
 
 	res, errClose := stream.CloseAndRecv()
 	if errClose != nil {
@@ -273,9 +285,7 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, len(b)), err)
 	}
 
-	// TODO: account for retires once implemented.
 	stats.BytesRequesetd = int64(len(b))
-	stats.BytesMoved = req.WriteOffset
 	stats.LogicalBytesMoved = int64(len(b) - rawBytesReader.Len())
 	if cacheHit {
 		stats.BytesCached = stats.BytesRequesetd
@@ -296,8 +306,6 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 		stats.StreamedCount = 1
 	}
 
-	// TODO: timeout per send
-	// TODO: retries
 	return stats, err
 }
 
@@ -325,6 +333,27 @@ func (u *streamingUploader) Upload(context.Context, <-chan blob.Blob, symlinkopt
 // If finish is true, the server is notified to finalize the resource name and no further writes are allowed.
 func (u *streamingUploader) WriteBytes(ctx context.Context, name string, bytesChan <-chan []byte, offset int64, finish bool) (<-chan int64, error) {
 	panic("not yet implemented")
+}
+
+func (u *uploaderv2) withRetry(ctx context.Context, fn func() error) error {
+	return retry.WithPolicy(ctx, retry.TransientOnly, u.retryPolicy, fn)
+}
+
+func (u *uploaderv2) withTimeout(timeout time.Duration, cancelFn context.CancelFunc, fn func() error) error {
+	// Success signal.
+	done := make(chan struct{})
+	defer close(done)
+	// Timeout signal.
+	timer := time.NewTimer(timeout)
+	go func() {
+		select {
+		case <-done:
+			timer.Stop()
+		case <-timer.C:
+			cancelFn()
+		}
+	}()
+	return fn()
 }
 
 func isValidRpcCfg(cfg *RPCCfg) error {
@@ -416,6 +445,8 @@ func newUploaderv2(
 }
 
 // NewBatchingUploader creates a new instance of the batching uploader interface.
+// The specified configs must be compatbile with the capabilities of the server
+// which the specified clients are connected to.
 func NewBatchingUploader(
 	cas regrpc.ContentAddressableStorageClient,
 	byteStream bsgrpc.ByteStreamClient,
@@ -429,6 +460,8 @@ func NewBatchingUploader(
 }
 
 // NewStreamingUploader creates a new instance of the streaming uploader interface.
+// The specified configs must be compatbile with the capabilities of the server
+// which the specified clients are connected to.
 func NewStreamingUploader(
 	cas regrpc.ContentAddressableStorageClient,
 	byteStream bsgrpc.ByteStreamClient,
