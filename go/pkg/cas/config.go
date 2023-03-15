@@ -111,8 +111,8 @@ type Stats struct {
 	// It may be larger than (retries) or smaller than (cache hits or partial response) the requested bytes.
 	BytesMoved int64
 
-	// LogicalBytesMoved is the total number of bytes for the processed items, regardless of what actually moved over the wire.
-	// It cannot be larger than the requested bytes, but may be smaller in case of a partial response.
+	// LogicalBytesMoved is the total number of bytes moved over the wire excluding retries.
+	// It cannot be larger than the requested bytes, but may be smaller in case of compression or a partial response.
 	LogicalBytesMoved int64
 
 	// BytesCached is the total number of bytes not moved over the wire due to caching (either remotely or locally).

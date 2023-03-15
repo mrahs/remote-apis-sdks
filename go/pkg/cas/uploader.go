@@ -238,6 +238,7 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 		}
 
 		req.Data = buf[:n]
+		stats.LogicalBytesMoved += int64(n)
 		errStream := u.withTimeout(u.streamRpcConfig.Timeout, ctxCancel, func() error {
 			return u.withRetry(ctx, func() error {
 				stats.BytesMoved += int64(n)
@@ -281,7 +282,7 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 	}
 
 	// TODO: committed size is the compressed size?
-	if res.CommittedSize != int64(len(b)) {
+	if res.CommittedSize != stats.LogicalBytesMoved {
 		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, len(b)), err)
 	}
 
@@ -412,7 +413,8 @@ func newUploaderv2(
 	uploadBundler.BufferedByteLimit = uploadCfg.BytesLimit
 
 	return &uploaderv2{
-		cas: cas,
+		cas:        cas,
+		byteStream: byteStream,
 
 		queryRpcConfig:  queryCfg,
 		uploadRpcConfig: uploadCfg,

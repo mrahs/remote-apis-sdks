@@ -1,0 +1,12 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "blob",
+    srcs = ["blob.go"],
+    importpath = "github.com/bazelbuild/remote-apis-sdks/go/pkg/blob",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//go/pkg/digest",
+        "//go/pkg/io/exppath",
+    ],
+)

@@ -2,7 +2,7 @@ package blob
 
 import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/exppath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
 )
 
 // Blob is an immutable structure for raw bytes or a file path with the corresponding digest.
