@@ -281,8 +281,7 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 		return stats, errors.Join(ErrGRPC, errClose, err)
 	}
 
-	// TODO: committed size is the compressed size?
-	if res.CommittedSize != stats.LogicalBytesMoved {
+	if !cacheHit && res.CommittedSize != stats.LogicalBytesMoved {
 		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, len(b)), err)
 	}
 

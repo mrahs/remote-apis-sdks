@@ -3,6 +3,8 @@ package cas
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +31,10 @@ func TestBatchingWriteBytes(t *testing.T) {
 		BufferSize:               2,
 	}
 
+	var (
+		errWrite = fmt.Errorf("write error")
+    errSend = fmt.Errorf("send error")
+	)
 	tests := []struct {
 		name      string
 		bs        *fakeByteStreamClient
@@ -90,18 +96,75 @@ func TestBatchingWriteBytes(t *testing.T) {
 				StreamedCount:     1,
 			},
 		},
-		// {
-		//   name: "write_call_error",
-		// },
-		// {
-		//   name: "cache_hit",
-		// },
-		// {
-		//   name: "reader_error",
-		// },
-		// {
-		//   name: "send_error",
-		// },
+		{
+			name: "write_call_error",
+			bs: &fakeByteStreamClient{
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+					return nil, errWrite
+				},
+			},
+			b:       []byte("abc"),
+			wantErr: errWrite,
+			wantStats: Stats{
+				BytesRequesetd:    0,
+				BytesMoved:        0,
+				LogicalBytesMoved: 0,
+				BytesStreamed:     0,
+				CacheMissCount:    0,
+				StreamedCount:     0,
+			},
+		},
+		{
+			name: "cache_hit",
+			bs: &fakeByteStreamClient{
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+					return &fakeByteStream_WriteClient{
+						send: func(wr *bsgrpc.WriteRequest) error {
+							return io.EOF
+						},
+						closeAndRecv: func() (*bsgrpc.WriteResponse, error) {
+							return &bsgrpc.WriteResponse{}, nil
+						},
+					}, nil
+				},
+			},
+			b:       []byte("abc"),
+			wantErr: nil,
+			wantStats: Stats{
+				BytesRequesetd:    3,
+				BytesMoved:        2, // matches buffer size
+				LogicalBytesMoved: 2,
+				BytesStreamed:     2,
+				CacheHitCount:     1,
+				BytesCached:       3,
+				StreamedCount:     1,
+			},
+		},
+		{
+		  name: "send_error",
+			bs: &fakeByteStreamClient{
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+					return &fakeByteStream_WriteClient{
+						send: func(wr *bsgrpc.WriteRequest) error {
+							return errSend
+						},
+						closeAndRecv: func() (*bsgrpc.WriteResponse, error) {
+							return &bsgrpc.WriteResponse{}, nil
+						},
+					}, nil
+				},
+			},
+			b:       []byte("abc"),
+			wantErr: ErrGRPC,
+			wantStats: Stats{
+				BytesRequesetd:    3,
+				BytesMoved:        2, // matches buffer size
+				LogicalBytesMoved: 2,
+				BytesStreamed:     2,
+        CacheMissCount:    1,
+				StreamedCount:     0,
+			},
+		},
 		// {
 		//   name: "send_retry_timeout",
 		// },
@@ -120,7 +183,7 @@ func TestBatchingWriteBytes(t *testing.T) {
 			if test.wantErr == nil && err != nil {
 				t.Errorf("WriteBytes failed: %v", err)
 			}
-      if test.wantErr != nil && !errors.Is(err, test.wantErr) {
+			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
 				t.Errorf("error mismatch: got %v, want %v", err, test.wantErr)
 			}
 			if diff := cmp.Diff(test.wantStats, stats); diff != "" {
