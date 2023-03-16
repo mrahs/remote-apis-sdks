@@ -13,6 +13,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	bsgrpc "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestBatchingWriteBytes(t *testing.T) {
@@ -32,15 +34,18 @@ func TestBatchingWriteBytes(t *testing.T) {
 	}
 
 	var (
-		errWrite = fmt.Errorf("write error")
-    errSend = fmt.Errorf("send error")
+		errWrite   = fmt.Errorf("write error")
+		errSend    = fmt.Errorf("send error")
+		retryNever = retry.Immediately(retry.Attempts(0))
+		retryTwice = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
 	)
 	tests := []struct {
-		name      string
-		bs        *fakeByteStreamClient
-		b         []byte
-		wantErr   error
-		wantStats Stats
+		name        string
+		bs          *fakeByteStreamClient
+		b           []byte
+		wantErr     error
+		wantStats   Stats
+		retryPolicy *retry.BackoffPolicy
 	}{
 		{
 			name: "no_compression",
@@ -62,6 +67,7 @@ func TestBatchingWriteBytes(t *testing.T) {
 			wantErr: nil,
 			wantStats: Stats{
 				BytesRequesetd:    3,
+				BytesAttempted:    3,
 				BytesMoved:        3,
 				LogicalBytesMoved: 3,
 				BytesStreamed:     3,
@@ -89,6 +95,7 @@ func TestBatchingWriteBytes(t *testing.T) {
 			wantErr: nil,
 			wantStats: Stats{
 				BytesRequesetd:    3500,
+				BytesAttempted:    29,
 				BytesMoved:        29,
 				LogicalBytesMoved: 3500,
 				BytesStreamed:     3500,
@@ -103,16 +110,9 @@ func TestBatchingWriteBytes(t *testing.T) {
 					return nil, errWrite
 				},
 			},
-			b:       []byte("abc"),
-			wantErr: errWrite,
-			wantStats: Stats{
-				BytesRequesetd:    0,
-				BytesMoved:        0,
-				LogicalBytesMoved: 0,
-				BytesStreamed:     0,
-				CacheMissCount:    0,
-				StreamedCount:     0,
-			},
+			b:         []byte("abc"),
+			wantErr:   errWrite,
+			wantStats: Stats{},
 		},
 		{
 			name: "cache_hit",
@@ -132,7 +132,8 @@ func TestBatchingWriteBytes(t *testing.T) {
 			wantErr: nil,
 			wantStats: Stats{
 				BytesRequesetd:    3,
-				BytesMoved:        2, // matches buffer size
+				BytesAttempted:    2, // matches buffer size
+				BytesMoved:        2,
 				LogicalBytesMoved: 2,
 				BytesStreamed:     2,
 				CacheHitCount:     1,
@@ -141,7 +142,7 @@ func TestBatchingWriteBytes(t *testing.T) {
 			},
 		},
 		{
-		  name: "send_error",
+			name: "send_error",
 			bs: &fakeByteStreamClient{
 				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
 					return &fakeByteStream_WriteClient{
@@ -158,16 +159,41 @@ func TestBatchingWriteBytes(t *testing.T) {
 			wantErr: ErrGRPC,
 			wantStats: Stats{
 				BytesRequesetd:    3,
-				BytesMoved:        2, // matches buffer size
+				BytesAttempted:    2, // matches buffer size
+				BytesMoved:        2,
 				LogicalBytesMoved: 2,
 				BytesStreamed:     2,
-        CacheMissCount:    1,
+				CacheMissCount:    1,
 				StreamedCount:     0,
 			},
 		},
-		// {
-		//   name: "send_retry_timeout",
-		// },
+		{
+			name: "send_retry_timeout",
+			bs: &fakeByteStreamClient{
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+					return &fakeByteStream_WriteClient{
+						send: func(wr *bsgrpc.WriteRequest) error {
+							return status.Error(codes.Internal, "error")
+						},
+						closeAndRecv: func() (*bsgrpc.WriteResponse, error) {
+							return &bsgrpc.WriteResponse{}, nil
+						},
+					}, nil
+				},
+			},
+			b:       []byte("abc"),
+			wantErr: ErrGRPC,
+			wantStats: Stats{
+				BytesRequesetd:    3,
+				BytesAttempted:    2, // matches one buffer size
+				BytesMoved:        4, // matches two buffer sizes
+				LogicalBytesMoved: 2,
+				BytesStreamed:     2,
+				CacheMissCount:    1,
+				StreamedCount:     0,
+			},
+			retryPolicy: &retryTwice,
+		},
 		// {
 		//   name: "stream_close_error",
 		// },
@@ -175,7 +201,10 @@ func TestBatchingWriteBytes(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			u, err := NewBatchingUploader(&fakeCAS{}, test.bs, rpcCfg, rpcCfg, rpcCfg, ioCfg, retry.Immediately(retry.Attempts(2)))
+			if test.retryPolicy == nil {
+				test.retryPolicy = &retryNever
+			}
+			u, err := NewBatchingUploader(&fakeCAS{}, test.bs, rpcCfg, rpcCfg, rpcCfg, ioCfg, *test.retryPolicy)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}

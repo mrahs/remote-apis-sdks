@@ -238,7 +238,7 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 		}
 
 		req.Data = buf[:n]
-		stats.LogicalBytesMoved += int64(n)
+		stats.BytesAttempted += int64(n)
 		errStream := u.withTimeout(u.streamRpcConfig.Timeout, ctxCancel, func() error {
 			return u.withRetry(ctx, func() error {
 				stats.BytesMoved += int64(n)
@@ -276,15 +276,7 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 		err = errors.Join(ErrCompression, errEnc, err)
 	}
 
-	res, errClose := stream.CloseAndRecv()
-	if errClose != nil {
-		return stats, errors.Join(ErrGRPC, errClose, err)
-	}
-
-	if !cacheHit && res.CommittedSize != stats.LogicalBytesMoved {
-		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, len(b)), err)
-	}
-
+	// Capture stats before processing errors.
 	stats.BytesRequesetd = int64(len(b))
 	stats.LogicalBytesMoved = int64(len(b) - rawBytesReader.Len())
 	if cacheHit {
@@ -304,6 +296,15 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 	stats.BatchedCount = 0
 	if err == nil {
 		stats.StreamedCount = 1
+	}
+
+	res, errClose := stream.CloseAndRecv()
+	if errClose != nil {
+		return stats, errors.Join(ErrGRPC, errClose, err)
+	}
+
+	if !cacheHit && res.CommittedSize != stats.BytesAttempted {
+		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, stats.BytesAttempted), err)
 	}
 
 	return stats, err

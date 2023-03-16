@@ -107,13 +107,17 @@ type Stats struct {
 	// It does not necessarily equal the total number of bytes uploaded/downloaded.
 	BytesRequesetd int64
 
+	// LogicalBytesMoved is the amount of BytesRequsted that was processed.
+	// It cannot be larger than BytesRequested, but may be smaller in case of a partial response.
+	LogicalBytesMoved int64
+
 	// BytesMoved is the total number of bytes moved over the wire.
-	// It may be larger than (retries) or smaller than (cache hits or partial response) the requested bytes.
+	// It may be larger than (retries) or smaller than BytesRequested (compression, cache hits or partial response).
 	BytesMoved int64
 
-	// LogicalBytesMoved is the total number of bytes moved over the wire excluding retries.
-	// It cannot be larger than the requested bytes, but may be smaller in case of compression or a partial response.
-	LogicalBytesMoved int64
+	// BytesAttempted is the total number of bytes moved over the wire, excluding retries.
+	// It may be higher than BytesRequested (compression headers), but never higher than BytesMoved.
+	BytesAttempted int64
 
 	// BytesCached is the total number of bytes not moved over the wire due to caching (either remotely or locally).
 	BytesCached int64
