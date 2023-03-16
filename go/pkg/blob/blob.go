@@ -2,7 +2,7 @@ package blob
 
 import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
+	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
 )
 
 // Blob is an immutable structure for raw bytes or a file path with the corresponding digest.
@@ -10,8 +10,8 @@ import (
 type Blob struct {
 	digest    digest.Digest
 	bytes     []byte
-	path      exppath.Abs
-	predicate exppath.Predicate
+	path      ep.Abs
+	predicate ep.Predicate
 }
 
 // Digest returns a copy of the blob's digest.
@@ -32,12 +32,12 @@ func (b *Blob) BytesLen() int {
 }
 
 // Path returns the blob's path.
-func (b *Blob) Path() exppath.Abs {
+func (b *Blob) Path() ep.Abs {
 	return b.path
 }
 
 // Predicate returns the predicate associated with this blob.
-func (b *Blob) Predicate() exppath.Predicate {
+func (b *Blob) Predicate() ep.Predicate {
 	return b.predicate
 }
 
@@ -50,7 +50,7 @@ func FromBytes(digest digest.Digest, bytes []byte) Blob {
 }
 
 // FromFile creates a new blob that references a file by its path.
-func FromFile(digest digest.Digest, path exppath.Abs) Blob {
+func FromFile(digest digest.Digest, path ep.Abs) Blob {
 	return Blob{
 		digest: digest,
 		path:   path,
@@ -59,7 +59,7 @@ func FromFile(digest digest.Digest, path exppath.Abs) Blob {
 
 // FromDir creates a new blob that references a directory by its path with a predicate
 // to exclude any descendent.
-func FromDir(digest digest.Digest, path exppath.Abs, predicate exppath.Predicate) Blob {
+func FromDir(digest digest.Digest, path ep.Abs, predicate ep.Predicate) Blob {
 	return Blob{
 		digest:    digest,
 		path:      path,

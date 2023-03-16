@@ -10,30 +10,39 @@ import (
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/blob"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/command"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
+	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
 	iow "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/wrappers"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
-	regrpc "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pborman/uuid"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/api/support/bundler"
-	bsgrpc "google.golang.org/genproto/googleapis/bytestream"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 )
 
-var ErrNegativeLimit = errors.New("limit value must be >= 0")
-var ErrZeroOrNegativeLimit = errors.New("limit value must be > 0")
-var ErrNilClient = errors.New("client cannot be nil")
-var ErrCompression = errors.New("compression error")
-var ErrIO = errors.New("io error")
-var ErrGRPC = errors.New("grpc error")
+var (
+	// ErrNegativeLimit indicates an invalid value that is < 0.
+	ErrNegativeLimit = errors.New("limit value must be >= 0")
+
+	// ErrZeroOrNegativeLimit indicates an invalid value that is <= 0.
+	ErrZeroOrNegativeLimit = errors.New("limit value must be > 0")
+
+	// ErrNilClient indicates an invalid nil argument.
+	ErrNilClient = errors.New("client cannot be nil")
+
+	// ErrCompression indicates an error in the compression routine.
+	ErrCompression = errors.New("compression error")
+
+	// ErrIO indicates an error in an IO routine.
+	ErrIO = errors.New("io error")
+
+	// ErrGRPC indicates an error in a gRPC routine.
+	ErrGRPC = errors.New("grpc error")
+)
 
 // MakeWriteResourceName returns a valid resource name for writing an uncompressed blob.
 func MakeWriteResourceName(instanceName, hash string, size int64) string {
@@ -45,20 +54,6 @@ func MakeCompressedWriteResourceName(instanceName, hash string, size int64) stri
 	return fmt.Sprintf("%s/uploads/%s/compressed-blobs/zstd/%s/%d", instanceName, uuid.New(), hash, size)
 }
 
-// PrepareActionResult computes a list of blobs and constructs an ActionResult ready to be inspected or uploaded.
-func PrepareActionResult(
-	ctx context.Context, execRoot exppath.Abs, workDir exppath.Rel, paths []exppath.Rel,
-	symlinkOpts symlinkopts.Opts, cache filemetadata.Cache) (map[digest.Digest]blob.Blob, repb.ActionResult, error) {
-	panic("not yet implemented")
-}
-
-// MerkleTree computes a merkle tree from the specified InputSpec and returns a list of blobs ready to be inspected or uploaded.
-func MerkleTree(
-	ctx context.Context, execRoot exppath.Abs, workDir exppath.Rel, remoteWorkDir exppath.Rel,
-	spec command.InputSpec, cache filemetadata.Cache) (digest.Digest, []blob.Blob, Stats, error) {
-	panic("not yet implemented")
-}
-
 // BatchingUploader provides a simple imperative API to upload to the CAS.
 type BatchingUploader interface {
 	// MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
@@ -67,7 +62,7 @@ type BatchingUploader interface {
 	// Upload deduplicates the specified blobs (unified uploads) and only uploads the ones that are not already in the CAS.
 	// Large files are streamed while others are batched together.
 	// Returns a slice of the digests of the uploaded blobs, excluding the ones that already exist in the CAS.
-	Upload(context.Context, []blob.Blob, symlinkopts.Opts, exppath.Predicate) ([]digest.Digest, Stats, error)
+	Upload(context.Context, []blob.Blob, symlinkopts.Opts, ep.Predicate) ([]digest.Digest, Stats, error)
 
 	// WriteBytes uploads all of the specified bytes directly to the specified resource name starting remotely at the specified offset.
 	// If finish is true, the server is notified to finalize the resource name and no further writes are allowed.
@@ -88,7 +83,7 @@ type StreamingUploader interface {
 	// The returned error is either from the context or an error that necessitates terminating the call.
 	// Errors related to particular items are reported as part of their result.
 	// During the lifetime of the call, digests are cached to avoid duplicate uploads (unified uploads).
-	Upload(context.Context, <-chan blob.Blob, symlinkopts.Opts, exppath.Predicate) (<-chan UploadResponse, error)
+	Upload(context.Context, <-chan blob.Blob, symlinkopts.Opts, ep.Predicate) (<-chan UploadResponse, error)
 
 	// WriteBytes is a blocking call that uploads incoming bytes to the CAS at the specified resource name starting remotely at the specified offset.
 	// It returns when the context is done, the input channel is closed, or a fatal error occurs.
@@ -113,8 +108,9 @@ type UploadResponse struct {
 
 // uploader represents the state of an uploader implementation.
 type uploaderv2 struct {
-	cas        regrpc.ContentAddressableStorageClient
-	byteStream bsgrpc.ByteStreamClient
+	cas          repb.ContentAddressableStorageClient
+	byteStream   bspb.ByteStreamClient
+	instanceName string
 
 	queryRpcConfig  RPCCfg
 	uploadRpcConfig RPCCfg
@@ -147,14 +143,36 @@ type streamingUploader struct {
 }
 
 // MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
+//
+// The concurrency limit set on the uploader only applies to direct calls to this method.
+// It does not map directly to the number of concurrent goroutines hitting the server. That number
+// may be larger since the bunlder package launches each bundle in a goroutine.
 func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
+	if err := u.querySem.Acquire(ctx, 1); err != nil {
+		// err is always ctx.Err(), so abort immediately.
+		return nil, err
+	}
+	defer u.querySem.Release(1)
+
+	// req := &repb.FindMissingBlobsRequest{
+	// InstanceName: u.instanceName,
+	// BlobDigests:  make([]*repb.Digest, len(digests)),
+	// }
+
+	// for _, d := range digests {
+	// u.queryBundler.AddWait(ctx, d.ToProto(), int(d.Size))
+	// }
+	// u.queryBundler.Flush()
+	//
+	//
+	// return digestsFromProtos(res.MissingBlobDigests...), err
 	panic("not yet implemented")
 }
 
 // Upload deduplicates the specified blobs (unified uploads) and only uploads the ones that are not already in the CAS.
 // Large files are streamed while others are batched together.
 // Returns a slice of the digests of the uploaded blobs, excluding the ones that already exist in the CAS.
-func (u *batchingUploader) Upload(ctx context.Context, blobs []blob.Blob, symlinkOpts symlinkopts.Opts, predicate exppath.Predicate) ([]digest.Digest, Stats, error) {
+func (u *batchingUploader) Upload(ctx context.Context, blobs []blob.Blob, symlinkOpts symlinkopts.Opts, predicate ep.Predicate) ([]digest.Digest, Stats, error) {
 	panic("not yet implemented")
 }
 
@@ -324,7 +342,7 @@ func (u *streamingUploader) MissingBlobs(context.Context, <-chan digest.Digest) 
 // The returned error is either from the context or an error that necessitates terminating the call.
 // Errors related to particular items are reported as part of their result.
 // During the lifetime of the call, digests are cached to avoid duplicate uploads (unified uploads).
-func (u *streamingUploader) Upload(context.Context, <-chan blob.Blob, symlinkopts.Opts, exppath.Predicate) (<-chan UploadResponse, error) {
+func (u *streamingUploader) Upload(context.Context, <-chan blob.Blob, symlinkopts.Opts, ep.Predicate) (<-chan UploadResponse, error) {
 	panic("not yet implemented")
 }
 
@@ -374,9 +392,18 @@ func isValidIOCfg(cfg *IOCfg) error {
 	return nil
 }
 
+func digestsFromProtos(dprotots ...*repb.Digest) []digest.Digest {
+	ds := make([]digest.Digest, len(dprotots))
+	for i, dp := range dprotots {
+		ds[i] = digest.NewFromProtoUnvalidated(dp)
+	}
+	return ds
+}
+
 func newUploaderv2(
-	cas regrpc.ContentAddressableStorageClient,
-	byteStream bsgrpc.ByteStreamClient,
+	cas repb.ContentAddressableStorageClient,
+	byteStream bspb.ByteStreamClient,
+	instanceName string,
 	queryCfg, uploadCfg, streamCfg RPCCfg, ioCfg IOCfg,
 	retryPolicy retry.BackoffPolicy) (*uploaderv2, error) {
 
@@ -399,7 +426,9 @@ func newUploaderv2(
 	zeroBlob := &blob.Blob{}
 
 	// TODO: bundler callback
-	queryBundler := bundler.NewBundler(zeroBlob, func(items interface{}) {})
+	queryBundler := bundler.NewBundler(&digest.Digest{}, func(digests interface{}) {
+
+	})
 	queryBundler.DelayThreshold = time.Second
 	queryBundler.BundleCountThreshold = queryCfg.ItemsLimit
 	queryBundler.BundleByteThreshold = queryCfg.BytesLimit
@@ -413,8 +442,9 @@ func newUploaderv2(
 	uploadBundler.BufferedByteLimit = uploadCfg.BytesLimit
 
 	return &uploaderv2{
-		cas:        cas,
-		byteStream: byteStream,
+		cas:          cas,
+		byteStream:   byteStream,
+		instanceName: instanceName,
 
 		queryRpcConfig:  queryCfg,
 		uploadRpcConfig: uploadCfg,
@@ -431,6 +461,8 @@ func newUploaderv2(
 		ioCfg: ioCfg,
 		buffers: sync.Pool{
 			New: func() interface{} {
+				// Since the buffers are never resized, treating the slice as a pointer-like
+				// type for this pool is safe.
 				buf := make([]byte, ioCfg.BufferSize)
 				return buf
 			},
@@ -450,11 +482,12 @@ func newUploaderv2(
 // The specified configs must be compatbile with the capabilities of the server
 // which the specified clients are connected to.
 func NewBatchingUploader(
-	cas regrpc.ContentAddressableStorageClient,
-	byteStream bsgrpc.ByteStreamClient,
+	cas repb.ContentAddressableStorageClient,
+	byteStream bspb.ByteStreamClient,
+	instanceName string,
 	queryCfg, uploadCfg, streamCfg RPCCfg, ioCfg IOCfg,
 	retryPolicy retry.BackoffPolicy) (BatchingUploader, error) {
-	uploader, err := newUploaderv2(cas, byteStream, queryCfg, uploadCfg, streamCfg, ioCfg, retryPolicy)
+	uploader, err := newUploaderv2(cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg, retryPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -465,11 +498,12 @@ func NewBatchingUploader(
 // The specified configs must be compatbile with the capabilities of the server
 // which the specified clients are connected to.
 func NewStreamingUploader(
-	cas regrpc.ContentAddressableStorageClient,
-	byteStream bsgrpc.ByteStreamClient,
+	cas repb.ContentAddressableStorageClient,
+	byteStream bspb.ByteStreamClient,
+	instanceName string,
 	queryCfg, uploadCfg, streamCfg RPCCfg, ioCfg IOCfg,
 	retryPolicy retry.BackoffPolicy) (StreamingUploader, error) {
-	uploader, err := newUploaderv2(cas, byteStream, queryCfg, uploadCfg, streamCfg, ioCfg, retryPolicy)
+	uploader, err := newUploaderv2(cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg, retryPolicy)
 	if err != nil {
 		return nil, err
 	}

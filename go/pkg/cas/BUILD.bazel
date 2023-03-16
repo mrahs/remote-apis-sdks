@@ -14,7 +14,6 @@ go_library(
     deps = [
         "//go/pkg/blob",
         "//go/pkg/cache",
-        "//go/pkg/command",
         "//go/pkg/digest",
         "//go/pkg/filemetadata",
         "//go/pkg/io/exppath",
