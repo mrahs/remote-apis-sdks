@@ -11,4 +11,5 @@ go_test(
     name = "batcher_test",
     srcs = ["batcher_test.go"],
     embed = [":batcher"],
+    deps = ["@com_github_google_go_cmp//cmp:go_default_library"],
 )
