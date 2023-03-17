@@ -9,22 +9,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/batcher"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
+	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/google/go-cmp/cmp"
-	bsgrpc "google.golang.org/genproto/googleapis/bytestream"
+	bspb "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-func TestBatchingWriteBytes(t *testing.T) {
-	rpcCfg := RPCCfg{
+var (
+	rpcCfg = RPCCfg{
 		ConcurrentCallsLimit: 1,
 		ItemsLimit:           1,
 		BytesLimit:           1024,
 		Timeout:              time.Second,
 	}
-	ioCfg := IOCfg{
+	ioCfg = IOCfg{
 		OpenFilesLimit:           1,
 		OpenLargeFilesLimit:      1,
 		SmallFileSizeThreshold:   1,
@@ -32,13 +35,73 @@ func TestBatchingWriteBytes(t *testing.T) {
 		CompressionSizeThreshold: 10,
 		BufferSize:               2,
 	}
+	errWrite   = fmt.Errorf("write error")
+	errSend    = fmt.Errorf("send error")
+	errClose   = fmt.Errorf("close error")
+	retryNever = retry.Immediately(retry.Attempts(0))
+	retryTwice = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
+)
 
-	var (
-		errWrite   = fmt.Errorf("write error")
-		errSend    = fmt.Errorf("send error")
-		retryNever = retry.Immediately(retry.Attempts(0))
-		retryTwice = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
-	)
+func TestBatching_MissingBlobs(t *testing.T) {
+	tests := []struct {
+		name        string
+		digests     []digest.Digest
+		cas         *fakeCAS
+		wantErr     error
+		wantDigests []digest.Digest
+	}{
+		{"empty_request", nil, &fakeCAS{}, nil, nil},
+		{"bad_batch", []digest.Digest{{Size: 2048}}, &fakeCAS{}, batcher.ErrItemTooLarge, nil},
+		{
+			"no_missing",
+			[]digest.Digest{{Hash: "a"}, {Hash: "b"}},
+			&fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+				return &repb.FindMissingBlobsResponse{}, nil
+			}},
+			nil,
+			nil,
+		},
+		{
+			"all_missing",
+			[]digest.Digest{{Hash: "a"}, {Hash: "b"}},
+			&fakeCAS{findMissingBlobs: func(_ context.Context, req *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+				return &repb.FindMissingBlobsResponse{MissingBlobDigests: req.BlobDigests}, nil
+			}},
+			nil,
+			[]digest.Digest{{Hash: "a"}, {Hash: "b"}},
+		},
+		{
+			"error_call",
+			[]digest.Digest{{Hash: "a"}, {Hash: "b"}},
+			&fakeCAS{findMissingBlobs: func(_ context.Context, req *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+				return &repb.FindMissingBlobsResponse{}, errSend
+			}},
+			errSend,
+			[]digest.Digest{{Hash: "a"}, {Hash: "b"}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			u, err := NewBatchingUploader(test.cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+			if err != nil {
+				t.Fatalf("error creating batching uploader: %v", err)
+			}
+			missing, err := u.MissingBlobs(context.Background(), test.digests)
+			if test.wantErr == nil && err != nil {
+				t.Errorf("MissingBlobs failed: %v", err)
+			}
+			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
+				t.Errorf("error mismatch: got %v, want %v", err, test.wantErr)
+			}
+			if diff := cmp.Diff(test.wantDigests, missing); diff != "" {
+				t.Errorf("stats mismatch, (-want +got): %s", diff)
+			}
+		})
+	}
+}
+
+func TestBatching_WriteBytes(t *testing.T) {
 	tests := []struct {
 		name        string
 		bs          *fakeByteStreamClient
@@ -50,15 +113,15 @@ func TestBatchingWriteBytes(t *testing.T) {
 		{
 			name: "no_compression",
 			bs: &fakeByteStreamClient{
-				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					bytesSent := int64(0)
 					return &fakeByteStream_WriteClient{
-						send: func(wr *bsgrpc.WriteRequest) error {
+						send: func(wr *bspb.WriteRequest) error {
 							bytesSent += int64(len(wr.Data))
 							return nil
 						},
-						closeAndRecv: func() (*bsgrpc.WriteResponse, error) {
-							return &bsgrpc.WriteResponse{CommittedSize: bytesSent}, nil
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{CommittedSize: bytesSent}, nil
 						},
 					}, nil
 				},
@@ -78,15 +141,15 @@ func TestBatchingWriteBytes(t *testing.T) {
 		{
 			name: "compression",
 			bs: &fakeByteStreamClient{
-				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					bytesSent := int64(0)
 					return &fakeByteStream_WriteClient{
-						send: func(wr *bsgrpc.WriteRequest) error {
+						send: func(wr *bspb.WriteRequest) error {
 							bytesSent += int64(len(wr.Data))
 							return nil
 						},
-						closeAndRecv: func() (*bsgrpc.WriteResponse, error) {
-							return &bsgrpc.WriteResponse{CommittedSize: bytesSent}, nil
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{CommittedSize: bytesSent}, nil
 						},
 					}, nil
 				},
@@ -106,7 +169,7 @@ func TestBatchingWriteBytes(t *testing.T) {
 		{
 			name: "write_call_error",
 			bs: &fakeByteStreamClient{
-				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					return nil, errWrite
 				},
 			},
@@ -117,13 +180,13 @@ func TestBatchingWriteBytes(t *testing.T) {
 		{
 			name: "cache_hit",
 			bs: &fakeByteStreamClient{
-				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					return &fakeByteStream_WriteClient{
-						send: func(wr *bsgrpc.WriteRequest) error {
+						send: func(wr *bspb.WriteRequest) error {
 							return io.EOF
 						},
-						closeAndRecv: func() (*bsgrpc.WriteResponse, error) {
-							return &bsgrpc.WriteResponse{}, nil
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{}, nil
 						},
 					}, nil
 				},
@@ -144,13 +207,13 @@ func TestBatchingWriteBytes(t *testing.T) {
 		{
 			name: "send_error",
 			bs: &fakeByteStreamClient{
-				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					return &fakeByteStream_WriteClient{
-						send: func(wr *bsgrpc.WriteRequest) error {
+						send: func(wr *bspb.WriteRequest) error {
 							return errSend
 						},
-						closeAndRecv: func() (*bsgrpc.WriteResponse, error) {
-							return &bsgrpc.WriteResponse{}, nil
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{}, nil
 						},
 					}, nil
 				},
@@ -170,13 +233,13 @@ func TestBatchingWriteBytes(t *testing.T) {
 		{
 			name: "send_retry_timeout",
 			bs: &fakeByteStreamClient{
-				write: func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					return &fakeByteStream_WriteClient{
-						send: func(wr *bsgrpc.WriteRequest) error {
+						send: func(wr *bspb.WriteRequest) error {
 							return status.Error(codes.Internal, "error")
 						},
-						closeAndRecv: func() (*bsgrpc.WriteResponse, error) {
-							return &bsgrpc.WriteResponse{}, nil
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{}, nil
 						},
 					}, nil
 				},
@@ -194,9 +257,33 @@ func TestBatchingWriteBytes(t *testing.T) {
 			},
 			retryPolicy: &retryTwice,
 		},
-		// {
-		//   name: "stream_close_error",
-		// },
+		{
+			name: "stream_close_error",
+			bs: &fakeByteStreamClient{
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
+					return &fakeByteStream_WriteClient{
+						send: func(wr *bspb.WriteRequest) error {
+							return nil
+						},
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return nil, errClose
+						},
+					}, nil
+				},
+			},
+			b:       []byte("abc"),
+			wantErr: ErrGRPC,
+			wantStats: Stats{
+				BytesRequesetd:    3,
+				BytesAttempted:    3,
+				BytesMoved:        3,
+				LogicalBytesMoved: 3,
+				BytesStreamed:     3,
+				CacheMissCount:    1,
+				StreamedCount:     1,
+			},
+			retryPolicy: &retryTwice,
+		},
 	}
 
 	for _, test := range tests {
@@ -223,33 +310,33 @@ func TestBatchingWriteBytes(t *testing.T) {
 }
 
 type fakeByteStreamClient struct {
-	bsgrpc.ByteStreamClient
-	write func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error)
+	bspb.ByteStreamClient
+	write func(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error)
 }
 
 type fakeByteStream_WriteClient struct {
-	bsgrpc.ByteStream_WriteClient
-	send         func(*bsgrpc.WriteRequest) error
-	closeAndRecv func() (*bsgrpc.WriteResponse, error)
+	bspb.ByteStream_WriteClient
+	send         func(*bspb.WriteRequest) error
+	closeAndRecv func() (*bspb.WriteResponse, error)
 }
 
-func (s *fakeByteStreamClient) Write(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+func (s *fakeByteStreamClient) Write(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 	if s.write != nil {
 		return s.write(ctx, opts...)
 	}
 	return &fakeByteStream_WriteClient{}, nil
 }
 
-func (s *fakeByteStream_WriteClient) Send(wr *bsgrpc.WriteRequest) error {
+func (s *fakeByteStream_WriteClient) Send(wr *bspb.WriteRequest) error {
 	if s.send != nil {
 		return s.send(wr)
 	}
 	return nil
 }
 
-func (s *fakeByteStream_WriteClient) CloseAndRecv() (*bsgrpc.WriteResponse, error) {
+func (s *fakeByteStream_WriteClient) CloseAndRecv() (*bspb.WriteResponse, error) {
 	if s.closeAndRecv != nil {
 		return s.closeAndRecv()
 	}
-	return &bsgrpc.WriteResponse{}, nil
+	return &bspb.WriteResponse{}, nil
 }

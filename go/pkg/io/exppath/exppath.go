@@ -1,5 +1,6 @@
 // Package exppath (explicit path) provides an unambiguous interface to work with relative and absolute paths.
 // The structures are immutable and allow strong guarantees at compile time.
+// Using interface types for exported symbols helps guarantee that any object created using this package is always valid.
 package exppath
 
 import (
@@ -11,7 +12,7 @@ import (
 )
 
 // ErrBadPath indicates an invalid path based on the context it is returned from.
-var ErrBadPath = errors.New("invalid path")
+var ErrBadPath = errors.New("exppath: invalid path")
 
 // Predicate allows for filtering paths during traversal.
 // If false is returned, the specified path should be excluded.
@@ -20,20 +21,26 @@ type Predicate func(path Abs, info os.FileInfo) bool
 
 // Abs represents an immutable absolute path.
 type Abs interface {
-  String() string
+	// String returns the path.
+	String() string
+	// Abs is an alias to String that is used to make this interface unique.
+	Abs() string
 }
 
 // Rel represents an immutable relative path.
 type Rel interface {
+	// String returns the path.
 	String() string
+	// Rel is an alias to String that is used to make this interface unique.
+	Rel() string
 }
 
 type abs struct {
-  path string
+	path string
 }
 
 type rel struct {
-  path string
+	path string
 }
 
 // String returns the string representation of the path.
@@ -41,8 +48,18 @@ func (p *abs) String() string {
 	return p.path
 }
 
+// Abs is an alias to String().
+func (p *abs) Abs() string {
+	return p.path
+}
+
 // String returns the string representation of the path.
 func (p *rel) String() string {
+	return p.path
+}
+
+// Rel is an alias to String().
+func (p *rel) Rel() string {
 	return p.path
 }
 
@@ -68,21 +85,21 @@ func NewRel(pathParts ...string) (Rel, error) {
 
 // JoinAbs is a convenient method to join multiple paths into an aboslute path.
 func JoinAbs(root Abs, parts ...Rel) Abs {
-  ps := make([]string, len(parts)+1)
-  ps[0] = root.String()
-  for i, p := range parts {
-	ps[i+1] = p.String()
-  }
-  return &abs{path: filepath.Join(ps...)}
+	ps := make([]string, len(parts)+1)
+	ps[0] = root.String()
+	for i, p := range parts {
+		ps[i+1] = p.String()
+	}
+	return &abs{path: filepath.Join(ps...)}
 }
 
 // JoinRel is a convenient method to join multiple paths into a relative path.
 func JoinRel(parts ...Rel) Rel {
-  ps := make([]string, len(parts))
-  for i, p := range parts {
-	ps[i] = p.String()
-  }
-  return &rel{path: filepath.Join(ps...)}
+	ps := make([]string, len(parts))
+	for i, p := range parts {
+		ps[i] = p.String()
+	}
+	return &rel{path: filepath.Join(ps...)}
 
 }
 
@@ -106,9 +123,9 @@ func Descendant(base Abs, target Abs) (Rel, error) {
 // It must only be called with arguments that have previously passed
 // through filepath.Rel without errors.
 func MustRel(base Abs, target Abs) Rel {
-  path, err := filepath.Rel(base.String(), target.String())
-  if err != nil {
-	panic(err)
-  }
-  return &rel{path: path}
+	path, err := filepath.Rel(base.String(), target.String())
+	if err != nil {
+		panic(err)
+	}
+	return &rel{path: path}
 }

@@ -12,6 +12,7 @@ go_library(
     importpath = "github.com/bazelbuild/remote-apis-sdks/go/pkg/cas",
     visibility = ["//visibility:public"],
     deps = [
+        "//go/pkg/batcher",
         "//go/pkg/blob",
         "//go/pkg/cache",
         "//go/pkg/digest",
@@ -46,6 +47,7 @@ go_test(
     data = glob(["testdata/**"]),
     embed = [":cas"],
     deps = [
+        "//go/pkg/batcher",
         "//go/pkg/digest",
         "//go/pkg/fakes",
         "//go/pkg/retry",

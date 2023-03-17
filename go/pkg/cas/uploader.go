@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/batcher"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/blob"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
@@ -26,22 +27,22 @@ import (
 
 var (
 	// ErrNegativeLimit indicates an invalid value that is < 0.
-	ErrNegativeLimit = errors.New("limit value must be >= 0")
+	ErrNegativeLimit = errors.New("cas: limit value must be >= 0")
 
 	// ErrZeroOrNegativeLimit indicates an invalid value that is <= 0.
-	ErrZeroOrNegativeLimit = errors.New("limit value must be > 0")
+	ErrZeroOrNegativeLimit = errors.New("cas: limit value must be > 0")
 
 	// ErrNilClient indicates an invalid nil argument.
-	ErrNilClient = errors.New("client cannot be nil")
+	ErrNilClient = errors.New("cas: client cannot be nil")
 
 	// ErrCompression indicates an error in the compression routine.
-	ErrCompression = errors.New("compression error")
+	ErrCompression = errors.New("cas: compression error")
 
 	// ErrIO indicates an error in an IO routine.
-	ErrIO = errors.New("io error")
+	ErrIO = errors.New("cas: io error")
 
 	// ErrGRPC indicates an error in a gRPC routine.
-	ErrGRPC = errors.New("grpc error")
+	ErrGRPC = errors.New("cas: grpc error")
 )
 
 // MakeWriteResourceName returns a valid resource name for writing an uncompressed blob.
@@ -144,29 +145,54 @@ type streamingUploader struct {
 
 // MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
 //
-// The concurrency limit set on the uploader only applies to direct calls to this method.
-// It does not map directly to the number of concurrent goroutines hitting the server. That number
-// may be larger since the bunlder package launches each bundle in a goroutine.
+// The digests are batched based on the limits, count and size, set on the gRPC call.
+// Errors from a batch do not affect other batches, but all digests from such bad batches will be reported as missing by this call.
+// In other words, if an error is returned, any digest that is not in the returned slice is not missing.
+// If no error is returned, the returned slice contains all the missing digests.
 func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
+	if len(digests) < 1 {
+		return nil, nil
+	}
+
 	if err := u.querySem.Acquire(ctx, 1); err != nil {
 		// err is always ctx.Err(), so abort immediately.
 		return nil, err
 	}
 	defer u.querySem.Release(1)
 
-	// req := &repb.FindMissingBlobsRequest{
-	// InstanceName: u.instanceName,
-	// BlobDigests:  make([]*repb.Digest, len(digests)),
-	// }
+	batches, err := batcher.Simple(len(digests), u.queryRpcConfig.ItemsLimit, int64(u.queryRpcConfig.BytesLimit), func(i int) int64 { return digests[i].Size })
+	if err != nil {
+		return nil, err
+	}
 
-	// for _, d := range digests {
-	// u.queryBundler.AddWait(ctx, d.ToProto(), int(d.Size))
-	// }
-	// u.queryBundler.Flush()
-	//
-	//
-	// return digestsFromProtos(res.MissingBlobDigests...), err
-	panic("not yet implemented")
+	var missing []digest.Digest
+	for _, batch := range batches {
+		selected := digests[batch[0] : batch[0]+len(batch)]
+		req := &repb.FindMissingBlobsRequest{
+			InstanceName: u.instanceName,
+			BlobDigests:  digestsToProtos(selected...),
+		}
+
+		var res *repb.FindMissingBlobsResponse
+		var errCall error
+		ctx, ctxCancel := context.WithCancel(ctx)
+		errCall = u.withTimeout(u.queryRpcConfig.Timeout, ctxCancel, func() error {
+			return u.withRetry(ctx, func() error {
+				res, errCall = u.cas.FindMissingBlobs(ctx, req)
+				return errCall
+			})
+		})
+		ctxCancel()
+
+		if errCall != nil {
+			err = errors.Join(ErrGRPC, errCall, err)
+			missing = append(missing, selected...)
+			continue
+		}
+		missing = append(missing, digestsFromProtos(res.MissingBlobDigests...)...)
+	}
+
+	return missing, err
 }
 
 // Upload deduplicates the specified blobs (unified uploads) and only uploads the ones that are not already in the CAS.
@@ -178,6 +204,9 @@ func (u *batchingUploader) Upload(ctx context.Context, blobs []blob.Blob, symlin
 
 // WriteBytes uploads all of the specified bytes directly to the specified resource name starting remotely at the specified offset.
 // If finish is true, the server is notified to finalize the resource name and further writes may not succeed.
+// The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
+// In the case were the returned stats indicate that all the bytes were sent, it is still not a guarantee all the bytes
+// were received by the server since an acknlowedgement was not observed.
 func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte, offset int64, finish bool) (Stats, error) {
 	stats := Stats{}
 
@@ -398,6 +427,14 @@ func digestsFromProtos(dprotots ...*repb.Digest) []digest.Digest {
 		ds[i] = digest.NewFromProtoUnvalidated(dp)
 	}
 	return ds
+}
+
+func digestsToProtos(digests ...digest.Digest) []*repb.Digest {
+	dp := make([]*repb.Digest, len(digests))
+	for i, d := range digests {
+		dp[i] = d.ToProto()
+	}
+	return dp
 }
 
 func newUploaderv2(

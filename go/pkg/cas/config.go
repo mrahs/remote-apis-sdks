@@ -44,15 +44,15 @@ const (
 // RPCCfg specifies the configuration for a gRPC endpoint.
 type RPCCfg struct {
 	// ConcurrentCallsLimit sets the upper bound of concurrent calls.
-  // Must be > 0.
+	// Must be > 0.
 	ConcurrentCallsLimit int
 
 	// BytesLimit sets the upper bound for the size of each request.
-  // Must be > 0.
+	// Must be > 0.
 	BytesLimit int
 
 	// ItemsLimit sets the upper bound for the number of items per request.
-  // Must be > 0.
+	// Must be > 0.
 	ItemsLimit int
 
 	// Timeout sets the upper bound of the total time spent processing a request.
@@ -64,36 +64,36 @@ type RPCCfg struct {
 // IOCfg specifies the configuration for IO operations.
 type IOCfg struct {
 	// OpenFilesLimit sets the upper bound for the number of files being simultanuously processed.
-  // Must be > 0.
+	// Must be > 0.
 	OpenFilesLimit int
 
 	// OpenLargeFilesLimit sets the upper bound for the number of large files being simultanuously processed.
-  // Must be > 0.
+	// Must be > 0.
 	// Open large files count towards OpenFilesLimit. I.e. thef following inequality is always effectively true:
 	// OpenFilesLimit >= OpenLargeFilesLimit
 	OpenLargeFilesLimit int
 
 	// SmallFileSizeThreshold sets the upper bound (inclusive) for the file size to be considered a small file.
 	// Such files are buffered entirely in memory.
-  // Must be >= 0.
+	// Must be >= 0.
 	SmallFileSizeThreshold int64
 
 	// LargeFileSizeThreshold sets the lower bound (inclusive) for the file size to be considered a large file.
 	// Such files are uploaded in chunks using the file streaming API.
-  // Must be >= 0.
+	// Must be >= 0.
 	LargeFileSizeThreshold int64
 
 	// CompressionSizeThreshold sets the lower bound for the chunk size before it is subject to compression.
 	// A value of 0 enables compression for any chunk size. To disable compression, use math.MaxInt64.
-  // Must >= 0.
+	// Must >= 0.
 	CompressionSizeThreshold int64
 
 	// BufferSize sets the buffer size for IO read/write operations.
-  // Must be > 0.
+	// Must be > 0.
 	BufferSize int64
 
 	// OptimizeForDiskLocality enables sorting files by path before they are written to disk to optimize for disk locality.
-  // Assuming files under the same directory are located close to each other on disk, the such files are batched together.
+	// Assuming files under the same directory are located close to each other on disk, the such files are batched together.
 	OptimizeForDiskLocality bool
 
 	// Cache is a read/write cache for file metadata.
@@ -152,7 +152,6 @@ type Stats struct {
 	BatchedCount int64
 
 	// StreamedCount is the number of streamed files.
-  // For methods that accept bytes, the value is 1 upon success, 0 otherwise.
+	// For methods that accept bytes, the value is 1 upon success, 0 otherwise.
 	StreamedCount int64
 }
-
