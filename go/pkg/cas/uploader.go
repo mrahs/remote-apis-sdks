@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/batcher"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/blob"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
@@ -21,7 +20,6 @@ import (
 	"github.com/pborman/uuid"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
-	"google.golang.org/api/support/bundler"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 )
 
@@ -43,6 +41,9 @@ var (
 
 	// ErrGRPC indicates an error in a gRPC routine.
 	ErrGRPC = errors.New("cas: grpc error")
+
+	// ErrOversizedBlob indicates a blob that is too large to fit into the set byte limit.
+	ErrOversizedBlob = errors.New("cas: oversized blob")
 )
 
 // MakeWriteResourceName returns a valid resource name for writing an uncompressed blob.
@@ -107,6 +108,25 @@ type UploadResponse struct {
 	Err    error
 }
 
+// missingBlobRequest associates a digest with tag the identifies the requester.
+type missingBlobRequest struct {
+	digest digest.Digest
+	tag    string
+}
+
+// missingBlobRequestBundle associates a digest with multiple tags.
+// It is used for unified requests when multiple concurrent requesters share seats
+// in the same bundle.
+type missingBlobRequestBundle = map[digest.Digest][]string
+
+// queryReceiver associates a context (used a control signal) with a channel
+// the requester can receive responses on.
+// When the context is done, the processor aborts all associated requests.
+type queryReceiver struct {
+	ctx context.Context
+	ch  chan MissingBlobsResponse
+}
+
 // uploader represents the state of an uploader implementation.
 type uploaderv2 struct {
 	cas          repb.ContentAddressableStorageClient
@@ -123,14 +143,16 @@ type uploaderv2 struct {
 	streamSem   *semaphore.Weighted
 	retryPolicy retry.BackoffPolicy
 
-	// Batching controls.
-	queryBundler  *bundler.Bundler
-	uploadBundler *bundler.Bundler
-
 	// IO controls.
 	ioCfg        IOCfg
 	buffers      sync.Pool
 	zstdEncoders sync.Pool
+
+	// Concurrency controls.
+	querier                 map[string]*queryReceiver
+	queryWaitGroup          sync.WaitGroup
+	queryReqChan            chan missingBlobRequest
+	queryReceiversWaitGroup sync.WaitGroup
 }
 
 // batchingUplodaer implements the corresponding interface.
@@ -145,7 +167,7 @@ type streamingUploader struct {
 
 // MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
 //
-// The digests are batched based on the limits, count and size, set on the gRPC call.
+// The digests are batched based on the set limits (count and size).
 // Errors from a batch do not affect other batches, but all digests from such bad batches will be reported as missing by this call.
 // In other words, if an error is returned, any digest that is not in the returned slice is not missing.
 // If no error is returned, the returned slice contains all the missing digests.
@@ -154,44 +176,36 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 		return nil, nil
 	}
 
-	if err := u.querySem.Acquire(ctx, 1); err != nil {
-		// err is always ctx.Err(), so abort immediately.
-		return nil, err
-	}
-	defer u.querySem.Release(1)
-
-	batches, err := batcher.Simple(len(digests), u.queryRpcConfig.ItemsLimit, int64(u.queryRpcConfig.BytesLimit), func(i int) int64 { return digests[i].Size })
-	if err != nil {
-		return nil, err
+	ctx, ctxCancel := context.WithCancel(ctx)
+	tag, resChan := u.registerQuerier(ctx)
+	for _, d := range digests {
+		u.queryReqChan <- missingBlobRequest{digest: d, tag: tag}
 	}
 
 	var missing []digest.Digest
-	for _, batch := range batches {
-		selected := digests[batch[0] : batch[0]+len(batch)]
-		req := &repb.FindMissingBlobsRequest{
-			InstanceName: u.instanceName,
-			BlobDigests:  digestsToProtos(selected...),
+	var err error
+	var total = len(digests)
+	var i = 0
+	for r := range resChan {
+		switch {
+		case r.Err != nil:
+			missing = append(missing, r.Digest)
+			// Don't join duplicate errors.
+			if !errors.Is(err, r.Err) {
+				err = errors.Join(r.Err, err)
+			}
+		case r.Missing:
+			missing = append(missing, r.Digest)
 		}
-
-		var res *repb.FindMissingBlobsResponse
-		var errCall error
-		ctx, ctxCancel := context.WithCancel(ctx)
-		errCall = u.withTimeout(u.queryRpcConfig.Timeout, ctxCancel, func() error {
-			return u.withRetry(ctx, func() error {
-				res, errCall = u.cas.FindMissingBlobs(ctx, req)
-				return errCall
-			})
-		})
-		ctxCancel()
-
-		if errCall != nil {
-			err = errors.Join(ErrGRPC, errCall, err)
-			missing = append(missing, selected...)
-			continue
+		i += 1
+		if i >= total {
+			ctxCancel()
+			break
 		}
-		missing = append(missing, digestsFromProtos(res.MissingBlobDigests...)...)
 	}
-
+	if i != total {
+		panic(fmt.Sprintf("invalid concurrent state: channel closed unexpectedly: got %d msgs, want %d", i, total))
+	}
 	return missing, err
 }
 
@@ -404,6 +418,161 @@ func (u *uploaderv2) withTimeout(timeout time.Duration, cancelFn context.CancelF
 	return fn()
 }
 
+// registerQuerier creates a new channel to send responses on.
+// Only requests associated with the returned tag are sent on the returned channel.
+func (u *uploaderv2) registerQuerier(ctx context.Context) (string, <-chan MissingBlobsResponse) {
+	tag := uuid.New()
+	rec := u.querier[tag]
+	if rec == nil {
+		rec = &queryReceiver{ctx: ctx, ch: make(chan MissingBlobsResponse)}
+		u.querier[tag] = rec
+	}
+
+	u.queryReceiversWaitGroup.Add(1)
+	go func() {
+		<-ctx.Done()
+		close(rec.ch)
+		delete(u.querier, tag)
+		u.queryReceiversWaitGroup.Done()
+	}()
+
+	return tag, rec.ch
+}
+
+// doQuery calls the gRPC endpoint and notifies queriers of the results.
+// It assumes ownership of the reqs argument.
+func (u *uploaderv2) doQuery(ctx context.Context, reqs missingBlobRequestBundle) {
+	u.queryWaitGroup.Add(1)
+	defer u.queryWaitGroup.Done()
+
+	digests := make([]*repb.Digest, len(reqs))
+	var oversized []digest.Digest
+	i := 0
+	for d := range reqs {
+		if d.Size > int64(u.queryRpcConfig.BytesLimit) {
+			oversized = append(oversized, d)
+			continue
+		}
+		digests[i] = d.ToProto()
+	}
+	req := &repb.FindMissingBlobsRequest{
+		InstanceName: u.instanceName,
+		BlobDigests:  digests,
+	}
+
+	var res *repb.FindMissingBlobsResponse
+	var err error
+	ctx, ctxCancel := context.WithCancel(ctx)
+	err = u.withTimeout(u.queryRpcConfig.Timeout, ctxCancel, func() error {
+		return u.withRetry(ctx, func() error {
+			res, err = u.cas.FindMissingBlobs(ctx, req)
+			return err
+		})
+	})
+	ctxCancel()
+
+	var missing []*repb.Digest
+	if err != nil {
+		err = errors.Join(ErrGRPC, err)
+		missing = append(missing, digests...)
+	} else {
+		missing = append(missing, res.MissingBlobDigests...)
+	}
+
+	notify := func(r MissingBlobsResponse, tags ...string) {
+		for _, tag := range tags {
+			q := u.querier[tag]
+			if q == nil {
+				continue
+			}
+			// Ignore if aborted.
+			select {
+			case <-q.ctx.Done():
+				continue
+			default:
+			}
+			q.ch <- r
+		}
+	}
+
+	// Reprot missing.
+	for _, dpb := range missing {
+		d := digest.NewFromProtoUnvalidated(dpb)
+		notify(MissingBlobsResponse{
+			Digest:  d,
+			Missing: true,
+			Err:     err,
+		}, reqs[d]...)
+		delete(reqs, d)
+	}
+
+	// Report non-missing.
+	for d := range reqs {
+		notify(MissingBlobsResponse{
+			Digest:  d,
+			Missing: false,
+			// This should always be nil at this point.
+			Err: err,
+		}, reqs[d]...)
+	}
+
+	// Report oversized blobs.
+	for _, d := range oversized {
+		notify(MissingBlobsResponse{
+			Digest: d,
+			Err:    ErrOversizedBlob,
+		}, reqs[d]...)
+	}
+}
+
+func (u *uploaderv2) queryProcessor(ctx context.Context) {
+	// Receive requests from multiple requesters.
+	// Bundle up items for the API.
+	// Associate every item with a list of requesters.
+
+	bundle := make(missingBlobRequestBundle)
+	var bundleSize int64
+
+	handle := func() {
+		// Block the entire processor if the concurrency limit is reached.
+		if err := u.querySem.Acquire(ctx, 1); err != nil {
+			// err is always ctx.Err(), so abort immediately.
+			return
+		}
+		defer u.querySem.Release(1)
+
+		go u.doQuery(ctx, bundle)
+
+		bundle = make(missingBlobRequestBundle)
+		bundleSize = 0
+	}
+
+	bundleTicker := time.NewTicker(time.Second)
+	defer bundleTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// TODO: clean up.
+			return
+		case req := <-u.queryReqChan:
+			// Check size threshold. Oversized items are handled downstream.
+			if bundleSize+req.digest.Size >= int64(u.queryRpcConfig.BytesLimit) {
+				handle()
+			}
+
+			bundle[req.digest] = append(bundle[req.digest], req.tag)
+			bundleSize += req.digest.Size
+			// Check length threshold.
+			if len(bundle) >= u.queryRpcConfig.ItemsLimit {
+				handle()
+				continue
+			}
+		case <-bundleTicker.C:
+			handle()
+		}
+	}
+}
+
 func isValidRpcCfg(cfg *RPCCfg) error {
 	if cfg.ConcurrentCallsLimit < 1 || cfg.ItemsLimit < 1 || cfg.BytesLimit < 1 {
 		return ErrZeroOrNegativeLimit
@@ -438,6 +607,7 @@ func digestsToProtos(digests ...digest.Digest) []*repb.Digest {
 }
 
 func newUploaderv2(
+	ctx context.Context,
 	cas repb.ContentAddressableStorageClient,
 	byteStream bspb.ByteStreamClient,
 	instanceName string,
@@ -460,25 +630,7 @@ func newUploaderv2(
 		return nil, err
 	}
 
-	zeroBlob := &blob.Blob{}
-
-	// TODO: bundler callback
-	queryBundler := bundler.NewBundler(&digest.Digest{}, func(digests interface{}) {
-
-	})
-	queryBundler.DelayThreshold = time.Second
-	queryBundler.BundleCountThreshold = queryCfg.ItemsLimit
-	queryBundler.BundleByteThreshold = queryCfg.BytesLimit
-	queryBundler.BufferedByteLimit = queryCfg.BytesLimit
-
-	// TODO: bundler callback
-	uploadBundler := bundler.NewBundler(zeroBlob, func(items interface{}) {})
-	uploadBundler.DelayThreshold = time.Second
-	uploadBundler.BundleCountThreshold = uploadCfg.ItemsLimit
-	uploadBundler.BundleByteThreshold = uploadCfg.BytesLimit
-	uploadBundler.BufferedByteLimit = uploadCfg.BytesLimit
-
-	return &uploaderv2{
+	u := &uploaderv2{
 		cas:          cas,
 		byteStream:   byteStream,
 		instanceName: instanceName,
@@ -491,9 +643,6 @@ func newUploaderv2(
 		uploadSem:   semaphore.NewWeighted(int64(uploadCfg.ConcurrentCallsLimit)),
 		streamSem:   semaphore.NewWeighted(int64(streamCfg.ConcurrentCallsLimit)),
 		retryPolicy: retryPolicy,
-
-		queryBundler:  queryBundler,
-		uploadBundler: uploadBundler,
 
 		ioCfg: ioCfg,
 		buffers: sync.Pool{
@@ -512,19 +661,23 @@ func newUploaderv2(
 				return enc
 			},
 		},
-	}, nil
+	}
+
+	go u.queryProcessor(ctx)
+	return u, nil
 }
 
 // NewBatchingUploader creates a new instance of the batching uploader interface.
 // The specified configs must be compatbile with the capabilities of the server
 // which the specified clients are connected to.
 func NewBatchingUploader(
+	ctx context.Context,
 	cas repb.ContentAddressableStorageClient,
 	byteStream bspb.ByteStreamClient,
 	instanceName string,
 	queryCfg, uploadCfg, streamCfg RPCCfg, ioCfg IOCfg,
 	retryPolicy retry.BackoffPolicy) (BatchingUploader, error) {
-	uploader, err := newUploaderv2(cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg, retryPolicy)
+	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg, retryPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -535,12 +688,13 @@ func NewBatchingUploader(
 // The specified configs must be compatbile with the capabilities of the server
 // which the specified clients are connected to.
 func NewStreamingUploader(
+	ctx context.Context,
 	cas repb.ContentAddressableStorageClient,
 	byteStream bspb.ByteStreamClient,
 	instanceName string,
 	queryCfg, uploadCfg, streamCfg RPCCfg, ioCfg IOCfg,
 	retryPolicy retry.BackoffPolicy) (StreamingUploader, error) {
-	uploader, err := newUploaderv2(cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg, retryPolicy)
+	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg, retryPolicy)
 	if err != nil {
 		return nil, err
 	}

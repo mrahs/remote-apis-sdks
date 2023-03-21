@@ -49,6 +49,7 @@ type RPCCfg struct {
 
 	// BytesLimit sets the upper bound for the size of each request.
 	// Must be > 0.
+	// This is defined as int rather than int64 because gRPC uses int for its limit.
 	BytesLimit int
 
 	// ItemsLimit sets the upper bound for the number of items per request.
