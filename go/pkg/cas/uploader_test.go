@@ -142,6 +142,29 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 	_ = u.Close()
 }
 
+func TestBatching_MissingBlobsAbort(t *testing.T) {
+	cas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+		return &repb.FindMissingBlobsResponse{}, nil
+	}}
+	u, err := NewBatchingUploader(context.Background(), cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+	if err != nil {
+		t.Fatalf("error creating batching uploader: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	// Canceling the context before using it should get the sending goroutine to abort.
+	cancel()
+	digests := []digest.Digest{{Hash: "a"}, {Hash: "b"}, {Hash: "c"}}
+	missing, err := u.MissingBlobs(ctx, digests)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error mismatch: got %v, want %v", err, context.Canceled)
+	}
+	// No need to sort since the input as is should be returned.
+	if diff := cmp.Diff(digests, missing); diff != "" {
+		t.Errorf("missing mismatch, (-want +got): %s", diff)
+	}
+	_ = u.Close()
+}
+
 func TestStreaming_MissingBlobs(t *testing.T) {
 	cas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
@@ -159,9 +182,12 @@ func TestStreaming_MissingBlobs(t *testing.T) {
 		}
 		close(reqChan)
 	}()
+
+	// It's not necessary to receive in a separate goroutine, but this allows
+	// for testing the Close() as well, which should block until all concurrent code is properly terminated.
 	go func() {
 		for r := range ch {
-			if r.Err == nil {
+			if r.Err != nil {
 				t.Errorf("unexpected error: %v", r.Err)
 			}
 			if r.Missing {

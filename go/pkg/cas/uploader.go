@@ -148,12 +148,14 @@ type uploaderv2 struct {
 	// Concurrency controls.
 
 	// queryReqChan is the fan-in channel for queries.
+	// This channel is deliberately not closed to avoid send-on-closed-channel errors.
 	// All senders must also listen on the context to avoid deadlocks.
 	queryReqChan chan missingBlobRequest
 	// grpcWaitGroup is used to wait for in-flight gRPC calls upon graceful termination.
 	grpcWaitGroup sync.WaitGroup
 	// querier is set of active queriers and their associated channels.
-	querier sync.Map
+	querier      map[string]*querier
+	querierMutex sync.Mutex
 	// querierWaitGroup is used to wait for in-flight receivers upon graceful termination.
 	querierWaitGroup sync.WaitGroup
 }
@@ -179,6 +181,10 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 		return nil, nil
 	}
 
+	// This implementation converts the underlying nonblocking implementation into a blocking one.
+	// A separate goroutine is used to push the requests into the processor.
+	// The receiving code blocks the goroutine of the call until all responses are received or the context is canceled.
+
 	ctxQuerier, ctxQuerierCancel := context.WithCancel(ctx)
 	defer ctxQuerierCancel()
 
@@ -202,6 +208,7 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 		case r.Err != nil:
 			missing = append(missing, r.Digest)
 			// Don't join the same error from a batch more than once.
+			// This may not prevent similar errors from multiple batches sine errors.Is does not necessarily match by content.
 			if !errors.Is(err, r.Err) {
 				err = errors.Join(r.Err, err)
 			}
@@ -211,7 +218,7 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 		i += 1
 		if i >= total {
 			ctxQuerierCancel()
-			break
+			// It's tempting to break here, but the channel must be drained until the processor closes it.
 		}
 	}
 
@@ -391,32 +398,75 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 }
 
 // MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
-// It starts concurrent two goruotines, one for reading from the input channel, and one for sending on the returned channel.
-// The receiver goroutine terminates when the context is done.
-// The sender goroutine terminates when the processor has completed all the related requests.
-// The returned channel is closed when the sender goroutine terminates.
+//
+// The caller must close the specified input channel as a termination signal.
+// The returned channel is closed when no more responses are available for this call. This could indicate
+// completion or abortion (in case the context was canceled).
 func (u *streamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
+	// The implementation here acts like a pipe with a count-based coordinator.
+	// Closing the input channel should not close the pipe until all the requests are piped through to the responses channel.
+	// At the same time, all goroutines must abort when the context is done.
+	// To ahcieve this, a third goroutine (in addition to a sender and a receiver) is used to maintain a count of pending requests.
+	// Once the count is reduced to zero after the sender is done, the receiver is closed and the processor is notified to unregister this querier.
+
 	ch := make(chan MissingBlobsResponse)
 	ctxQuerier, ctxQuerierCancel := context.WithCancel(ctx)
 	tag, resChan := u.registerQuerier(ctxQuerier)
 
+	// Counter.
+	pending := 0
+	pendingChan := make(chan int)
+	u.querierWaitGroup.Add(1)
 	go func() {
+		defer u.querierWaitGroup.Done()
+		defer ctxQuerierCancel()
+		done := false
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case x := <-pendingChan: // The channel is never closed so no need to capture the closing signal.
+				if x == 0 {
+					done = true
+				}
+				pending += x
+				if pending == 0 && done {
+					return
+				}
+			}
+		}
+	}()
+
+	// Receiver.
+	u.querierWaitGroup.Add(1)
+	go func() {
+		defer u.querierWaitGroup.Done()
+		// Continue to drain until the processor closes the channel to avoid deadlocks.
 		for r := range resChan {
 			ch <- r
+			pendingChan <- -1
 		}
 		close(ch)
 	}()
 
+	// Sender.
+	u.querierWaitGroup.Add(1)
 	go func() {
-		defer ctxQuerierCancel()
-		for d := range in {
+		defer u.querierWaitGroup.Done()
+		for {
 			select {
 			case <-ctx.Done():
+				ctxQuerierCancel()
 				return
-			case u.queryReqChan <- missingBlobRequest{digest: d, tag: tag}:
+			case d, ok := <-in:
+				if !ok {
+					pendingChan <- 0
+					return
+				}
+				u.queryReqChan <- missingBlobRequest{digest: d, tag: tag}
+				pendingChan <- 1
 			}
 		}
-		// TODO: closing the input channel shouldn't apport in-flight requests.
 	}()
 
 	return ch
@@ -468,23 +518,53 @@ func (u *uploaderv2) withTimeout(timeout time.Duration, cancelFn context.CancelF
 	return fn()
 }
 
-// registerQuerier creates a new channel to send responses on.
+// registerQuerier returns a new channel to the caller to read responses from.
+//
 // Only requests associated with the returned tag are sent on the returned channel.
+//
+// The returned channel is closed when the specified context is done. The caller should
+// ensure the context is canceled at the right time to avoid send-on-closed-channel errors
+// and avoid deadlocks.
+//
+// The caller must continue to drain the returned channel until it is closed to avoid deadlocks.
 func (u *uploaderv2) registerQuerier(ctx context.Context) (string, <-chan MissingBlobsResponse) {
 	tag := uuid.New()
-	q := &querier{ctx: ctx, ch: make(chan MissingBlobsResponse)}
-	u.querier.Store(tag, q)
+
+	// Serialize this block to avoid concurrent map-read-write errors.
+	u.querierMutex.Lock()
+	q, ok := u.querier[tag]
+	if !ok {
+		q = &querier{ctx: ctx, ch: make(chan MissingBlobsResponse)}
+		u.querier[tag] = q
+	}
+	u.querierMutex.Unlock()
 
 	u.querierWaitGroup.Add(1)
 	go func() {
 		<-ctx.Done()
-		u.querier.Delete(tag)
-		// Close after deleting the querier to ensure exclusive access to channel.
+		// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
+		u.querierMutex.Lock()
+		delete(u.querier, tag)
+		u.querierMutex.Unlock()
+
 		close(q.ch)
 		u.querierWaitGroup.Done()
 	}()
 
 	return tag, q.ch
+}
+
+func (u *uploaderv2) notifyQueriers(r MissingBlobsResponse, tags ...string) {
+	for _, tag := range tags {
+		// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
+		u.querierMutex.Lock()
+		q, ok := u.querier[tag]
+		if ok {
+			// Possible deadlock if the receiver had abandoned the channel.
+			q.ch <- r
+		}
+		u.querierMutex.Unlock()
+	}
 }
 
 // callMissingBlobs calls the gRPC endpoint and notifies queriers of the results.
@@ -587,7 +667,12 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 
 	for {
 		select {
-		case req := <-u.queryReqChan:
+		case req, ok := <-u.queryReqChan:
+			if !ok {
+				// This should never happen since this channel is never closed.
+				return
+			}
+
 			// Check size threshold. Oversized items are handled downstream.
 			if bundleSize+req.digest.Size >= int64(u.queryRpcConfig.BytesLimit) {
 				handle()
@@ -608,19 +693,6 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 			// The only things that might still be in-flight are the gRPC calls, which will eventually terminate since
 			// there are no active queriers.
 			return
-		}
-	}
-}
-
-func (u *uploaderv2) notifyQueriers(r MissingBlobsResponse, tags ...string) {
-	for _, tag := range tags {
-		rawQ, ok := u.querier.Load(tag)
-		if !ok {
-			continue
-		}
-		if q, ok := rawQ.(*querier); ok {
-			// TODO: channel may be closed.
-			q.ch <- r
 		}
 	}
 }
@@ -728,7 +800,7 @@ func newUploaderv2(
 
 		queryReqChan:     make(chan missingBlobRequest),
 		grpcWaitGroup:    sync.WaitGroup{},
-		querier:          sync.Map{},
+		querier:          map[string]*querier{},
 		querierWaitGroup: sync.WaitGroup{},
 	}
 
