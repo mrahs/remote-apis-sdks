@@ -5,14 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/batcher"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
+
+	// repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/google/go-cmp/cmp"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/grpc"
@@ -22,10 +24,11 @@ import (
 
 var (
 	rpcCfg = RPCCfg{
-		ConcurrentCallsLimit: 1,
-		ItemsLimit:           1,
+		ConcurrentCallsLimit: 5,
+		ItemsLimit:           2,
 		BytesLimit:           1024,
 		Timeout:              time.Second,
+		BundleTimeout:        time.Millisecond,
 	}
 	ioCfg = IOCfg{
 		OpenFilesLimit:           1,
@@ -35,11 +38,12 @@ var (
 		CompressionSizeThreshold: 10,
 		BufferSize:               2,
 	}
-	errWrite   = fmt.Errorf("write error")
-	errSend    = fmt.Errorf("send error")
-	errClose   = fmt.Errorf("close error")
-	retryNever = retry.Immediately(retry.Attempts(0))
-	retryTwice = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
+	largeDigest = digest.Digest{Size: 2048}
+	errWrite    = fmt.Errorf("write error")
+	errSend     = fmt.Errorf("send error")
+	errClose    = fmt.Errorf("close error")
+	retryNever  = retry.Immediately(retry.Attempts(0))
+	retryTwice  = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
 )
 
 func TestBatching_MissingBlobs(t *testing.T) {
@@ -51,7 +55,7 @@ func TestBatching_MissingBlobs(t *testing.T) {
 		wantDigests []digest.Digest
 	}{
 		{"empty_request", nil, &fakeCAS{}, nil, nil},
-		{"bad_batch", []digest.Digest{{Size: 2048}}, &fakeCAS{}, batcher.ErrItemTooLarge, nil},
+		{"bad_batch", []digest.Digest{largeDigest}, &fakeCAS{}, ErrOversizedBlob, []digest.Digest{largeDigest}},
 		{
 			"no_missing",
 			[]digest.Digest{{Hash: "a"}, {Hash: "b"}},
@@ -71,6 +75,15 @@ func TestBatching_MissingBlobs(t *testing.T) {
 			[]digest.Digest{{Hash: "a"}, {Hash: "b"}},
 		},
 		{
+			"some_missing",
+			[]digest.Digest{{Hash: "a"}, {Hash: "b"}},
+			&fakeCAS{findMissingBlobs: func(_ context.Context, req *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+				return &repb.FindMissingBlobsResponse{MissingBlobDigests: []*repb.Digest{{Hash: "a"}}}, nil
+			}},
+			nil,
+			[]digest.Digest{{Hash: "a"}},
+		},
+		{
 			"error_call",
 			[]digest.Digest{{Hash: "a"}, {Hash: "b"}},
 			&fakeCAS{findMissingBlobs: func(_ context.Context, req *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
@@ -82,8 +95,10 @@ func TestBatching_MissingBlobs(t *testing.T) {
 	}
 
 	for _, test := range tests {
+		test := test
 		t.Run(test.name, func(t *testing.T) {
-			u, err := NewBatchingUploader(test.cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+			t.Parallel()
+			u, err := NewBatchingUploader(context.Background(), test.cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
@@ -94,11 +109,67 @@ func TestBatching_MissingBlobs(t *testing.T) {
 			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
 				t.Errorf("error mismatch: got %v, want %v", err, test.wantErr)
 			}
+			sort.Sort(byHash(test.wantDigests))
+			sort.Sort(byHash(missing))
 			if diff := cmp.Diff(test.wantDigests, missing); diff != "" {
-				t.Errorf("stats mismatch, (-want +got): %s", diff)
+				t.Errorf("missing mismatch, (-want +got): %s", diff)
 			}
+			_ = u.Close()
 		})
 	}
+}
+
+func TestBatching_MissingBlobsConcurrent(t *testing.T) {
+	cas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+		return &repb.FindMissingBlobsResponse{}, nil
+	}}
+	u, err := NewBatchingUploader(context.Background(), cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+	if err != nil {
+		t.Fatalf("error creating batching uploader: %v", err)
+	}
+	digests := []digest.Digest{{Hash: "a"}, {Hash: "b"}, {Hash: "c"}}
+	for i := 0; i < 100; i++ {
+		go func() {
+			missing, err := u.MissingBlobs(context.Background(), digests)
+			if err != nil {
+				t.Errorf("MissingBlobs failed: %v", err)
+			}
+			if len(missing) > 0 {
+				t.Errorf("missing found: %d", len(missing))
+			}
+		}()
+	}
+	_ = u.Close()
+}
+
+func TestStreaming_MissingBlobs(t *testing.T) {
+	cas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+		return &repb.FindMissingBlobsResponse{}, nil
+	}}
+	u, err := NewStreamingUploader(context.Background(), cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+	if err != nil {
+		t.Fatalf("error creating batching uploader: %v", err)
+	}
+	reqChan := make(chan digest.Digest)
+	ch := u.MissingBlobs(context.Background(), reqChan)
+
+	go func() {
+		for i := 0; i < 1000; i++ {
+			reqChan <- digest.Digest{Hash: "a"}
+		}
+		close(reqChan)
+	}()
+	go func() {
+		for r := range ch {
+			if r.Err == nil {
+				t.Errorf("unexpected error: %v", r.Err)
+			}
+			if r.Missing {
+				t.Errorf("unexpected missing: %s", r.Digest.Hash)
+			}
+		}
+	}()
+	_ = u.Close()
 }
 
 func TestBatching_WriteBytes(t *testing.T) {
@@ -287,11 +358,13 @@ func TestBatching_WriteBytes(t *testing.T) {
 	}
 
 	for _, test := range tests {
+		test := test
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			if test.retryPolicy == nil {
 				test.retryPolicy = &retryNever
 			}
-			u, err := NewBatchingUploader(&fakeCAS{}, test.bs, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, *test.retryPolicy)
+			u, err := NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, *test.retryPolicy)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
@@ -339,4 +412,16 @@ func (s *fakeByteStream_WriteClient) CloseAndRecv() (*bspb.WriteResponse, error)
 		return s.closeAndRecv()
 	}
 	return &bspb.WriteResponse{}, nil
+}
+
+type byHash []digest.Digest
+
+func (a byHash) Len() int {
+	return len(a)
+}
+func (a byHash) Swap(i, j int) {
+	a[i], a[j] = a[j], a[i]
+}
+func (a byHash) Less(i, j int) bool {
+	return a[i].Hash < a[j].Hash
 }

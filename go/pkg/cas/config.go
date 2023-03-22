@@ -56,6 +56,12 @@ type RPCCfg struct {
 	// Must be > 0.
 	ItemsLimit int
 
+	// BundleTimeout sets the maximum duration a call is held while bundling.
+	// Bundling is used to ammortize the cost of a gRPC call over time. Instead of sending
+	// many requests with few items, bunlding attempt to maximize the number of items sent in a single request.
+	// This includes waiting for a bit to see if more items are requested.
+	BundleTimeout time.Duration
+
 	// Timeout sets the upper bound of the total time spent processing a request.
 	// For streaming calls, this applies to each Send/Recv call individually, not the whole streaming session.
 	// This does not take into account the time it takes to abort the request upon timeout.
