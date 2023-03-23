@@ -28,7 +28,7 @@ func TestBatcher(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			bs, err := Make(test.count, test.length, test.size, test.sizefn)
+			bs, err := Simple(test.count, test.length, test.size, test.sizefn)
 			if !errors.Is(err, test.wantErr) {
 				t.Errorf("error mismatch: got %v, want %v", err, test.wantErr)
 			}

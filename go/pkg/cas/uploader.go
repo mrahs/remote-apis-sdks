@@ -1,7 +1,6 @@
 package cas
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,13 +11,11 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/blob"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
-	iow "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/wrappers"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pborman/uuid"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 )
@@ -67,9 +64,9 @@ type BatchingUploader interface {
 	// Returns a slice of the digests of the uploaded blobs, excluding the ones that already exist in the CAS.
 	Upload(context.Context, []blob.Blob, symlinkopts.Opts, ep.Predicate) ([]digest.Digest, Stats, error)
 
-	// WriteBytes uploads all of the specified bytes directly to the specified resource name starting remotely at the specified offset.
+	// WriteBytes uploads all the bytes of the specified reader directly to the specified resource name starting remotely at the specified offset.
 	// If finish is true, the server is notified to finalize the resource name and no further writes are allowed.
-	WriteBytes(ctx context.Context, name string, bytes []byte, offset int64, finish bool) (Stats, error)
+	WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error)
 }
 
 // StreamingUploader provides a concurrency friendly API to upload to the CAS.
@@ -84,12 +81,6 @@ type StreamingUploader interface {
 	// Errors related to particular items are reported as part of their result.
 	// During the lifetime of the call, digests are cached to avoid duplicate uploads (unified uploads).
 	Upload(context.Context, <-chan blob.Blob, symlinkopts.Opts, ep.Predicate) (<-chan UploadResponse, error)
-
-	// WriteBytes is a blocking call that uploads incoming bytes to the CAS at the specified resource name starting remotely at the specified offset.
-	// It returns when the context is done, the input channel is closed, or a fatal error occurs.
-	// Each outgoing integer value corresponds with an incoming item and represents the total bytes moved over the wire while streaming the bytes. This may be higher (retries) or lower (interrupted) than the number of incoming bytes.
-	// If finish is true, the server is notified to finalize the resource name and no further writes are allowed.
-	WriteBytes(ctx context.Context, name string, bytesChan <-chan []byte, offset int64, finish bool) (<-chan int64, error)
 }
 
 // MissingBlobsResponse represents a query result for a single digest.
@@ -242,12 +233,13 @@ func (u *batchingUploader) Upload(ctx context.Context, blobs []blob.Blob, symlin
 	panic("not yet implemented")
 }
 
-// WriteBytes uploads all of the specified bytes directly to the specified resource name starting remotely at the specified offset.
+// WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
+// The specified size is used to toggle compression as well as report some stats. It must be reflect the actual number of bytes the specified reader has to give.
 // If finish is true, the server is notified to finalize the resource name and further writes may not succeed.
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
-// In the case were the returned stats indicate that all the bytes were sent, it is still not a guarantee all the bytes
+// In case of error while the returned stats indicate that all the bytes were sent, it is still not a guarantee all the bytes
 // were received by the server since an acknlowedgement was not observed.
-func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte, offset int64, finish bool) (Stats, error) {
+func (u *batchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error) {
 	stats := Stats{}
 
 	if err := u.streamSem.Acquire(ctx, 1); err != nil {
@@ -256,12 +248,13 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 	}
 	defer u.streamSem.Release(1)
 
-	rawBytesReader := iow.NewBytesReadCloser(bytes.NewReader(b))
-	var src io.ReadCloser = rawBytesReader
-	eg, ctx := errgroup.WithContext(ctx)
+	var src = r
 
 	// If compression is enabled, plug in the encoder via a pipe.
-	if len(b) >= int(u.ioCfg.CompressionSizeThreshold) {
+	var errCompr error
+	var nRawBytes int64
+	var encWg sync.WaitGroup
+	if size >= u.ioCfg.CompressionSizeThreshold {
 		pr, pw := io.Pipe()
 		// Closing pr always returns a nil error, but also sends ErrClosedPipe to pw.
 		defer pr.Close()
@@ -272,7 +265,9 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 		// (Re)initialize the encoder with this writer.
 		enc.Reset(pw)
 		// Get it going.
-		eg.Go(func() (errCompr error) {
+		encWg.Add(1)
+		go func() {
+			defer encWg.Done()
 			// Closing pw always returns a nil error, but also sends an EOF to pr.
 			defer pw.Close()
 
@@ -286,16 +281,16 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 			// The encoder will theoretically read continuously. However, pw will block it
 			// while pr is not reading from the other side.
 			// In other words, the chunk size of the encoder's output is controlled by the reader.
-			switch _, errEnc := enc.ReadFrom(rawBytesReader); {
+			var errEnc error
+			switch nRawBytes, errEnc = enc.ReadFrom(r); {
 			case errEnc == io.ErrClosedPipe:
 				// pr was closed first, which means the actual error is on that end.
-				return nil
+				return
 			case errEnc != nil:
-				return errors.Join(ErrCompression, errEnc)
+				errCompr = errors.Join(ErrCompression, errEnc)
+				return
 			}
-
-			return nil
-		})
+		}()
 	}
 
 	ctx, ctxCancel := context.WithCancel(ctx)
@@ -306,17 +301,15 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 		return stats, errors.Join(ErrGRPC, errStream)
 	}
 
-	req := &bspb.WriteRequest{
-		ResourceName: name,
-		FinishWrite:  finish,
-		WriteOffset:  0,
-	}
-
 	buf := u.buffers.Get().([]byte)
 	defer u.buffers.Put(buf)
 
 	cacheHit := false
 	var err error
+	req := &bspb.WriteRequest{
+		ResourceName: name,
+		WriteOffset:  offset,
+	}
 	for {
 		n, errRead := src.Read(buf)
 		if errRead != nil && errRead != io.EOF {
@@ -324,11 +317,15 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 			break
 		}
 
+		n64 := int64(n)
+		stats.LogicalBytesMoved += n64 // This may be adjusted later to exclude compression. See below.
+		stats.EffectiveBytesMoved += n64
+
 		req.Data = buf[:n]
-		stats.BytesAttempted += int64(n)
+		req.FinishWrite = finish && errRead == io.EOF
 		errStream := u.withTimeout(u.streamRpcConfig.Timeout, ctxCancel, func() error {
 			return u.withRetry(ctx, func() error {
-				stats.BytesMoved += int64(n)
+				stats.TotalBytesMoved += n64
 				return stream.Send(req)
 			})
 		})
@@ -337,13 +334,13 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 			break
 		}
 
-		// The server thinks it already has the content for the specified resource.
+		// The server says the content for the specified resource already exists.
 		if errStream == io.EOF {
 			cacheHit = true
 			break
 		}
 
-		req.WriteOffset += int64(n)
+		req.WriteOffset += n64
 
 		// The reader is done (all bytes processed or interrupted).
 		if errRead == io.EOF {
@@ -352,25 +349,32 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 	}
 
 	// Close the reader to signal to the encoder's goroutine to terminate.
-	if errClose := src.Close(); errClose != nil {
-		err = errors.Join(ErrIO, errClose, err)
+	if srcCloser, ok := src.(io.Closer); ok {
+		if errClose := srcCloser.Close(); errClose != nil {
+			err = errors.Join(ErrIO, errClose, err)
+		}
 	}
 
-	// Check if the encoder sent EOF due to an error.
 	// This theoratically will block until the encoder's goroutine returns.
 	// However, closing the reader eventually terminates that goroutine.
-	if errEnc := eg.Wait(); errEnc != nil {
-		err = errors.Join(ErrCompression, errEnc, err)
+	// This is necessary because the encoder's goroutine currently owns errCompr and nRawBytes.
+	encWg.Wait()
+	if errCompr != nil {
+		err = errors.Join(ErrCompression, errCompr, err)
 	}
 
+	stats.BytesRequested = size
 	// Capture stats before processing errors.
-	stats.BytesRequesetd = int64(len(b))
-	stats.LogicalBytesMoved = int64(len(b) - rawBytesReader.Len())
-	if cacheHit {
-		stats.BytesCached = stats.BytesRequesetd
+	if nRawBytes > 0 {
+		// Compression was turned on.
+		// nRawBytes may be smaller than compressed bytes (additional headers without effective compression).
+		stats.LogicalBytesMoved = nRawBytes
 	}
-	stats.BytesStreamed = stats.LogicalBytesMoved
-	stats.BytesBatched = 0
+	if cacheHit {
+		stats.LogicalBytesCached = size
+	}
+	stats.LogicalBytesStreamed = stats.LogicalBytesMoved
+	stats.LogicalBytesBatched = 0
 	stats.InputFileCount = 0
 	stats.InputDirCount = 0
 	stats.InputSymlinkCount = 0
@@ -390,8 +394,8 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, b []byte
 		return stats, errors.Join(ErrGRPC, errClose, err)
 	}
 
-	if !cacheHit && res.CommittedSize != stats.BytesAttempted {
-		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, stats.BytesAttempted), err)
+	if !cacheHit && res.CommittedSize != stats.EffectiveBytesMoved {
+		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, stats.EffectiveBytesMoved), err)
 	}
 
 	return stats, err
@@ -478,14 +482,6 @@ func (u *streamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 // Errors related to particular items are reported as part of their result.
 // During the lifetime of the call, digests are cached to avoid duplicate uploads (unified uploads).
 func (u *streamingUploader) Upload(context.Context, <-chan blob.Blob, symlinkopts.Opts, ep.Predicate) (<-chan UploadResponse, error) {
-	panic("not yet implemented")
-}
-
-// WriteBytes is a blocking call that uploads incoming bytes to the CAS at the specified resource name starting remotely at the specified offset.
-// It returns when the context is done, the input channel is closed, or a fatal error occurs.
-// Each outgoing integer value corresponds with an incoming item and represents the total bytes moved over the wire while streaming the bytes. This may be higher (retries) or lower (interrupted) than the number of incoming bytes.
-// If finish is true, the server is notified to finalize the resource name and no further writes are allowed.
-func (u *streamingUploader) WriteBytes(ctx context.Context, name string, bytesChan <-chan []byte, offset int64, finish bool) (<-chan int64, error) {
 	panic("not yet implemented")
 }
 

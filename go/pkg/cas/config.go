@@ -110,32 +110,32 @@ type IOCfg struct {
 // Stats represents potential metrics reported by various methods.
 // Not all fields are populated by every method.
 type Stats struct {
-	// BytesRequesetd is the total number of bytes in a request.
+	// BytesRequested is the total number of bytes in a request.
 	// It does not necessarily equal the total number of bytes uploaded/downloaded.
-	BytesRequesetd int64
+	BytesRequested int64
 
 	// LogicalBytesMoved is the amount of BytesRequsted that was processed.
 	// It cannot be larger than BytesRequested, but may be smaller in case of a partial response.
 	LogicalBytesMoved int64
 
-	// BytesMoved is the total number of bytes moved over the wire.
+	// TotalBytesMoved is the total number of bytes moved over the wire.
 	// It may be larger than (retries) or smaller than BytesRequested (compression, cache hits or partial response).
-	BytesMoved int64
+	TotalBytesMoved int64
 
-	// BytesAttempted is the total number of bytes moved over the wire, excluding retries.
+	// EffectiveBytesMoved is the total number of bytes moved over the wire, excluding retries.
 	// It may be higher than BytesRequested (compression headers), but never higher than BytesMoved.
-	BytesAttempted int64
+	EffectiveBytesMoved int64
 
-	// BytesCached is the total number of bytes not moved over the wire due to caching (either remotely or locally).
-	BytesCached int64
+	// LogicalBytesCached is the total number of bytes not moved over the wire due to caching (either remotely or locally).
+	LogicalBytesCached int64
 
-	// BytesStreamed is the total number of logical bytes moved by the streaming API.
+	// LogicalBytesStreamed is the total number of logical bytes moved by the streaming API.
 	// It may be larger than (retries) or smaller than (cache hits or partial response) than the requested size.
-	BytesStreamed int64
+	LogicalBytesStreamed int64
 
-	// BytesBatched is the total number of logical bytes moved by the batching API.
+	// LogicalBytesBatched is the total number of logical bytes moved by the batching API.
 	// It may be larger than (retries) or smaller than (cache hits or partial response) the requested size.
-	BytesBatched int64
+	LogicalBytesBatched int64
 
 	// InputFileCount is the number of processed regular files.
 	InputFileCount int64

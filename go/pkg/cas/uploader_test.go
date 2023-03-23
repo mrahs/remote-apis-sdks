@@ -1,6 +1,8 @@
-package cas
+// Using a different package name to strictly exclude types defined here from the original package.
+package cas_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,11 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-
-	// repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/google/go-cmp/cmp"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/grpc"
@@ -23,14 +24,14 @@ import (
 )
 
 var (
-	rpcCfg = RPCCfg{
+	rpcCfg = cas.RPCCfg{
 		ConcurrentCallsLimit: 5,
 		ItemsLimit:           2,
 		BytesLimit:           1024,
 		Timeout:              time.Second,
 		BundleTimeout:        time.Millisecond,
 	}
-	ioCfg = IOCfg{
+	ioCfg = cas.IOCfg{
 		OpenFilesLimit:           1,
 		OpenLargeFilesLimit:      1,
 		SmallFileSizeThreshold:   1,
@@ -55,7 +56,7 @@ func TestBatching_MissingBlobs(t *testing.T) {
 		wantDigests []digest.Digest
 	}{
 		{"empty_request", nil, &fakeCAS{}, nil, nil},
-		{"bad_batch", []digest.Digest{largeDigest}, &fakeCAS{}, ErrOversizedBlob, []digest.Digest{largeDigest}},
+		{"bad_batch", []digest.Digest{largeDigest}, &fakeCAS{}, cas.ErrOversizedBlob, []digest.Digest{largeDigest}},
 		{
 			"no_missing",
 			[]digest.Digest{{Hash: "a"}, {Hash: "b"}},
@@ -98,7 +99,7 @@ func TestBatching_MissingBlobs(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			u, err := NewBatchingUploader(context.Background(), test.cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+			u, err := cas.NewBatchingUploader(context.Background(), test.cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
@@ -120,10 +121,10 @@ func TestBatching_MissingBlobs(t *testing.T) {
 }
 
 func TestBatching_MissingBlobsConcurrent(t *testing.T) {
-	cas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
-	u, err := NewBatchingUploader(context.Background(), cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+	u, err := cas.NewBatchingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
@@ -143,10 +144,10 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 }
 
 func TestBatching_MissingBlobsAbort(t *testing.T) {
-	cas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
-	u, err := NewBatchingUploader(context.Background(), cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+	u, err := cas.NewBatchingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
@@ -166,10 +167,10 @@ func TestBatching_MissingBlobsAbort(t *testing.T) {
 }
 
 func TestStreaming_MissingBlobs(t *testing.T) {
-	cas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
-	u, err := NewStreamingUploader(context.Background(), cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+	u, err := cas.NewStreamingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
@@ -203,8 +204,10 @@ func TestBatching_WriteBytes(t *testing.T) {
 		name        string
 		bs          *fakeByteStreamClient
 		b           []byte
+		offset      int64
+		finish      bool
 		wantErr     error
-		wantStats   Stats
+		wantStats   cas.Stats
 		retryPolicy *retry.BackoffPolicy
 	}{
 		{
@@ -225,14 +228,14 @@ func TestBatching_WriteBytes(t *testing.T) {
 			},
 			b:       []byte("abs"),
 			wantErr: nil,
-			wantStats: Stats{
-				BytesRequesetd:    3,
-				BytesAttempted:    3,
-				BytesMoved:        3,
-				LogicalBytesMoved: 3,
-				BytesStreamed:     3,
-				CacheMissCount:    1,
-				StreamedCount:     1,
+			wantStats: cas.Stats{
+				BytesRequested:       3,
+				EffectiveBytesMoved:  3,
+				TotalBytesMoved:      3,
+				LogicalBytesMoved:    3,
+				LogicalBytesStreamed: 3,
+				CacheMissCount:       1,
+				StreamedCount:        1,
 			},
 		},
 		{
@@ -253,14 +256,14 @@ func TestBatching_WriteBytes(t *testing.T) {
 			},
 			b:       []byte(strings.Repeat("abcdefg", 500)),
 			wantErr: nil,
-			wantStats: Stats{
-				BytesRequesetd:    3500,
-				BytesAttempted:    29,
-				BytesMoved:        29,
-				LogicalBytesMoved: 3500,
-				BytesStreamed:     3500,
-				CacheMissCount:    1,
-				StreamedCount:     1,
+			wantStats: cas.Stats{
+				BytesRequested:       3500,
+				EffectiveBytesMoved:  29,
+				TotalBytesMoved:      29,
+				LogicalBytesMoved:    3500,
+				LogicalBytesStreamed: 3500,
+				CacheMissCount:       1,
+				StreamedCount:        1,
 			},
 		},
 		{
@@ -272,7 +275,7 @@ func TestBatching_WriteBytes(t *testing.T) {
 			},
 			b:         []byte("abc"),
 			wantErr:   errWrite,
-			wantStats: Stats{},
+			wantStats: cas.Stats{},
 		},
 		{
 			name: "cache_hit",
@@ -290,15 +293,15 @@ func TestBatching_WriteBytes(t *testing.T) {
 			},
 			b:       []byte("abc"),
 			wantErr: nil,
-			wantStats: Stats{
-				BytesRequesetd:    3,
-				BytesAttempted:    2, // matches buffer size
-				BytesMoved:        2,
-				LogicalBytesMoved: 2,
-				BytesStreamed:     2,
-				CacheHitCount:     1,
-				BytesCached:       3,
-				StreamedCount:     1,
+			wantStats: cas.Stats{
+				BytesRequested:       3,
+				EffectiveBytesMoved:  2, // matches buffer size
+				TotalBytesMoved:      2,
+				LogicalBytesMoved:    2,
+				LogicalBytesStreamed: 2,
+				CacheHitCount:        1,
+				LogicalBytesCached:   3,
+				StreamedCount:        1,
 			},
 		},
 		{
@@ -316,15 +319,15 @@ func TestBatching_WriteBytes(t *testing.T) {
 				},
 			},
 			b:       []byte("abc"),
-			wantErr: ErrGRPC,
-			wantStats: Stats{
-				BytesRequesetd:    3,
-				BytesAttempted:    2, // matches buffer size
-				BytesMoved:        2,
-				LogicalBytesMoved: 2,
-				BytesStreamed:     2,
-				CacheMissCount:    1,
-				StreamedCount:     0,
+			wantErr: cas.ErrGRPC,
+			wantStats: cas.Stats{
+				BytesRequested:       3,
+				EffectiveBytesMoved:  2, // matches buffer size
+				TotalBytesMoved:      2,
+				LogicalBytesMoved:    2,
+				LogicalBytesStreamed: 2,
+				CacheMissCount:       1,
+				StreamedCount:        0,
 			},
 		},
 		{
@@ -342,15 +345,15 @@ func TestBatching_WriteBytes(t *testing.T) {
 				},
 			},
 			b:       []byte("abc"),
-			wantErr: ErrGRPC,
-			wantStats: Stats{
-				BytesRequesetd:    3,
-				BytesAttempted:    2, // matches one buffer size
-				BytesMoved:        4, // matches two buffer sizes
-				LogicalBytesMoved: 2,
-				BytesStreamed:     2,
-				CacheMissCount:    1,
-				StreamedCount:     0,
+			wantErr: cas.ErrGRPC,
+			wantStats: cas.Stats{
+				BytesRequested:       3,
+				EffectiveBytesMoved:  2, // matches one buffer size
+				TotalBytesMoved:      4, // matches two buffer sizes
+				LogicalBytesMoved:    2,
+				LogicalBytesStreamed: 2,
+				CacheMissCount:       1,
+				StreamedCount:        0,
 			},
 			retryPolicy: &retryTwice,
 		},
@@ -369,17 +372,75 @@ func TestBatching_WriteBytes(t *testing.T) {
 				},
 			},
 			b:       []byte("abc"),
-			wantErr: ErrGRPC,
-			wantStats: Stats{
-				BytesRequesetd:    3,
-				BytesAttempted:    3,
-				BytesMoved:        3,
-				LogicalBytesMoved: 3,
-				BytesStreamed:     3,
-				CacheMissCount:    1,
-				StreamedCount:     1,
+			wantErr: cas.ErrGRPC,
+			wantStats: cas.Stats{
+				BytesRequested:       3,
+				EffectiveBytesMoved:  3,
+				TotalBytesMoved:      3,
+				LogicalBytesMoved:    3,
+				LogicalBytesStreamed: 3,
+				CacheMissCount:       1,
+				StreamedCount:        1,
 			},
 			retryPolicy: &retryTwice,
+		},
+		{
+			name: "arbitrary_offset",
+			bs: &fakeByteStreamClient{
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
+					return &fakeByteStream_WriteClient{
+						send: func(wr *bspb.WriteRequest) error {
+							if wr.WriteOffset < 5 {
+								return fmt.Errorf("mismatched offset: want 5, got %d", wr.WriteOffset)
+							}
+							return nil
+						},
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{CommittedSize: 3}, nil
+						},
+					}, nil
+				},
+			},
+			b:      []byte("abc"),
+			offset: 5,
+			wantStats: cas.Stats{
+				BytesRequested:       3,
+				EffectiveBytesMoved:  3,
+				TotalBytesMoved:      3,
+				LogicalBytesMoved:    3,
+				LogicalBytesStreamed: 3,
+				CacheMissCount:       1,
+				StreamedCount:        1,
+			},
+		},
+		{
+			name: "finish_write",
+			bs: &fakeByteStreamClient{
+				write: func(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
+					return &fakeByteStream_WriteClient{
+						send: func(wr *bspb.WriteRequest) error {
+							if len(wr.Data) == 0 && !wr.FinishWrite {
+								return fmt.Errorf("finish write was not set")
+							}
+							return nil
+						},
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{CommittedSize: 3}, nil
+						},
+					}, nil
+				},
+			},
+			b:      []byte("abc"),
+			finish: true,
+			wantStats: cas.Stats{
+				BytesRequested:       3,
+				EffectiveBytesMoved:  3,
+				TotalBytesMoved:      3,
+				LogicalBytesMoved:    3,
+				LogicalBytesStreamed: 3,
+				CacheMissCount:       1,
+				StreamedCount:        1,
+			},
 		},
 	}
 
@@ -390,11 +451,11 @@ func TestBatching_WriteBytes(t *testing.T) {
 			if test.retryPolicy == nil {
 				test.retryPolicy = &retryNever
 			}
-			u, err := NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, *test.retryPolicy)
+			u, err := cas.NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, *test.retryPolicy)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
-			stats, err := u.WriteBytes(context.Background(), "", test.b, 0, true)
+			stats, err := u.WriteBytes(context.Background(), "", bytes.NewReader(test.b), int64(len(test.b)), test.offset, test.finish)
 			if test.wantErr == nil && err != nil {
 				t.Errorf("WriteBytes failed: %v", err)
 			}
@@ -438,6 +499,16 @@ func (s *fakeByteStream_WriteClient) CloseAndRecv() (*bspb.WriteResponse, error)
 		return s.closeAndRecv()
 	}
 	return &bspb.WriteResponse{}, nil
+}
+
+type fakeCAS struct {
+	repb.ContentAddressableStorageClient
+	findMissingBlobs func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error)
+	batchUpdateBlobs func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error)
+}
+
+func (c *fakeCAS) FindMissingBlobs(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+	return c.findMissingBlobs(ctx, in, opts...)
 }
 
 type byHash []digest.Digest
