@@ -162,3 +162,8 @@ type Stats struct {
 	// For methods that accept bytes, the value is 1 upon success, 0 otherwise.
 	StreamedCount int64
 }
+
+// Add mutates the stats by adding all the corresponding fields of the specified instance.
+func (s *Stats) Add(other Stats) {
+	s.BytesRequested += other.BytesRequested
+}
