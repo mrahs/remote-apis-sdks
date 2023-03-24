@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/blob"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
@@ -59,10 +58,9 @@ type BatchingUploader interface {
 	// MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
 	MissingBlobs(context.Context, []digest.Digest) ([]digest.Digest, error)
 
-	// Upload deduplicates the specified blobs (unified uploads) and only uploads the ones that are not already in the CAS.
-	// Large files are streamed while others are batched together.
-	// Returns a slice of the digests of the uploaded blobs, excluding the ones that already exist in the CAS.
-	Upload(context.Context, []blob.Blob, symlinkopts.Opts, ep.Predicate) ([]digest.Digest, Stats, error)
+	// Upload digests the specified paths and upload to the CAS what is not already there.
+	// Returns a slice of the digests of the files that had to be uploaded.
+	Upload(context.Context, []ep.Abs, symlinkopts.Opts, ep.Predicate) ([]digest.Digest, Stats, error)
 
 	// WriteBytes uploads all the bytes of the specified reader directly to the specified resource name starting remotely at the specified offset.
 	// If finish is true, the server is notified to finalize the resource name and no further writes are allowed.
@@ -75,12 +73,8 @@ type StreamingUploader interface {
 	// MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
 	MissingBlobs(context.Context, <-chan digest.Digest) <-chan MissingBlobsResponse
 
-	// Upload is a blocking call that uploads incoming blobs to the CAS.
-	// It returns when the context is done, the input channel is closed, or a fatal error occurs.
-	// The returned error is either from the context or an error that necessitates terminating the call.
-	// Errors related to particular items are reported as part of their result.
-	// During the lifetime of the call, digests are cached to avoid duplicate uploads (unified uploads).
-	Upload(context.Context, <-chan blob.Blob, symlinkopts.Opts, ep.Predicate) (<-chan UploadResponse, error)
+	// Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
+	Upload(context.Context, <-chan ep.Abs, symlinkopts.Opts, ep.Predicate) <-chan UploadResponse
 }
 
 // MissingBlobsResponse represents a query result for a single digest.
@@ -97,7 +91,7 @@ type UploadResponse struct {
 	Err    error
 }
 
-// missingBlobRequest associates a digest with tag the identifies the requester.
+// missingBlobRequest associates a digest with a tag the identifies the requester.
 type missingBlobRequest struct {
 	digest digest.Digest
 	tag    string
@@ -116,11 +110,11 @@ type missingBlobRequestBundle = map[digest.Digest][]string
 type queryCaller = chan MissingBlobsResponse
 
 type uploadRequest struct {
-	blob blob.Blob
+	path ep.Abs
 	tag  string
 }
 
-type uploadRequestBundle = map[string][]string
+type uploadRequestBundle = map[digest.Digest][]string
 
 type uploadCaller = chan UploadResponse
 
@@ -253,10 +247,10 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // If the returned error is nil, any digest that is not in the returned slice was already in the CAS, and any digest
 // that is in the slice may have been successfully uploaded or not.
 // If the returned error is not nil, the returned slice may be incomplete.
-func (u *batchingUploader) Upload(ctx context.Context, blobs []blob.Blob, symlinkOpts symlinkopts.Opts, predicate ep.Predicate) ([]digest.Digest, Stats, error) {
+func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, symlinkOpts symlinkopts.Opts, predicate ep.Predicate) ([]digest.Digest, Stats, error) {
 	var stats Stats
 
-	if len(blobs) < 1 {
+	if len(paths) < 1 {
 		return nil, stats, nil
 	}
 
@@ -269,18 +263,18 @@ func (u *batchingUploader) Upload(ctx context.Context, blobs []blob.Blob, symlin
 
 	tag, resChan := u.registerUploadCaller(ctxUploadCaller)
 	go func() {
-		for _, b := range blobs {
+		for _, p := range paths {
 			select {
 			case <-ctx.Done():
 				return
-			case u.uploadChan <- uploadRequest{blob: b, tag: tag}:
+			case u.uploadChan <- uploadRequest{path: p, tag: tag}:
 			}
 		}
 	}()
 
 	var missing []digest.Digest
 	var err error
-	var total = len(blobs)
+	var total = len(paths)
 	var i = 0
 	for r := range resChan {
 		switch {
@@ -556,12 +550,8 @@ func (u *streamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 	return ch
 }
 
-// Upload is a blocking call that uploads incoming blobs to the CAS.
-// It returns when the context is done, the input channel is closed, or a fatal error occurs.
-// The returned error is either from the context or an error that necessitates terminating the call.
-// Errors related to particular items are reported as part of their result.
-// During the lifetime of the call, digests are cached to avoid duplicate uploads (unified uploads).
-func (u *streamingUploader) Upload(context.Context, <-chan blob.Blob, symlinkopts.Opts, ep.Predicate) (<-chan UploadResponse, error) {
+// Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
+func (u *streamingUploader) Upload(context.Context, <-chan ep.Abs, symlinkopts.Opts, ep.Predicate) <-chan UploadResponse {
 	panic("not yet implemented")
 }
 
@@ -808,6 +798,106 @@ func (u *uploaderv2) registerUploadCaller(ctx context.Context) (string, <-chan U
 	}()
 
 	return tag, uc
+}
+
+func (u *uploaderv2) notifyUploadCallers(r UploadResponse, tags ...string) {
+	// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
+	u.uploadCallerMutex.Lock()
+	defer u.uploadCallerMutex.Unlock()
+	for _, tag := range tags {
+		uc, ok := u.uploadCaller[tag]
+		if ok {
+			// Possible deadlock if the receiver had abandoned the channel.
+			uc <- r
+		}
+	}
+}
+
+func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
+	// receive blob upload requests
+	// generate a tag for it
+	// traverse its tree and
+	// if small, glob it and dispatch to bundler
+	// if medium, dispatch to bundler
+	// if large, dispatch to streamer
+	// each time a file is dispatched, increment a counter
+	// each time a file is processed, decrement the counter
+	// once the counter is zero, notify the caller
+
+	// for {
+	// 	select {
+	// 	case req, ok := <-u.uploadChan:
+	// 		if !ok {
+	// 			// This should never happen since this channel is never closed.
+	// 			return
+	// 		}
+	//
+	// 		walker.DepthFirst()
+	// 	case <-ctx.Done():
+	// 		return
+	// 	}
+	// }
+}
+
+func (u *uploaderv2) uploadBundler(ctx context.Context) {
+	// bundle := make(uploadRequestBundle)
+	// var bundleSize int64
+	//
+	// handle := func() {
+	// 	if len(bundle) < 1 {
+	// 		return
+	// 	}
+	// 	// Block the entire processor if the concurrency limit is reached.
+	// 	if err := u.uploadSem.Acquire(ctx, 1); err != nil {
+	// 		// err is always ctx.Err(), so abort immediately.
+	// 		return
+	// 	}
+	// 	defer u.uploadSem.Release(1)
+	//
+	// 	// go u.callMissingBlobs(ctx, bundle)
+	//
+	// 	bundle = make(uploadRequestBundle)
+	// 	bundleSize = 0
+	// }
+	//
+	// bundleTicker := time.NewTicker(u.uploadRpcConfig.BundleTimeout)
+	// defer bundleTicker.Stop()
+	//
+	// for {
+	// 	select {
+	// 	case req, ok := <-u.uploadChan:
+	// 		if !ok {
+	// 			// This should never happen since this channel is never closed.
+	// 			return
+	// 		}
+	//
+	// 		// TODO: stream oversized items.
+	// 		if bundleSize+d.Size >= int64(u.uploadRpcConfig.BytesLimit) {
+	// 			handle()
+	// 		}
+	//
+	// 		// Duplicate tags are allowed to ensure the query caller can match the number of responses to the number of requests.
+	// 		bundle[d] = append(bundle[d], req.tag)
+	// 		bundleSize += d.Size
+	//
+	// 		// Check length threshold.
+	// 		if len(bundle) >= u.uploadRpcConfig.ItemsLimit {
+	// 			handle()
+	// 			continue
+	// 		}
+	// 	case <-bundleTicker.C:
+	// 		handle()
+	// 	case <-ctx.Done():
+	// 		// Nothing to wait for since all the senders and receivers should have terminated as well.
+	// 		// The only things that might still be in-flight are the gRPC calls, which will eventually terminate since
+	// 		// there are no active query callers.
+	// 		return
+	// 	}
+	// }
+}
+
+func (u *uploaderv2) uploadStreamer(ctx context.Context) {
+
 }
 
 func isValidRpcCfg(cfg *RPCCfg) error {
