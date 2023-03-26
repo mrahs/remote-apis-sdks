@@ -6,7 +6,6 @@ package exppath
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -14,25 +13,24 @@ import (
 // ErrBadPath indicates an invalid path based on the context it is returned from.
 var ErrBadPath = errors.New("exppath: invalid path")
 
-// Predicate allows for filtering paths during traversal.
-// If false is returned, the specified path should be excluded.
-// The FileInfo argument helps avoid an IO syscall.
-type Predicate func(path Abs, info os.FileInfo) bool
-
 // Abs represents an immutable absolute path.
 type Abs interface {
-	// String returns the path.
-	String() string
 	// Abs is an alias to String that is used to make this interface unique.
 	Abs() string
+	// String returns the path.
+	String() string
+	Base() Abs
+	Dir() Abs
 }
 
 // Rel represents an immutable relative path.
 type Rel interface {
-	// String returns the path.
-	String() string
 	// Rel is an alias to String that is used to make this interface unique.
 	Rel() string
+	// String returns the path.
+	String() string
+	Base() Rel
+	Dir() Rel
 }
 
 type abs struct {
@@ -43,13 +41,28 @@ type rel struct {
 	path string
 }
 
+// Abs is an alias to String().
+func (p *abs) Abs() string {
+	return p.path
+}
+
 // String returns the string representation of the path.
 func (p *abs) String() string {
 	return p.path
 }
 
-// Abs is an alias to String().
-func (p *abs) Abs() string {
+// Base is convenient proxy for filepath.Base.
+func (p *abs) Base() Abs {
+	return &abs{path: filepath.Base(p.path)}
+}
+
+// Dir is convenient proxy for filepath.Dir.
+func (p *abs) Dir() Abs {
+	return &abs{path: filepath.Dir(p.path)}
+}
+
+// Rel is an alias to String().
+func (p *rel) Rel() string {
 	return p.path
 }
 
@@ -58,9 +71,12 @@ func (p *rel) String() string {
 	return p.path
 }
 
-// Rel is an alias to String().
-func (p *rel) Rel() string {
-	return p.path
+func (p *rel) Base() Rel {
+	return &rel{path: filepath.Base(p.path)}
+}
+
+func (p *rel) Dir() Rel {
+	return &rel{path: filepath.Dir(p.path)}
 }
 
 // NewAbs creates a new absolute and clean path from the specified path.
@@ -106,7 +122,7 @@ func JoinRel(parts ...Rel) Rel {
 // Descendant returns a relative path to the specified base path such that
 // when joined together with the base using filepath.Join(base, path), the result
 // is lexically equivalent to the specified target path.
-// An error is returned if the specified cannot be made relative to the specified base
+// An error is returned if the specified path cannot be made relative to the specified base
 // using filepath.Rel(base, target), or the target path is not a descendent of the base.
 func Descendant(base Abs, target Abs) (Rel, error) {
 	path, err := filepath.Rel(base.String(), target.String())
@@ -114,7 +130,7 @@ func Descendant(base Abs, target Abs) (Rel, error) {
 		return nil, err
 	}
 	if strings.HasPrefix(path, "..") {
-		return nil, fmt.Errorf("path %q is not a descendent of %q", target, base)
+		return nil, fmt.Errorf("path %q is not a descendant of %q", target, base)
 	}
 	return &rel{path: path}, nil
 }

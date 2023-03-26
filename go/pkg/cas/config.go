@@ -1,9 +1,10 @@
 package cas
 
 import (
+	"sync"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 )
 
 const (
@@ -41,8 +42,8 @@ const (
 	BufferSize = 4 * MegaByte
 )
 
-// RPCCfg specifies the configuration for a gRPC endpoint.
-type RPCCfg struct {
+// GRPCConfig specifies the configuration for a gRPC endpoint.
+type GRPCConfig struct {
 	// ConcurrentCallsLimit sets the upper bound of concurrent calls.
 	// Must be > 0.
 	ConcurrentCallsLimit int
@@ -66,10 +67,18 @@ type RPCCfg struct {
 	// For streaming calls, this applies to each Send/Recv call individually, not the whole streaming session.
 	// This does not take into account the time it takes to abort the request upon timeout.
 	Timeout time.Duration
+	
+	// RetryPolicy sets the retry policy for calls using this config.
+	RetryPolicy retry.BackoffPolicy
 }
 
-// IOCfg specifies the configuration for IO operations.
-type IOCfg struct {
+// IOConfig specifies the configuration for IO operations.
+type IOConfig struct {
+	// ConcurrentWalksLimit sets the upper bound of concurrent filesystem tree traversals.
+	// This affects the number of concurrent upload requests for the uploader since each one requires a walk.
+	// Must be > 0.
+	ConcurrentWalksLimit int
+
 	// OpenFilesLimit sets the upper bound for the number of files being simultanuously processed.
 	// Must be > 0.
 	OpenFilesLimit int
@@ -103,8 +112,12 @@ type IOCfg struct {
 	// Assuming files under the same directory are located close to each other on disk, the such files are batched together.
 	OptimizeForDiskLocality bool
 
-	// Cache is a read/write cache for file metadata.
-	Cache filemetadata.Cache
+	// Cache is a read/write cache for digested files.
+	// The key is the file path and the assocaited exclusion filter.
+	// The value is a struct containing a digest and proto message that represents the digested node. It's meant for internal use only.
+	// Providing a cache here allows for reusing entries between clients.
+	// Cache entries are never evicted which assumes the files are never edited during the lifetime of the cache entry.
+	Cache sync.Map
 }
 
 // Stats represents potential metrics reported by various methods.
@@ -166,4 +179,36 @@ type Stats struct {
 // Add mutates the stats by adding all the corresponding fields of the specified instance.
 func (s *Stats) Add(other Stats) {
 	s.BytesRequested += other.BytesRequested
+	s.LogicalBytesMoved += other.LogicalBytesMoved
+	s.TotalBytesMoved += other.TotalBytesMoved
+	s.EffectiveBytesMoved += other.EffectiveBytesMoved
+	s.LogicalBytesCached += other.LogicalBytesCached
+	s.LogicalBytesStreamed += other.LogicalBytesStreamed
+	s.LogicalBytesBatched += other.LogicalBytesBatched
+	s.InputFileCount += other.InputFileCount
+	s.InputDirCount += other.InputDirCount
+	s.InputSymlinkCount += other.InputSymlinkCount
+	s.CacheHitCount += other.CacheHitCount
+	s.CacheMissCount += other.CacheMissCount
+	s.DigestCount += other.DigestCount
+	s.BatchedCount += other.BatchedCount
+	s.StreamedCount += other.StreamedCount
 }
+
+func isValidRpcCfg(cfg *GRPCConfig) error {
+	if cfg.ConcurrentCallsLimit < 1 || cfg.ItemsLimit < 1 || cfg.BytesLimit < 1 {
+		return ErrZeroOrNegativeLimit
+	}
+	return nil
+}
+
+func isValidIOCfg(cfg *IOConfig) error {
+	if cfg.ConcurrentWalksLimit < 1 || cfg.OpenFilesLimit < 1 || cfg.OpenLargeFilesLimit < 1 || cfg.BufferSize < 1 {
+		return ErrZeroOrNegativeLimit
+	}
+	if cfg.SmallFileSizeThreshold < 0 || cfg.LargeFileSizeThreshold < 0 || cfg.CompressionSizeThreshold < 0 {
+		return ErrNegativeLimit
+	}
+	return nil
+}
+

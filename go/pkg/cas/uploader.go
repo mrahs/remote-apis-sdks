@@ -5,18 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
+	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pborman/uuid"
 	"golang.org/x/sync/semaphore"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -60,7 +65,7 @@ type BatchingUploader interface {
 
 	// Upload digests the specified paths and upload to the CAS what is not already there.
 	// Returns a slice of the digests of the files that had to be uploaded.
-	Upload(context.Context, []ep.Abs, symlinkopts.Opts, ep.Predicate) ([]digest.Digest, Stats, error)
+	Upload(context.Context, []ep.Abs, slo.Options, ep.Filter) ([]digest.Digest, Stats, error)
 
 	// WriteBytes uploads all the bytes of the specified reader directly to the specified resource name starting remotely at the specified offset.
 	// If finish is true, the server is notified to finalize the resource name and no further writes are allowed.
@@ -74,7 +79,7 @@ type StreamingUploader interface {
 	MissingBlobs(context.Context, <-chan digest.Digest) <-chan MissingBlobsResponse
 
 	// Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
-	Upload(context.Context, <-chan ep.Abs, symlinkopts.Opts, ep.Predicate) <-chan UploadResponse
+	Upload(context.Context, <-chan ep.Abs, slo.Options, ep.Filter) <-chan UploadResponse
 }
 
 // MissingBlobsResponse represents a query result for a single digest.
@@ -82,6 +87,18 @@ type MissingBlobsResponse struct {
 	Digest  digest.Digest
 	Missing bool
 	Err     error
+}
+
+// UploadRequest represents a path to start uploading from.
+// If the path is a directory, its entire tree is traversed and only files that are not excluded
+// by the filter are uploaded.
+// Any symlinks are handled according to the specified options.
+type UploadRequest struct {
+	Path           ep.Abs
+	SymlinkOptions slo.Options
+	ShouldSkip     ep.Filter
+	// For internal use.
+	tag string
 }
 
 // UploadResponse represents an upload result for a single blob (which may represent a tree of files).
@@ -109,14 +126,22 @@ type missingBlobRequestBundle = map[digest.Digest][]string
 // See registerQueryCaller for details.
 type queryCaller = chan MissingBlobsResponse
 
-type uploadRequest struct {
-	path ep.Abs
-	tag  string
-}
-
 type uploadRequestBundle = map[digest.Digest][]string
 
 type uploadCaller = chan UploadResponse
+
+type blob struct {
+	digest digest.Digest
+	b      []byte
+	r      io.ReadCloser
+	tag    string
+}
+
+type digestedNode struct {
+	digest digest.Digest
+	// repb.DirectoryNode, repb.FileNode, or repb.SymlinkNode
+	proto proto.Message
+}
 
 // uploader represents the state of an uploader implementation.
 type uploaderv2 struct {
@@ -124,9 +149,9 @@ type uploaderv2 struct {
 	byteStream   bspb.ByteStreamClient
 	instanceName string
 
-	queryRpcConfig  RPCCfg
-	uploadRpcConfig RPCCfg
-	streamRpcConfig RPCCfg
+	queryRpcConfig  GRPCConfig
+	uploadRpcConfig GRPCConfig
+	streamRpcConfig GRPCConfig
 
 	// Throttling controls.
 	querySem    *semaphore.Weighted
@@ -135,9 +160,14 @@ type uploaderv2 struct {
 	retryPolicy retry.BackoffPolicy
 
 	// IO controls.
-	ioCfg        IOCfg
+	ioCfg        IOConfig
 	buffers      sync.Pool
 	zstdEncoders sync.Pool
+	walkSem      *semaphore.Weighted
+	walkWg       sync.WaitGroup
+	ioSem        *semaphore.Weighted
+	ioLargeSem   *semaphore.Weighted
+	parentCache  sliceCache
 
 	// Concurrency controls.
 
@@ -148,21 +178,23 @@ type uploaderv2 struct {
 	// uploadChan is the fan-in channel for uploads.
 	// This channel is deliberately not closed to avoid send-on-closed-channel errors.
 	// All senders must also listen on the context to avoid deadlocks.
-	uploadChan chan uploadRequest
+	uploadChan chan UploadRequest
 	// grpcWg is used to wait for in-flight gRPC calls upon graceful termination.
 	grpcWg sync.WaitGroup
 
 	// queryCaller is set of active query callers and their associated channels.
 	queryCaller map[string]queryCaller
-	// queryCallerWg is used to wait for in-flight receivers upon graceful termination.
-	queryCallerWg    sync.WaitGroup
+	// queryCallerMutex is necessary since the map holds references which can survive the atomicity of sync.Map.
 	queryCallerMutex sync.Mutex
+	// queryCallerWg is used to wait for in-flight receivers upon graceful termination.
+	queryCallerWg sync.WaitGroup
 
 	// uploadCaller is set of active upload callers and their associated channels.
 	uploadCaller map[string]uploadCaller
-	// uploadCallerWg is used to wait for in-flight receivers upon graceful termination.
-	uploadCallerWg    sync.WaitGroup
+	// uploadCallerMutex is necessary since the map holds references which can survive the atomicity of sync.Map.
 	uploadCallerMutex sync.Mutex
+	// uploadCallerWg is used to wait for in-flight receivers upon graceful termination.
+	uploadCallerWg sync.WaitGroup
 }
 
 // batchingUplodaer implements the corresponding interface.
@@ -241,13 +273,14 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 }
 
 // Upload processes the specified blobs for upload. Blobs that already exist in the CAS are not uploaded.
-// The specified predicate takes precedence over any blob-specific predicate.
+// Any path or file that matches the specified filter is excluded.
+// Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
 //
 // Returns a slice of the digests of the blobs that were uploaded (excluding the ones that already exist in the CAS).
 // If the returned error is nil, any digest that is not in the returned slice was already in the CAS, and any digest
 // that is in the slice may have been successfully uploaded or not.
 // If the returned error is not nil, the returned slice may be incomplete.
-func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, symlinkOpts symlinkopts.Opts, predicate ep.Predicate) ([]digest.Digest, Stats, error) {
+func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.Options, shouldSkip ep.Filter) ([]digest.Digest, Stats, error) {
 	var stats Stats
 
 	if len(paths) < 1 {
@@ -267,7 +300,7 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, symlinkOp
 			select {
 			case <-ctx.Done():
 				return
-			case u.uploadChan <- uploadRequest{path: p, tag: tag}:
+			case u.uploadChan <- UploadRequest{Path: p, SymlinkOptions: slo, ShouldSkip: shouldSkip, tag: tag}:
 			}
 		}
 	}()
@@ -468,8 +501,9 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, r io.Rea
 		return stats, errors.Join(ErrGRPC, errClose, err)
 	}
 
-	if !cacheHit && res.CommittedSize != stats.EffectiveBytesMoved {
-		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, stats.EffectiveBytesMoved), err)
+	// CommittedSize is based on the uncompressed size of the blob.
+	if !cacheHit && res.CommittedSize != size {
+		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, size), err)
 	}
 
 	return stats, err
@@ -551,15 +585,21 @@ func (u *streamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 }
 
 // Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
-func (u *streamingUploader) Upload(context.Context, <-chan ep.Abs, symlinkopts.Opts, ep.Predicate) <-chan UploadResponse {
+func (u *streamingUploader) Upload(context.Context, <-chan ep.Abs, slo.Options, ep.Filter) <-chan UploadResponse {
 	panic("not yet implemented")
 }
 
 // Close blocks until all resources have been cleaned up.
 // It always returns nil.
 func (u *uploaderv2) Close() error {
-	u.queryCallerWg.Wait()
+	// Wait for filesystem walks first, since they may still trigger requests.
+	u.walkWg.Wait()
+	// Wait for gRPC methods, since they may still issue reponses.
 	u.grpcWg.Wait()
+	// Wait for query callers to drain their responses.
+	u.queryCallerWg.Wait()
+	// Wait for upload callers to drain their responses.
+	u.uploadCallerWg.Wait()
 	return nil
 }
 
@@ -813,33 +853,237 @@ func (u *uploaderv2) notifyUploadCallers(r UploadResponse, tags ...string) {
 	}
 }
 
+// uploadDispatcher is the entry point for upload requests.
+// It starts by computing a merkle tree from the file system view specified by the request and its filter.
+// Files and blobs are uploaded during the digestion to minimize IO induced latency. This effectively
+// optimizes for frequent uploads of never-seen-before files.
+// Using a depth-first style file traversal suits this use-case.
+// To optimize for frequent uploads of the same files, consider computing the merkle tree separately
+// then construct a list of blobs that are missing from the CAS and upload that list.
 func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
-	// receive blob upload requests
-	// generate a tag for it
-	// traverse its tree and
-	// if small, glob it and dispatch to bundler
-	// if medium, dispatch to bundler
-	// if large, dispatch to streamer
-	// each time a file is dispatched, increment a counter
-	// each time a file is processed, decrement the counter
-	// once the counter is zero, notify the caller
+	dispatch := func(b blob) {
+		switch {
+		case b.digest.Size <= u.ioCfg.SmallFileSizeThreshold:
+		// TODO: Glob it and send to bundler.
+		case b.digest.Size >= u.ioCfg.LargeFileSizeThreshold:
+		// TODO: Send to streamer.
+		default:
+			// TODO: Send to bundler.
+		}
+	}
 
-	// for {
-	// 	select {
-	// 	case req, ok := <-u.uploadChan:
-	// 		if !ok {
-	// 			// This should never happen since this channel is never closed.
-	// 			return
-	// 		}
-	//
-	// 		walker.DepthFirst()
-	// 	case <-ctx.Done():
-	// 		return
-	// 	}
-	// }
+	// TODO: cooridnate with bundler and streamer to collect results related to each request.
+	for {
+		select {
+		case req, ok := <-u.uploadChan:
+			if !ok {
+				// This should never happen since this channel is never closed.
+				return
+			}
+
+			if err := u.walkSem.Acquire(ctx, 1); err != nil {
+				return
+			}
+			u.walkWg.Add(1)
+			go func() {
+				defer u.walkWg.Done()
+				defer u.walkSem.Release(1)
+
+				walker.DepthFirst(req.Path, func(path ep.Abs, info fs.FileInfo, err error) error {
+					select {
+					case <-ctx.Done():
+						return walker.ErrCancel
+					default:
+					}
+
+					if err != nil {
+						return walker.ErrCancel
+					}
+
+					key := path.String() + req.ShouldSkip.String()
+					parentKey := path.Dir().String() + req.ShouldSkip.String()
+
+					// Pre-access.
+					if info == nil {
+						// Excluded.
+						if req.ShouldSkip.Path(path.String()) {
+							return walker.ErrSkip
+						}
+
+						// Already processed.
+						if node, ok := u.ioCfg.Cache.Load(key); ok {
+							// TODO: avoid duplicates
+							u.parentCache.Append(parentKey, node)
+							// TODO: ensure all callers get their copy and correct stats.
+							return ErrSkip
+						}
+
+						// Access it.
+						return nil
+					}
+
+					// Excluded.
+					if req.ShouldSkip.File(path.String(), info.Mode()) {
+						return walker.ErrSkip
+					}
+
+					switch {
+					case info.Mode()&fs.ModeSymlink == fs.ModeSymlink:
+						// Might need to follow target and/or construct a symlink node and append it to its parent directory node.
+
+						// Replace symlink with target.
+						if req.SymlinkOptions.Resolve() {
+							return walker.ErrReplace
+						}
+						if req.SymlinkOptions.ResolveExternal() {
+							if _, err := ep.Descendant(req.Path, path); err != nil {
+								return walker.ErrReplace
+							}
+						}
+
+						target, err := os.Readlink(path.String())
+						// TODO: capture err
+						if err != nil {
+							return walker.ErrCancel
+						}
+
+						if req.SymlinkOptions.NoDangling() {
+							_, err := os.Lstat(target)
+							// TODO: capture err
+							if err != nil {
+								return walker.ErrCancel
+							}
+						}
+
+						if req.SymlinkOptions.Preserve() {
+							node := &repb.SymlinkNode{
+								Name: path.Base().String(),
+								// TODO: target must be relative to root.
+								Target: target,
+							}
+							u.parentCache.Append(parentKey, node)
+						}
+
+						if req.SymlinkOptions.IncludeTarget() {
+							return nil
+						}
+						return walker.ErrSkip
+
+					case info.Mode().IsDir():
+						// All the descendants have already been visited.
+						// Construct a directory node and dispatch it.
+						dir := &repb.Directory{}
+						node := &repb.DirectoryNode{
+							Name: path.Base().String(),
+						}
+						for _, child := range u.parentCache.Load(key) {
+							switch n := child.(type) {
+							case *repb.FileNode:
+								dir.Files = append(dir.Files, n)
+							case *repb.DirectoryNode:
+								dir.Directories = append(dir.Directories, n)
+							case *repb.SymlinkNode:
+								dir.Symlinks = append(dir.Symlinks, n)
+							}
+						}
+						// Sort children to get a deterministic digest.
+						sort.Slice(dir.Files, func(i, j int) bool {
+							return dir.Files[i].Name < dir.Files[j].Name
+						})
+						sort.Slice(dir.Directories, func(i, j int) bool {
+							return dir.Directories[i].Name < dir.Directories[j].Name
+						})
+						sort.Slice(dir.Symlinks, func(i, j int) bool {
+							return dir.Symlinks[i].Name < dir.Symlinks[j].Name
+						})
+						d, err := digest.NewFromMessage(dir)
+						// TODO: capture err
+						if err != nil {
+							return walker.ErrCancel
+						}
+						node.Digest = d.ToProto()
+						u.ioCfg.Cache.Store(key, node)
+						dispatch(blob{}) // TODO
+
+					case info.Mode().IsRegular():
+						// Digest the content, cache it, and dispatch it.
+						node := &repb.FileNode{
+							Name:         path.Base().String(),
+							IsExecutable: info.Mode()&0100 != 0,
+						}
+						if err := u.ioSem.Acquire(ctx, 1); err != nil {
+							return walker.ErrCancel
+						}
+						defer u.ioSem.Release(1)
+
+						if info.Size() <= u.ioCfg.SmallFileSizeThreshold {
+							f, err := os.Open(path.String())
+							// TODO: capture err
+							if err != nil {
+								return walker.ErrCancel
+							}
+							b, err := io.ReadAll(f)
+							_ = f.Close() // TODO: capture err
+							// TODO: capture err
+							if err != nil {
+								return walker.ErrCancel
+							}
+							node.Digest = digest.NewFromBlob(b).ToProto()
+							u.ioCfg.Cache.Store(key, node)
+							u.parentCache.Append(parentKey, node)
+							dispatch(blob{b: b}) // TODO
+							return nil
+						}
+
+						if info.Size() < u.ioCfg.LargeFileSizeThreshold {
+							d, err := digest.NewFromFile(path.String())
+							// TODO: capture err
+							if err != nil {
+								return walker.ErrCancel
+							}
+							node.Digest = d.ToProto()
+							u.ioCfg.Cache.Store(key, node)
+							u.parentCache.Append(parentKey, node)
+							dispatch(blob{r: nil}) // TODO
+							return nil
+						}
+
+						if err := u.ioLargeSem.Acquire(ctx, 1); err != nil {
+							return walker.ErrCancel
+						}
+						f, err := os.Open(path.String())
+						// TODO: capture err
+						if err != nil {
+							u.ioLargeSem.Release(1)
+							return walker.ErrCancel
+						}
+						d, err := digest.NewFromReader(f)
+						if err != nil {
+							_ = f.Close()
+							u.ioLargeSem.Release(1)
+							return walker.ErrCancel
+						}
+						node.Digest = d.ToProto()
+						u.ioCfg.Cache.Store(key, node)
+						u.parentCache.Append(parentKey, node)
+						dispatch(blob{r: nil}) // TODO
+						return nil
+
+					default:
+						// Skip everything else (e.g. sockets and pipes).
+						return walker.ErrSkip
+					}
+					return nil
+				})
+			}()
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (u *uploaderv2) uploadBundler(ctx context.Context) {
+	// TODO: should pipe to query before bundling for upload.
 	// bundle := make(uploadRequestBundle)
 	// var bundleSize int64
 	//
@@ -900,23 +1144,6 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 
 }
 
-func isValidRpcCfg(cfg *RPCCfg) error {
-	if cfg.ConcurrentCallsLimit < 1 || cfg.ItemsLimit < 1 || cfg.BytesLimit < 1 {
-		return ErrZeroOrNegativeLimit
-	}
-	return nil
-}
-
-func isValidIOCfg(cfg *IOCfg) error {
-	if cfg.OpenFilesLimit < 1 || cfg.OpenLargeFilesLimit < 1 || cfg.BufferSize < 1 {
-		return ErrZeroOrNegativeLimit
-	}
-	if cfg.SmallFileSizeThreshold < 0 || cfg.LargeFileSizeThreshold < 0 || cfg.CompressionSizeThreshold < 0 {
-		return ErrNegativeLimit
-	}
-	return nil
-}
-
 func digestsFromProtos(dprotots ...*repb.Digest) []digest.Digest {
 	ds := make([]digest.Digest, len(dprotots))
 	for i, dp := range dprotots {
@@ -934,12 +1161,8 @@ func digestsToProtos(digests ...digest.Digest) []*repb.Digest {
 }
 
 func newUploaderv2(
-	ctx context.Context,
-	cas repb.ContentAddressableStorageClient,
-	byteStream bspb.ByteStreamClient,
-	instanceName string,
-	queryCfg, uploadCfg, streamCfg RPCCfg, ioCfg IOCfg,
-	retryPolicy retry.BackoffPolicy) (*uploaderv2, error) {
+	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
+	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig) (*uploaderv2, error) {
 
 	if cas == nil || byteStream == nil {
 		return nil, ErrNilClient
@@ -966,10 +1189,9 @@ func newUploaderv2(
 		uploadRpcConfig: uploadCfg,
 		streamRpcConfig: streamCfg,
 
-		querySem:    semaphore.NewWeighted(int64(queryCfg.ConcurrentCallsLimit)),
-		uploadSem:   semaphore.NewWeighted(int64(uploadCfg.ConcurrentCallsLimit)),
-		streamSem:   semaphore.NewWeighted(int64(streamCfg.ConcurrentCallsLimit)),
-		retryPolicy: retryPolicy,
+		querySem:  semaphore.NewWeighted(int64(queryCfg.ConcurrentCallsLimit)),
+		uploadSem: semaphore.NewWeighted(int64(uploadCfg.ConcurrentCallsLimit)),
+		streamSem: semaphore.NewWeighted(int64(streamCfg.ConcurrentCallsLimit)),
 
 		ioCfg: ioCfg,
 		buffers: sync.Pool{
@@ -988,9 +1210,13 @@ func newUploaderv2(
 				return enc
 			},
 		},
+		walkSem:     semaphore.NewWeighted(int64(ioCfg.ConcurrentWalksLimit)),
+		ioSem:       semaphore.NewWeighted(int64(ioCfg.OpenFilesLimit)),
+		ioLargeSem:  semaphore.NewWeighted(int64(ioCfg.OpenLargeFilesLimit)),
+		parentCache: initSliceCache(),
 
 		queryChan:    make(chan missingBlobRequest),
-		uploadChan:   make(chan uploadRequest),
+		uploadChan:   make(chan UploadRequest),
 		queryCaller:  make(map[string]queryCaller),
 		uploadCaller: make(map[string]uploadCaller),
 	}
@@ -1003,13 +1229,9 @@ func newUploaderv2(
 // The specified configs must be compatbile with the capabilities of the server
 // which the specified clients are connected to.
 func NewBatchingUploader(
-	ctx context.Context,
-	cas repb.ContentAddressableStorageClient,
-	byteStream bspb.ByteStreamClient,
-	instanceName string,
-	queryCfg, uploadCfg, streamCfg RPCCfg, ioCfg IOCfg,
-	retryPolicy retry.BackoffPolicy) (BatchingUploader, error) {
-	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg, retryPolicy)
+	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
+	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig) (BatchingUploader, error) {
+	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1020,13 +1242,9 @@ func NewBatchingUploader(
 // The specified configs must be compatbile with the capabilities of the server
 // which the specified clients are connected to.
 func NewStreamingUploader(
-	ctx context.Context,
-	cas repb.ContentAddressableStorageClient,
-	byteStream bspb.ByteStreamClient,
-	instanceName string,
-	queryCfg, uploadCfg, streamCfg RPCCfg, ioCfg IOCfg,
-	retryPolicy retry.BackoffPolicy) (StreamingUploader, error) {
-	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg, retryPolicy)
+	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
+	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig) (StreamingUploader, error) {
+	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
 	}

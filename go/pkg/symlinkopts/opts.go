@@ -1,100 +1,83 @@
-// Package symlinkopts provides an interface to create immutable and unambiguous symlink options with strong guarantees at compile time.
+// Package symlinkopts provides an efficient interface to create unambiguous symlink options.
 package symlinkopts
 
-// Opts defines an immutable set of configuration for symlink handling.
-type Opts struct {
-	preserve        bool
-	allowDangling   bool
-	includeTarget   bool
-	resolve         bool
-	resolveExternal bool
+// Options represents a set of options for handling symlinks.
+// To ensure a valid set of options, use one of the functions provided in this package
+// to get the desired options.
+type Options uint32
+
+const (
+	Preserve Options = 1 << (32 -1 -iota)
+	NoDangling
+	IncludeTarget
+	Resolve
+	ResolveExternal
+)
+
+// Preserve returns true if the options include the corresponding property.
+func (o Options) Preserve() bool {
+	return o & Preserve == Preserve
 }
 
-// Preserve returns the corresponding property.
-func (o *Opts) Preserve() bool {
-	return o.preserve
+// NoDangling returns true if the options includes the corresponding property.
+func (o Options) NoDangling() bool {
+	return o & NoDangling == NoDangling
 }
 
-// AllowDangling returns the corresponding property.
-func (o *Opts) AllowDangling() bool {
-	return o.allowDangling
+// IncludeTarget returns true if the options includes the corresponding property.
+func (o Options) IncludeTarget() bool {
+	return o & IncludeTarget == IncludeTarget
 }
 
-// InlcudeTarget returns the corresponding property.
-func (o *Opts) InlcudeTarget() bool {
-	return o.includeTarget
+// Resolve returns true if the options includes the corresponding property.
+func (o Options) Resolve() bool {
+	return o & Resolve == Resolve
 }
 
-// Resolve returns the corresponding property.
-func (o *Opts) Resolve() bool {
-	return o.resolve
+// ResolveExternal returns true if the options includes the corresponding property.
+func (o Options) ResolveExternal() bool {
+	return o & ResolveExternal == ResolveExternal
 }
 
-// ResolveExternal returns the corresponding property.
-func (o *Opts) ResolveExternal() bool {
-	return o.resolveExternal
+// ResolveAlways return the correct set of options to always resolve symlinks.
+// This implies that symlinks are followed and no dangling symlinks are allowed.
+// Each target will have the path of the symlink.
+func ResolveAlways() Options {
+	return NoDangling | IncludeTarget | Resolve | ResolveExternal
 }
 
-// ResolveOpts return the correct set of options to always resolve symlinks.
-func ResolveOpts() Opts {
-	return Opts{
-		preserve:        false,
-		allowDangling:   false,
-		includeTarget:   true,
-		resolve:         true,
-		resolveExternal: true,
-	}
-}
-
-// ResolveExternalOpts returns the correct set of options to only resolve symlinks
+// ResolveExternalOnly returns the correct set of options to only resolve symlinks
 // if the target is outside the execution root. Otherwise, the symlink is preserved.
 // This implies that all symlinks are followed, therefore, no dangling links are allowed.
-// Additionally, this implies that targets are also included.
-func ResolveExternalOpts() Opts {
-	return Opts{
-		preserve:        true,
-		allowDangling:   false,
-		includeTarget:   true,
-		resolve:         false,
-		resolveExternal: true,
-	}
+// Otherwise, it's not possible to guarantee that all required files are under the execution root.
+// Targets of non-external symlinks are not included.
+func ResolveExternalOnly() Options {
+	return Preserve | NoDangling | ResolveExternal
 }
 
-// PreserveWithTargetOpts returns the correct set of options to preserve all symlinks
+
+// ResolveExternalOnlyWithTarget is like ResolveExternalOnly but targets of non-external symlinks are included.
+func ResolveExternalOnlyWithTarget() Options {
+	return Preserve | NoDangling | IncludeTarget | ResolveExternal
+}
+
+// PreserveWithTarget returns the correct set of options to preserve all symlinks
 // and include the targets.
 // This implies that dangling links are not allowed.
-func PreserveWithTargetOpts() Opts {
-	return Opts{
-		preserve:        true,
-		allowDangling:   false,
-		includeTarget:   true,
-		resolve:         false,
-		resolveExternal: false,
-	}
+func PreserveWithTarget() Options {
+	return Preserve | NoDangling | IncludeTarget
 }
 
-// PreserveNoDanglingOpts returns the correct set of options to preserve all symlinks without targets.
+// PreserveNoDangling returns the correct set of options to preserve all symlinks without targets.
 // Targets need to be explicitly included.
 // Dangling links are not allowed.
-func PreserveNoDanglingOpts() Opts {
-	return Opts{
-		preserve:        true,
-		allowDangling:   false,
-		includeTarget:   false,
-		resolve:         false,
-		resolveExternal: false,
-	}
+func PreserveNoDangling() Options {
+	return Preserve | NoDangling
 }
 
-// PreserveAllowDanglingOpts returns the correct set of options to preserve all symlinks without targets.
+// PreserveAllowDangling returns the correct set of options to preserve all symlinks without targets.
 // Targets need to be explicitly included.
 // Dangling links are allowed.
-func PreserveAllowDanglingOpts() Opts {
-	return Opts{
-		preserve:        true,
-		allowDangling:   true,
-		includeTarget:   false,
-		resolve:         false,
-		resolveExternal: false,
-	}
+func PreserveAllowDangling() Options {
+	return Preserve
 }

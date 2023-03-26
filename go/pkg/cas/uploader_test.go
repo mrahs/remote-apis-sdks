@@ -24,14 +24,21 @@ import (
 )
 
 var (
-	rpcCfg = cas.RPCCfg{
+	largeDigest = digest.Digest{Size: 2048}
+	errWrite    = fmt.Errorf("write error")
+	errSend     = fmt.Errorf("send error")
+	errClose    = fmt.Errorf("close error")
+	retryNever  = retry.Immediately(retry.Attempts(0))
+	retryTwice  = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
+	rpcCfg      = cas.GRPCConfig{
 		ConcurrentCallsLimit: 5,
 		ItemsLimit:           2,
 		BytesLimit:           1024,
 		Timeout:              time.Second,
 		BundleTimeout:        time.Millisecond,
+		RetryPolicy:          retryNever,
 	}
-	ioCfg = cas.IOCfg{
+	ioCfg = cas.IOConfig{
 		OpenFilesLimit:           1,
 		OpenLargeFilesLimit:      1,
 		SmallFileSizeThreshold:   1,
@@ -39,12 +46,6 @@ var (
 		CompressionSizeThreshold: 10,
 		BufferSize:               2,
 	}
-	largeDigest = digest.Digest{Size: 2048}
-	errWrite    = fmt.Errorf("write error")
-	errSend     = fmt.Errorf("send error")
-	errClose    = fmt.Errorf("close error")
-	retryNever  = retry.Immediately(retry.Attempts(0))
-	retryTwice  = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
 )
 
 func TestBatching_MissingBlobs(t *testing.T) {
@@ -99,7 +100,7 @@ func TestBatching_MissingBlobs(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			u, err := cas.NewBatchingUploader(context.Background(), test.cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+			u, err := cas.NewBatchingUploader(context.Background(), test.cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
@@ -124,7 +125,7 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
-	u, err := cas.NewBatchingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+	u, err := cas.NewBatchingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestBatching_MissingBlobsAbort(t *testing.T) {
 	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
-	u, err := cas.NewBatchingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+	u, err := cas.NewBatchingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
@@ -170,7 +171,7 @@ func TestStreaming_MissingBlobs(t *testing.T) {
 	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
-	u, err := cas.NewStreamingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, retryNever)
+	u, err := cas.NewStreamingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
@@ -451,7 +452,8 @@ func TestBatching_WriteBytes(t *testing.T) {
 			if test.retryPolicy == nil {
 				test.retryPolicy = &retryNever
 			}
-			u, err := cas.NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", rpcCfg, rpcCfg, rpcCfg, ioCfg, *test.retryPolicy)
+			rpcCfg.RetryPolicy = *test.retryPolicy
+			u, err := cas.NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
