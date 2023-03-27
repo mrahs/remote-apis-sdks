@@ -49,6 +49,8 @@ type GRPCConfig struct {
 	ConcurrentCallsLimit int
 
 	// BytesLimit sets the upper bound for the size of each request.
+	// Comparisons against this value may not be exact due to padding and other serialization naunces.
+	// Clients should choose a value that is sufficiently lower than the max size limit for corresponding gRPC connection.
 	// Must be > 0.
 	// This is defined as int rather than int64 because gRPC uses int for its limit.
 	BytesLimit int
@@ -67,7 +69,7 @@ type GRPCConfig struct {
 	// For streaming calls, this applies to each Send/Recv call individually, not the whole streaming session.
 	// This does not take into account the time it takes to abort the request upon timeout.
 	Timeout time.Duration
-	
+
 	// RetryPolicy sets the retry policy for calls using this config.
 	RetryPolicy retry.BackoffPolicy
 }
@@ -85,7 +87,7 @@ type IOConfig struct {
 
 	// OpenLargeFilesLimit sets the upper bound for the number of large files being simultanuously processed.
 	// Must be > 0.
-	// Open large files count towards OpenFilesLimit. I.e. thef following inequality is always effectively true:
+	// Open large files count towards open files. I.e. the following inequality is always effectively true:
 	// OpenFilesLimit >= OpenLargeFilesLimit
 	OpenLargeFilesLimit int
 
@@ -106,7 +108,7 @@ type IOConfig struct {
 
 	// BufferSize sets the buffer size for IO read/write operations.
 	// Must be > 0.
-	BufferSize int64
+	BufferSize int
 
 	// OptimizeForDiskLocality enables sorting files by path before they are written to disk to optimize for disk locality.
 	// Assuming files under the same directory are located close to each other on disk, the such files are batched together.
@@ -211,4 +213,3 @@ func isValidIOCfg(cfg *IOConfig) error {
 	}
 	return nil
 }
-

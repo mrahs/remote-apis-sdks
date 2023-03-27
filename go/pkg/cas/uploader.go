@@ -5,15 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
-	"os"
-	"sort"
 	"sync"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -43,8 +39,8 @@ var (
 	// ErrGRPC indicates an error in a gRPC routine.
 	ErrGRPC = errors.New("cas: grpc error")
 
-	// ErrOversizedBlob indicates a blob that is too large to fit into the set byte limit.
-	ErrOversizedBlob = errors.New("cas: oversized blob")
+	// ErrOversizedItem indicates an item that is too large to fit into the set byte limit for the corresponding gRPC call.
+	ErrOversizedItem = errors.New("cas: oversized item")
 )
 
 // MakeWriteResourceName returns a valid resource name for writing an uncompressed blob.
@@ -65,11 +61,11 @@ type BatchingUploader interface {
 
 	// Upload digests the specified paths and upload to the CAS what is not already there.
 	// Returns a slice of the digests of the files that had to be uploaded.
-	Upload(context.Context, []ep.Abs, slo.Options, ep.Filter) ([]digest.Digest, Stats, error)
+	Upload(context.Context, []ep.Abs, slo.Options, ep.Filter) ([]digest.Digest, *Stats, error)
 
 	// WriteBytes uploads all the bytes of the specified reader directly to the specified resource name starting remotely at the specified offset.
 	// If finish is true, the server is notified to finalize the resource name and no further writes are allowed.
-	WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error)
+	WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (*Stats, error)
 }
 
 // StreamingUploader provides a concurrency friendly API to upload to the CAS.
@@ -82,65 +78,14 @@ type StreamingUploader interface {
 	Upload(context.Context, <-chan ep.Abs, slo.Options, ep.Filter) <-chan UploadResponse
 }
 
-// MissingBlobsResponse represents a query result for a single digest.
-type MissingBlobsResponse struct {
-	Digest  digest.Digest
-	Missing bool
-	Err     error
+// batchingUplodaer implements the corresponding interface.
+type batchingUploader struct {
+	*uploaderv2
 }
 
-// UploadRequest represents a path to start uploading from.
-// If the path is a directory, its entire tree is traversed and only files that are not excluded
-// by the filter are uploaded.
-// Any symlinks are handled according to the specified options.
-type UploadRequest struct {
-	Path           ep.Abs
-	SymlinkOptions slo.Options
-	ShouldSkip     ep.Filter
-	// For internal use.
-	tag string
-}
-
-// UploadResponse represents an upload result for a single blob (which may represent a tree of files).
-type UploadResponse struct {
-	Digest digest.Digest
-	Stats  Stats
-	Err    error
-}
-
-// missingBlobRequest associates a digest with a tag the identifies the requester.
-type missingBlobRequest struct {
-	digest digest.Digest
-	tag    string
-}
-
-// missingBlobRequestBundle is a set of digests, each is associated with multiple tags (query callers).
-// It is used for unified requests when multiple concurrent requesters share seats in the same bundle.
-type missingBlobRequestBundle = map[digest.Digest][]string
-
-// queryCaller is channel that represents an active query caller who is listening
-// on it waiting for responses.
-// The channel is owned by the processor and closed when the query caller signals to the processor
-// that it is no longer interested in responses.
-// That signal is sent via a context that is captured in a closure so no need to capture it again here.
-// See registerQueryCaller for details.
-type queryCaller = chan MissingBlobsResponse
-
-type uploadRequestBundle = map[digest.Digest][]string
-
-type uploadCaller = chan UploadResponse
-
-type blob struct {
-	digest digest.Digest
-	b      []byte
-	r      io.ReadCloser
-	tag    string
-}
-
-type digestedNode struct {
-	digest digest.Digest
-	// repb.DirectoryNode, repb.FileNode, or repb.SymlinkNode
-	proto proto.Message
+// streamingUploader implements the corresponding interface.
+type streamingUploader struct {
+	*uploaderv2
 }
 
 // uploader represents the state of an uploader implementation.
@@ -157,28 +102,29 @@ type uploaderv2 struct {
 	querySem    *semaphore.Weighted
 	uploadSem   *semaphore.Weighted
 	streamSem   *semaphore.Weighted
-	retryPolicy retry.BackoffPolicy
 
 	// IO controls.
-	ioCfg        IOConfig
-	buffers      sync.Pool
-	zstdEncoders sync.Pool
-	walkSem      *semaphore.Weighted
-	walkWg       sync.WaitGroup
-	ioSem        *semaphore.Weighted
-	ioLargeSem   *semaphore.Weighted
-	parentCache  sliceCache
+	ioCfg                 IOConfig
+	buffers               sync.Pool
+	zstdEncoders          sync.Pool
+	walkSem               *semaphore.Weighted
+	walkWg                sync.WaitGroup
+	ioSem                 *semaphore.Weighted
+	ioLargeSem            *semaphore.Weighted
+	dirChildren           sliceCache
+	queryRequestBaseSize  int
+	uploadRequestBaseSize int
 
 	// Concurrency controls.
-
+	processorWg sync.WaitGroup
 	// queryChan is the fan-in channel for queries.
-	// This channel is deliberately not closed to avoid send-on-closed-channel errors.
 	// All senders must also listen on the context to avoid deadlocks.
 	queryChan chan missingBlobRequest
 	// uploadChan is the fan-in channel for uploads.
-	// This channel is deliberately not closed to avoid send-on-closed-channel errors.
 	// All senders must also listen on the context to avoid deadlocks.
-	uploadChan chan UploadRequest
+	uploadChan         chan UploadRequest
+	uploadBundlerChan  chan blob
+	uploadStreamerChan chan blob
 	// grpcWg is used to wait for in-flight gRPC calls upon graceful termination.
 	grpcWg sync.WaitGroup
 
@@ -197,398 +143,6 @@ type uploaderv2 struct {
 	uploadCallerWg sync.WaitGroup
 }
 
-// batchingUplodaer implements the corresponding interface.
-type batchingUploader struct {
-	*uploaderv2
-}
-
-// streamingUploader implements the corresponding interface.
-type streamingUploader struct {
-	*uploaderv2
-}
-
-// MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
-//
-// The digests are batched based on the set gRPC limits (count and size).
-// Errors from a batch do not affect other batches, but all digests from such bad batches will be reported as missing by this call.
-// In other words, if an error is returned, any digest that is not in the returned slice is not missing.
-// If no error is returned, the returned slice contains all the missing digests.
-func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
-	if len(digests) < 1 {
-		return nil, nil
-	}
-
-	// This implementation converts the underlying nonblocking implementation into a blocking one.
-	// A separate goroutine is used to push the requests into the processor.
-	// The receiving code blocks the goroutine of the call until all responses are received or the context is canceled.
-
-	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(ctx)
-	defer ctxQueryCallerCancel()
-
-	tag, resChan := u.registerQueryCaller(ctxQueryCaller)
-	go func() {
-		for _, d := range digests {
-			select {
-			case <-ctx.Done():
-				return
-			case u.queryChan <- missingBlobRequest{digest: d, tag: tag}:
-			}
-		}
-	}()
-
-	var missing []digest.Digest
-	var err error
-	var total = len(digests)
-	var i = 0
-	for r := range resChan {
-		switch {
-		case r.Err != nil:
-			missing = append(missing, r.Digest)
-			// Don't join the same error from a batch more than once.
-			// This may not prevent similar errors from multiple batches sine errors.Is does not necessarily match by content.
-			if !errors.Is(err, r.Err) {
-				err = errors.Join(r.Err, err)
-			}
-		case r.Missing:
-			missing = append(missing, r.Digest)
-		}
-		i += 1
-		if i >= total {
-			ctxQueryCallerCancel()
-			// It's tempting to break here, but the channel must be drained until the processor closes it.
-		}
-	}
-
-	// Request aborted, possibly midflight. Reporting a hit as a miss is safer than otherwise.
-	if ctx.Err() != nil {
-		return digests, ctx.Err()
-	}
-
-	// Ideally, this should never be true at this point. Otherwise, it's a fatal error.
-	if i < total {
-		panic(fmt.Sprintf("channel closed unexpectedly: got %d msgs, want %d", i, total))
-	}
-
-	return missing, err
-}
-
-// Upload processes the specified blobs for upload. Blobs that already exist in the CAS are not uploaded.
-// Any path or file that matches the specified filter is excluded.
-// Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
-//
-// Returns a slice of the digests of the blobs that were uploaded (excluding the ones that already exist in the CAS).
-// If the returned error is nil, any digest that is not in the returned slice was already in the CAS, and any digest
-// that is in the slice may have been successfully uploaded or not.
-// If the returned error is not nil, the returned slice may be incomplete.
-func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.Options, shouldSkip ep.Filter) ([]digest.Digest, Stats, error) {
-	var stats Stats
-
-	if len(paths) < 1 {
-		return nil, stats, nil
-	}
-
-	// This implementation converts the underlying nonblocking implementation into a blocking one.
-	// A separate goroutine is used to push the requests into the processor.
-	// The receiving code blocks the goroutine of the call until all responses are received or the context is canceled.
-
-	ctxUploadCaller, ctxUploaderCallerCancel := context.WithCancel(ctx)
-	defer ctxUploaderCallerCancel()
-
-	tag, resChan := u.registerUploadCaller(ctxUploadCaller)
-	go func() {
-		for _, p := range paths {
-			select {
-			case <-ctx.Done():
-				return
-			case u.uploadChan <- UploadRequest{Path: p, SymlinkOptions: slo, ShouldSkip: shouldSkip, tag: tag}:
-			}
-		}
-	}()
-
-	var missing []digest.Digest
-	var err error
-	var total = len(paths)
-	var i = 0
-	for r := range resChan {
-		switch {
-		case r.Err != nil:
-			missing = append(missing, r.Digest)
-			// Don't join the same error from a batch more than once.
-			// This may not prevent similar errors from multiple batches sine errors.Is does not necessarily match by content.
-			if !errors.Is(err, r.Err) {
-				err = errors.Join(r.Err, err)
-			}
-		}
-		stats.Add(r.Stats)
-		i += 1
-		if i >= total {
-			ctxUploaderCallerCancel()
-			// It's tempting to break here, but the channel must be drained until the processor closes it.
-		}
-	}
-
-	// Request aborted, possibly midflight. Reporting a hit as a miss is safer than otherwise.
-	if ctx.Err() != nil {
-		return missing, stats, ctx.Err()
-	}
-
-	// Ideally, this should never be true at this point. Otherwise, it's a fatal error.
-	if i < total {
-		panic(fmt.Sprintf("channel closed unexpectedly: got %d msgs, want %d", i, total))
-	}
-
-	return missing, stats, err
-}
-
-// WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
-// The specified size is used to toggle compression as well as report some stats. It must be reflect the actual number of bytes the specified reader has to give.
-// If finish is true, the server is notified to finalize the resource name and further writes may not succeed.
-// The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
-// In case of error while the returned stats indicate that all the bytes were sent, it is still not a guarantee all the bytes
-// were received by the server since an acknlowedgement was not observed.
-func (u *batchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error) {
-	stats := Stats{}
-
-	if err := u.streamSem.Acquire(ctx, 1); err != nil {
-		// err is always ctx.Err(), so abort immediately.
-		return stats, err
-	}
-	defer u.streamSem.Release(1)
-
-	var src = r
-
-	// If compression is enabled, plug in the encoder via a pipe.
-	var errCompr error
-	var nRawBytes int64
-	var encWg sync.WaitGroup
-	if size >= u.ioCfg.CompressionSizeThreshold {
-		pr, pw := io.Pipe()
-		// Closing pr always returns a nil error, but also sends ErrClosedPipe to pw.
-		defer pr.Close()
-		src = pr
-
-		enc := zstdEncoders.Get().(*zstd.Encoder)
-		defer zstdEncoders.Put(enc)
-		// (Re)initialize the encoder with this writer.
-		enc.Reset(pw)
-		// Get it going.
-		encWg.Add(1)
-		go func() {
-			defer encWg.Done()
-			// Closing pw always returns a nil error, but also sends an EOF to pr.
-			defer pw.Close()
-
-			// Closing the encoder is necessary to flush remaining bytes.
-			defer func() {
-				if errClose := enc.Close(); errClose != nil {
-					errCompr = errors.Join(ErrCompression, errClose, errCompr)
-				}
-			}()
-
-			// The encoder will theoretically read continuously. However, pw will block it
-			// while pr is not reading from the other side.
-			// In other words, the chunk size of the encoder's output is controlled by the reader.
-			var errEnc error
-			switch nRawBytes, errEnc = enc.ReadFrom(r); {
-			case errEnc == io.ErrClosedPipe:
-				// pr was closed first, which means the actual error is on that end.
-				return
-			case errEnc != nil:
-				errCompr = errors.Join(ErrCompression, errEnc)
-				return
-			}
-		}()
-	}
-
-	ctx, ctxCancel := context.WithCancel(ctx)
-	defer ctxCancel()
-
-	stream, errStream := u.byteStream.Write(ctx)
-	if errStream != nil {
-		return stats, errors.Join(ErrGRPC, errStream)
-	}
-
-	buf := u.buffers.Get().([]byte)
-	defer u.buffers.Put(buf)
-
-	cacheHit := false
-	var err error
-	req := &bspb.WriteRequest{
-		ResourceName: name,
-		WriteOffset:  offset,
-	}
-	for {
-		n, errRead := src.Read(buf)
-		if errRead != nil && errRead != io.EOF {
-			err = errors.Join(ErrIO, errRead, err)
-			break
-		}
-
-		n64 := int64(n)
-		stats.LogicalBytesMoved += n64 // This may be adjusted later to exclude compression. See below.
-		stats.EffectiveBytesMoved += n64
-
-		req.Data = buf[:n]
-		req.FinishWrite = finish && errRead == io.EOF
-		errStream := u.withTimeout(u.streamRpcConfig.Timeout, ctxCancel, func() error {
-			return u.withRetry(ctx, func() error {
-				stats.TotalBytesMoved += n64
-				return stream.Send(req)
-			})
-		})
-		if errStream != nil && errStream != io.EOF {
-			err = errors.Join(ErrGRPC, errStream, err)
-			break
-		}
-
-		// The server says the content for the specified resource already exists.
-		if errStream == io.EOF {
-			cacheHit = true
-			break
-		}
-
-		req.WriteOffset += n64
-
-		// The reader is done (all bytes processed or interrupted).
-		if errRead == io.EOF {
-			break
-		}
-	}
-
-	// Close the reader to signal to the encoder's goroutine to terminate.
-	if srcCloser, ok := src.(io.Closer); ok {
-		if errClose := srcCloser.Close(); errClose != nil {
-			err = errors.Join(ErrIO, errClose, err)
-		}
-	}
-
-	// This theoratically will block until the encoder's goroutine returns.
-	// However, closing the reader eventually terminates that goroutine.
-	// This is necessary because the encoder's goroutine currently owns errCompr and nRawBytes.
-	encWg.Wait()
-	if errCompr != nil {
-		err = errors.Join(ErrCompression, errCompr, err)
-	}
-
-	// Capture stats before processing errors.
-	stats.BytesRequested = size
-	if nRawBytes > 0 {
-		// Compression was turned on.
-		// nRawBytes may be smaller than compressed bytes (additional headers without effective compression).
-		stats.LogicalBytesMoved = nRawBytes
-	}
-	if cacheHit {
-		stats.LogicalBytesCached = size
-	}
-	stats.LogicalBytesStreamed = stats.LogicalBytesMoved
-	stats.LogicalBytesBatched = 0
-	stats.InputFileCount = 0
-	stats.InputDirCount = 0
-	stats.InputSymlinkCount = 0
-	if cacheHit {
-		stats.CacheHitCount = 1
-	} else {
-		stats.CacheMissCount = 1
-	}
-	stats.DigestCount = 0
-	stats.BatchedCount = 0
-	if err == nil {
-		stats.StreamedCount = 1
-	}
-
-	res, errClose := stream.CloseAndRecv()
-	if errClose != nil {
-		return stats, errors.Join(ErrGRPC, errClose, err)
-	}
-
-	// CommittedSize is based on the uncompressed size of the blob.
-	if !cacheHit && res.CommittedSize != size {
-		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, size), err)
-	}
-
-	return stats, err
-}
-
-// MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
-//
-// The caller must close the specified input channel as a termination signal.
-// The returned channel is closed when no more responses are available for this call. This could indicate
-// completion or abortion (in case the context was canceled).
-func (u *streamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
-	// The implementation here acts like a pipe with a count-based coordinator.
-	// Closing the input channel should not close the pipe until all the requests are piped through to the responses channel.
-	// At the same time, all goroutines must abort when the context is done.
-	// To ahcieve this, a third goroutine (in addition to a sender and a receiver) is used to maintain a count of pending requests.
-	// Once the count is reduced to zero after the sender is done, the receiver is closed and the processor is notified to unregister this query caller.
-
-	ch := make(chan MissingBlobsResponse)
-	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(ctx)
-	tag, resChan := u.registerQueryCaller(ctxQueryCaller)
-
-	// Counter.
-	pending := 0
-	pendingChan := make(chan int)
-	u.queryCallerWg.Add(1)
-	go func() {
-		defer u.queryCallerWg.Done()
-		defer ctxQueryCallerCancel()
-		done := false
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case x := <-pendingChan: // The channel is never closed so no need to capture the closing signal.
-				if x == 0 {
-					done = true
-				}
-				pending += x
-				if pending == 0 && done {
-					return
-				}
-			}
-		}
-	}()
-
-	// Receiver.
-	u.queryCallerWg.Add(1)
-	go func() {
-		defer u.queryCallerWg.Done()
-		// Continue to drain until the processor closes the channel to avoid deadlocks.
-		for r := range resChan {
-			ch <- r
-			pendingChan <- -1
-		}
-		close(ch)
-	}()
-
-	// Sender.
-	u.queryCallerWg.Add(1)
-	go func() {
-		defer u.queryCallerWg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				ctxQueryCallerCancel()
-				return
-			case d, ok := <-in:
-				if !ok {
-					pendingChan <- 0
-					return
-				}
-				u.queryChan <- missingBlobRequest{digest: d, tag: tag}
-				pendingChan <- 1
-			}
-		}
-	}()
-
-	return ch
-}
-
-// Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
-func (u *streamingUploader) Upload(context.Context, <-chan ep.Abs, slo.Options, ep.Filter) <-chan UploadResponse {
-	panic("not yet implemented")
-}
-
 // Close blocks until all resources have been cleaned up.
 // It always returns nil.
 func (u *uploaderv2) Close() error {
@@ -600,11 +154,16 @@ func (u *uploaderv2) Close() error {
 	u.queryCallerWg.Wait()
 	// Wait for upload callers to drain their responses.
 	u.uploadCallerWg.Wait()
+	close(u.queryChan)
+	close(u.uploadChan)
+	close(u.uploadBundlerChan)
+	close(u.uploadStreamerChan)
+	u.processorWg.Wait()
 	return nil
 }
 
-func (u *uploaderv2) withRetry(ctx context.Context, fn func() error) error {
-	return retry.WithPolicy(ctx, retry.TransientOnly, u.retryPolicy, fn)
+func (u *uploaderv2) withRetry(ctx context.Context, retryPolicy retry.BackoffPolicy, fn func() error) error {
+	return retry.WithPolicy(ctx, retry.TransientOnly, retryPolicy, fn)
 }
 
 func (u *uploaderv2) withTimeout(timeout time.Duration, cancelFn context.CancelFunc, fn func() error) error {
@@ -622,542 +181,6 @@ func (u *uploaderv2) withTimeout(timeout time.Duration, cancelFn context.CancelF
 		}
 	}()
 	return fn()
-}
-
-// registerQueryCaller returns a new channel to the caller to read responses from.
-//
-// Only requests associated with the returned tag are sent on the returned channel.
-//
-// The returned channel is closed when the specified context is done. The caller should
-// ensure the context is canceled at the right time to avoid send-on-closed-channel errors
-// and avoid deadlocks.
-//
-// The caller must continue to drain the returned channel until it is closed to avoid deadlocks.
-func (u *uploaderv2) registerQueryCaller(ctx context.Context) (string, <-chan MissingBlobsResponse) {
-	tag := uuid.New()
-
-	// Serialize this block to avoid concurrent map-read-write errors.
-	u.queryCallerMutex.Lock()
-	qc, ok := u.queryCaller[tag]
-	if !ok {
-		qc = make(chan MissingBlobsResponse)
-		u.queryCaller[tag] = qc
-	}
-	u.queryCallerMutex.Unlock()
-
-	u.queryCallerWg.Add(1)
-	go func() {
-		<-ctx.Done()
-		// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
-		u.queryCallerMutex.Lock()
-		delete(u.queryCaller, tag)
-		u.queryCallerMutex.Unlock()
-
-		close(qc)
-		u.queryCallerWg.Done()
-	}()
-
-	return tag, qc
-}
-
-func (u *uploaderv2) notifyQueryCallers(r MissingBlobsResponse, tags ...string) {
-	// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
-	u.queryCallerMutex.Lock()
-	defer u.queryCallerMutex.Unlock()
-	for _, tag := range tags {
-		qc, ok := u.queryCaller[tag]
-		if ok {
-			// Possible deadlock if the receiver had abandoned the channel.
-			qc <- r
-		}
-	}
-}
-
-// callMissingBlobs calls the gRPC endpoint and notifies query callers of the results.
-// It assumes ownership of the reqs argument.
-func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
-	u.grpcWg.Add(1)
-	defer u.grpcWg.Done()
-
-	digests := make([]*repb.Digest, 0, len(bundle))
-	var oversized []digest.Digest
-	for d := range bundle {
-		if d.Size > int64(u.queryRpcConfig.BytesLimit) {
-			oversized = append(oversized, d)
-			continue
-		}
-		digests = append(digests, d.ToProto())
-	}
-
-	// Report oversized blobs.
-	for _, d := range oversized {
-		u.notifyQueryCallers(MissingBlobsResponse{
-			Digest: d,
-			Err:    ErrOversizedBlob,
-		}, bundle[d]...)
-	}
-
-	if len(digests) < 1 {
-		return
-	}
-
-	req := &repb.FindMissingBlobsRequest{
-		InstanceName: u.instanceName,
-		BlobDigests:  digests,
-	}
-
-	var res *repb.FindMissingBlobsResponse
-	var err error
-	ctx, ctxCancel := context.WithCancel(ctx)
-	err = u.withTimeout(u.queryRpcConfig.Timeout, ctxCancel, func() error {
-		return u.withRetry(ctx, func() error {
-			res, err = u.cas.FindMissingBlobs(ctx, req)
-			return err
-		})
-	})
-	ctxCancel()
-
-	var missing []*repb.Digest
-	if err != nil {
-		err = errors.Join(ErrGRPC, err)
-		missing = append(missing, digests...)
-	} else {
-		missing = append(missing, res.MissingBlobDigests...)
-	}
-
-	// Reprot missing.
-	for _, dpb := range missing {
-		d := digest.NewFromProtoUnvalidated(dpb)
-		u.notifyQueryCallers(MissingBlobsResponse{
-			Digest:  d,
-			Missing: true,
-			Err:     err,
-		}, bundle[d]...)
-		delete(bundle, d)
-	}
-
-	// Report non-missing.
-	for d := range bundle {
-		u.notifyQueryCallers(MissingBlobsResponse{
-			Digest:  d,
-			Missing: false,
-			// This should always be nil at this point.
-			Err: err,
-		}, bundle[d]...)
-	}
-}
-
-func (u *uploaderv2) queryProcessor(ctx context.Context) {
-	bundle := make(missingBlobRequestBundle)
-	var bundleSize int64
-
-	handle := func() {
-		if len(bundle) < 1 {
-			return
-		}
-		// Block the entire processor if the concurrency limit is reached.
-		if err := u.querySem.Acquire(ctx, 1); err != nil {
-			// err is always ctx.Err(), so abort immediately.
-			return
-		}
-		defer u.querySem.Release(1)
-
-		go u.callMissingBlobs(ctx, bundle)
-
-		bundle = make(missingBlobRequestBundle)
-		bundleSize = 0
-	}
-
-	bundleTicker := time.NewTicker(u.queryRpcConfig.BundleTimeout)
-	defer bundleTicker.Stop()
-
-	for {
-		select {
-		case req, ok := <-u.queryChan:
-			if !ok {
-				// This should never happen since this channel is never closed.
-				return
-			}
-
-			// Check size threshold. Oversized items are handled downstream.
-			if bundleSize+req.digest.Size >= int64(u.queryRpcConfig.BytesLimit) {
-				handle()
-			}
-
-			// Duplicate tags are allowed to ensure the query caller can match the number of responses to the number of requests.
-			bundle[req.digest] = append(bundle[req.digest], req.tag)
-			bundleSize += req.digest.Size
-
-			// Check length threshold.
-			if len(bundle) >= u.queryRpcConfig.ItemsLimit {
-				handle()
-				continue
-			}
-		case <-bundleTicker.C:
-			handle()
-		case <-ctx.Done():
-			// Nothing to wait for since all the senders and receivers should have terminated as well.
-			// The only things that might still be in-flight are the gRPC calls, which will eventually terminate since
-			// there are no active query callers.
-			return
-		}
-	}
-}
-
-// registerUploadCaller returns a new channel to the caller to read responses from.
-//
-// Only requests associated with the returned tag are sent on the returned channel.
-//
-// The returned channel is closed when the specified context is done. The caller should
-// ensure the context is canceled at the right time to avoid send-on-closed-channel errors
-// and avoid deadlocks.
-//
-// The caller must continue to drain the returned channel until it is closed to avoid deadlocks.
-func (u *uploaderv2) registerUploadCaller(ctx context.Context) (string, <-chan UploadResponse) {
-	tag := uuid.New()
-
-	// Serialize this block to avoid concurrent map-read-write errors.
-	u.uploadCallerMutex.Lock()
-	uc, ok := u.uploadCaller[tag]
-	if !ok {
-		uc = make(chan UploadResponse)
-		u.uploadCaller[tag] = uc
-	}
-	u.uploadCallerMutex.Unlock()
-
-	u.uploadCallerWg.Add(1)
-	go func() {
-		<-ctx.Done()
-		// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
-		u.uploadCallerMutex.Lock()
-		delete(u.uploadCaller, tag)
-		u.uploadCallerMutex.Unlock()
-
-		close(uc)
-		u.uploadCallerWg.Done()
-	}()
-
-	return tag, uc
-}
-
-func (u *uploaderv2) notifyUploadCallers(r UploadResponse, tags ...string) {
-	// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
-	u.uploadCallerMutex.Lock()
-	defer u.uploadCallerMutex.Unlock()
-	for _, tag := range tags {
-		uc, ok := u.uploadCaller[tag]
-		if ok {
-			// Possible deadlock if the receiver had abandoned the channel.
-			uc <- r
-		}
-	}
-}
-
-// uploadDispatcher is the entry point for upload requests.
-// It starts by computing a merkle tree from the file system view specified by the request and its filter.
-// Files and blobs are uploaded during the digestion to minimize IO induced latency. This effectively
-// optimizes for frequent uploads of never-seen-before files.
-// Using a depth-first style file traversal suits this use-case.
-// To optimize for frequent uploads of the same files, consider computing the merkle tree separately
-// then construct a list of blobs that are missing from the CAS and upload that list.
-func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
-	dispatch := func(b blob) {
-		switch {
-		case b.digest.Size <= u.ioCfg.SmallFileSizeThreshold:
-		// TODO: Glob it and send to bundler.
-		case b.digest.Size >= u.ioCfg.LargeFileSizeThreshold:
-		// TODO: Send to streamer.
-		default:
-			// TODO: Send to bundler.
-		}
-	}
-
-	// TODO: cooridnate with bundler and streamer to collect results related to each request.
-	for {
-		select {
-		case req, ok := <-u.uploadChan:
-			if !ok {
-				// This should never happen since this channel is never closed.
-				return
-			}
-
-			if err := u.walkSem.Acquire(ctx, 1); err != nil {
-				return
-			}
-			u.walkWg.Add(1)
-			go func() {
-				defer u.walkWg.Done()
-				defer u.walkSem.Release(1)
-
-				walker.DepthFirst(req.Path, func(path ep.Abs, info fs.FileInfo, err error) error {
-					select {
-					case <-ctx.Done():
-						return walker.ErrCancel
-					default:
-					}
-
-					if err != nil {
-						return walker.ErrCancel
-					}
-
-					key := path.String() + req.ShouldSkip.String()
-					parentKey := path.Dir().String() + req.ShouldSkip.String()
-
-					// Pre-access.
-					if info == nil {
-						// Excluded.
-						if req.ShouldSkip.Path(path.String()) {
-							return walker.ErrSkip
-						}
-
-						// Already processed.
-						if node, ok := u.ioCfg.Cache.Load(key); ok {
-							// TODO: avoid duplicates
-							u.parentCache.Append(parentKey, node)
-							// TODO: ensure all callers get their copy and correct stats.
-							return ErrSkip
-						}
-
-						// Access it.
-						return nil
-					}
-
-					// Excluded.
-					if req.ShouldSkip.File(path.String(), info.Mode()) {
-						return walker.ErrSkip
-					}
-
-					switch {
-					case info.Mode()&fs.ModeSymlink == fs.ModeSymlink:
-						// Might need to follow target and/or construct a symlink node and append it to its parent directory node.
-
-						// Replace symlink with target.
-						if req.SymlinkOptions.Resolve() {
-							return walker.ErrReplace
-						}
-						if req.SymlinkOptions.ResolveExternal() {
-							if _, err := ep.Descendant(req.Path, path); err != nil {
-								return walker.ErrReplace
-							}
-						}
-
-						target, err := os.Readlink(path.String())
-						// TODO: capture err
-						if err != nil {
-							return walker.ErrCancel
-						}
-
-						if req.SymlinkOptions.NoDangling() {
-							_, err := os.Lstat(target)
-							// TODO: capture err
-							if err != nil {
-								return walker.ErrCancel
-							}
-						}
-
-						if req.SymlinkOptions.Preserve() {
-							node := &repb.SymlinkNode{
-								Name: path.Base().String(),
-								// TODO: target must be relative to root.
-								Target: target,
-							}
-							u.parentCache.Append(parentKey, node)
-						}
-
-						if req.SymlinkOptions.IncludeTarget() {
-							return nil
-						}
-						return walker.ErrSkip
-
-					case info.Mode().IsDir():
-						// All the descendants have already been visited.
-						// Construct a directory node and dispatch it.
-						dir := &repb.Directory{}
-						node := &repb.DirectoryNode{
-							Name: path.Base().String(),
-						}
-						for _, child := range u.parentCache.Load(key) {
-							switch n := child.(type) {
-							case *repb.FileNode:
-								dir.Files = append(dir.Files, n)
-							case *repb.DirectoryNode:
-								dir.Directories = append(dir.Directories, n)
-							case *repb.SymlinkNode:
-								dir.Symlinks = append(dir.Symlinks, n)
-							}
-						}
-						// Sort children to get a deterministic digest.
-						sort.Slice(dir.Files, func(i, j int) bool {
-							return dir.Files[i].Name < dir.Files[j].Name
-						})
-						sort.Slice(dir.Directories, func(i, j int) bool {
-							return dir.Directories[i].Name < dir.Directories[j].Name
-						})
-						sort.Slice(dir.Symlinks, func(i, j int) bool {
-							return dir.Symlinks[i].Name < dir.Symlinks[j].Name
-						})
-						d, err := digest.NewFromMessage(dir)
-						// TODO: capture err
-						if err != nil {
-							return walker.ErrCancel
-						}
-						node.Digest = d.ToProto()
-						u.ioCfg.Cache.Store(key, node)
-						dispatch(blob{}) // TODO
-
-					case info.Mode().IsRegular():
-						// Digest the content, cache it, and dispatch it.
-						node := &repb.FileNode{
-							Name:         path.Base().String(),
-							IsExecutable: info.Mode()&0100 != 0,
-						}
-						if err := u.ioSem.Acquire(ctx, 1); err != nil {
-							return walker.ErrCancel
-						}
-						defer u.ioSem.Release(1)
-
-						if info.Size() <= u.ioCfg.SmallFileSizeThreshold {
-							f, err := os.Open(path.String())
-							// TODO: capture err
-							if err != nil {
-								return walker.ErrCancel
-							}
-							b, err := io.ReadAll(f)
-							_ = f.Close() // TODO: capture err
-							// TODO: capture err
-							if err != nil {
-								return walker.ErrCancel
-							}
-							node.Digest = digest.NewFromBlob(b).ToProto()
-							u.ioCfg.Cache.Store(key, node)
-							u.parentCache.Append(parentKey, node)
-							dispatch(blob{b: b}) // TODO
-							return nil
-						}
-
-						if info.Size() < u.ioCfg.LargeFileSizeThreshold {
-							d, err := digest.NewFromFile(path.String())
-							// TODO: capture err
-							if err != nil {
-								return walker.ErrCancel
-							}
-							node.Digest = d.ToProto()
-							u.ioCfg.Cache.Store(key, node)
-							u.parentCache.Append(parentKey, node)
-							dispatch(blob{r: nil}) // TODO
-							return nil
-						}
-
-						if err := u.ioLargeSem.Acquire(ctx, 1); err != nil {
-							return walker.ErrCancel
-						}
-						f, err := os.Open(path.String())
-						// TODO: capture err
-						if err != nil {
-							u.ioLargeSem.Release(1)
-							return walker.ErrCancel
-						}
-						d, err := digest.NewFromReader(f)
-						if err != nil {
-							_ = f.Close()
-							u.ioLargeSem.Release(1)
-							return walker.ErrCancel
-						}
-						node.Digest = d.ToProto()
-						u.ioCfg.Cache.Store(key, node)
-						u.parentCache.Append(parentKey, node)
-						dispatch(blob{r: nil}) // TODO
-						return nil
-
-					default:
-						// Skip everything else (e.g. sockets and pipes).
-						return walker.ErrSkip
-					}
-					return nil
-				})
-			}()
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-func (u *uploaderv2) uploadBundler(ctx context.Context) {
-	// TODO: should pipe to query before bundling for upload.
-	// bundle := make(uploadRequestBundle)
-	// var bundleSize int64
-	//
-	// handle := func() {
-	// 	if len(bundle) < 1 {
-	// 		return
-	// 	}
-	// 	// Block the entire processor if the concurrency limit is reached.
-	// 	if err := u.uploadSem.Acquire(ctx, 1); err != nil {
-	// 		// err is always ctx.Err(), so abort immediately.
-	// 		return
-	// 	}
-	// 	defer u.uploadSem.Release(1)
-	//
-	// 	// go u.callMissingBlobs(ctx, bundle)
-	//
-	// 	bundle = make(uploadRequestBundle)
-	// 	bundleSize = 0
-	// }
-	//
-	// bundleTicker := time.NewTicker(u.uploadRpcConfig.BundleTimeout)
-	// defer bundleTicker.Stop()
-	//
-	// for {
-	// 	select {
-	// 	case req, ok := <-u.uploadChan:
-	// 		if !ok {
-	// 			// This should never happen since this channel is never closed.
-	// 			return
-	// 		}
-	//
-	// 		// TODO: stream oversized items.
-	// 		if bundleSize+d.Size >= int64(u.uploadRpcConfig.BytesLimit) {
-	// 			handle()
-	// 		}
-	//
-	// 		// Duplicate tags are allowed to ensure the query caller can match the number of responses to the number of requests.
-	// 		bundle[d] = append(bundle[d], req.tag)
-	// 		bundleSize += d.Size
-	//
-	// 		// Check length threshold.
-	// 		if len(bundle) >= u.uploadRpcConfig.ItemsLimit {
-	// 			handle()
-	// 			continue
-	// 		}
-	// 	case <-bundleTicker.C:
-	// 		handle()
-	// 	case <-ctx.Done():
-	// 		// Nothing to wait for since all the senders and receivers should have terminated as well.
-	// 		// The only things that might still be in-flight are the gRPC calls, which will eventually terminate since
-	// 		// there are no active query callers.
-	// 		return
-	// 	}
-	// }
-}
-
-func (u *uploaderv2) uploadStreamer(ctx context.Context) {
-
-}
-
-func digestsFromProtos(dprotots ...*repb.Digest) []digest.Digest {
-	ds := make([]digest.Digest, len(dprotots))
-	for i, dp := range dprotots {
-		ds[i] = digest.NewFromProtoUnvalidated(dp)
-	}
-	return ds
-}
-
-func digestsToProtos(digests ...digest.Digest) []*repb.Digest {
-	dp := make([]*repb.Digest, len(digests))
-	for i, d := range digests {
-		dp[i] = d.ToProto()
-	}
-	return dp
 }
 
 func newUploaderv2(
@@ -1213,14 +236,20 @@ func newUploaderv2(
 		walkSem:     semaphore.NewWeighted(int64(ioCfg.ConcurrentWalksLimit)),
 		ioSem:       semaphore.NewWeighted(int64(ioCfg.OpenFilesLimit)),
 		ioLargeSem:  semaphore.NewWeighted(int64(ioCfg.OpenLargeFilesLimit)),
-		parentCache: initSliceCache(),
+		dirChildren: initSliceCache(),
 
-		queryChan:    make(chan missingBlobRequest),
-		uploadChan:   make(chan UploadRequest),
-		queryCaller:  make(map[string]queryCaller),
-		uploadCaller: make(map[string]uploadCaller),
+		queryChan:          make(chan missingBlobRequest),
+		uploadChan:         make(chan UploadRequest),
+		uploadBundlerChan:  make(chan blob),
+		uploadStreamerChan: make(chan blob),
+		queryCaller:        make(map[string]queryCaller),
+		uploadCaller:       make(map[string]uploadCaller),
+
+		queryRequestBaseSize:  proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),
+		uploadRequestBaseSize: proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),
 	}
 
+	u.processorWg.Add(1)
 	go u.queryProcessor(ctx)
 	return u, nil
 }

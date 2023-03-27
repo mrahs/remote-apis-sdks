@@ -2,7 +2,10 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "exppath",
-    srcs = ["exppath.go"],
+    srcs = [
+        "exppath.go",
+        "filter.go",
+    ],
     importpath = "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath",
     visibility = ["//visibility:public"],
 )
