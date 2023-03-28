@@ -360,9 +360,9 @@ func (u *uploaderv2) notifyUploadCallers(r UploadResponse, tags ...string) {
 func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 	dispatch := func(b blob) {
 		switch {
-		case b.bytes == nil && b.reader == nil && b.path == "":
-			// TODO: notify uploader of a cache hit.
-		case b.reader != nil:
+		case len(b.bytes) == 0 && b.reader == nil && b.path == "":
+			// TODO: cache hit; just notify the uploader.
+		case len(b.bytes) > 0:
 			u.uploadBundlerChan <- b
 		default:
 			u.uploadStreamerChan <- b
@@ -490,18 +490,16 @@ func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (
 	}
 
 	target, err := os.Readlink(path.String())
-	// TODO: err
 	if err != nil {
-		return nil, walker.ErrCancel
+		return nil, errors.Join(err, walker.ErrCancel)
 	}
 
 	// Cannot access the target since it might be relative to the symlink directory, not the cwd of the process.
 	var targetRelative string
 	if filepath.IsAbs(target) {
 		targetRelative, err = filepath.Rel(path.Dir().String(), target)
-		// TODO: err
 		if err != nil {
-			return nil, walker.ErrCancel
+			return nil, errors.Join(err, walker.ErrCancel)
 		}
 	} else {
 		targetRelative = target
@@ -510,17 +508,15 @@ func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (
 
 	if slo.NoDangling() {
 		_, err := os.Lstat(target)
-		// TODO: err
 		if err != nil {
-			return nil, walker.ErrCancel
+			return nil, errors.Join(err, walker.ErrCancel)
 		}
 	}
 
 	var node *repb.SymlinkNode
 	if slo.Preserve() {
-		// TODO: err
 		if err != nil {
-			return nil, walker.ErrCancel
+			return nil, errors.Join(err, walker.ErrCancel)
 		}
 		node = &repb.SymlinkNode{
 			Name:   path.Base().String(),
@@ -561,9 +557,8 @@ func (u *uploaderv2) digestDirectory(path ep.Abs, children []interface{}) (*repb
 		return dir.Symlinks[i].Name < dir.Symlinks[j].Name
 	})
 	b, err := proto.Marshal(dir)
-	// TODO: err
 	if err != nil {
-		return nil, nil, walker.ErrCancel
+		return nil, nil, errors.Join(err, walker.ErrCancel)
 	}
 	d := digest.NewFromBlob(b)
 	node.Digest = d.ToProto()
@@ -592,16 +587,18 @@ func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileIn
 	}
 	if info.Size() <= u.ioCfg.SmallFileSizeThreshold {
 		f, err := os.Open(path.String())
-		// TODO: err
 		if err != nil {
-			return nil, nil, walker.ErrCancel
+			return nil, nil, errors.Join(err, walker.ErrCancel)
 		}
-		defer f.Close() // TODO: err
+		defer func() {
+			if errClose := f.Close(); errClose != nil {
+				err = errors.Join(errClose, err)
+			}
+		}()
 
 		b, err := io.ReadAll(f)
-		// TODO: err
 		if err != nil {
-			return nil, nil, walker.ErrCancel
+			return nil, nil, errors.Join(err, walker.ErrCancel)
 		}
 		node.Digest = digest.NewFromBlob(b).ToProto()
 		return node, &blob{digest: node.Digest, bytes: b}, nil
@@ -609,9 +606,8 @@ func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileIn
 
 	if info.Size() < u.ioCfg.LargeFileSizeThreshold {
 		d, err := digest.NewFromFile(path.String())
-		// TODO: err
 		if err != nil {
-			return nil, nil, walker.ErrCancel
+			return nil, nil, errors.Join(err, walker.ErrCancel)
 		}
 		node.Digest = d.ToProto()
 		return node, &blob{digest: node.Digest, path: path.String()}, nil
@@ -621,22 +617,25 @@ func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileIn
 		return nil, nil, walker.ErrCancel
 	}
 	f, err := os.Open(path.String())
-	// TODO: err
 	if err != nil {
 		u.ioLargeSem.Release(1)
-		return nil, nil, walker.ErrCancel
+		return nil, nil, errors.Join(err, walker.ErrCancel)
 	}
 	d, err := digest.NewFromReader(f)
 	if err != nil {
-		_ = f.Close() // TODO: err
+		errClose := f.Close()
+		if errClose != nil {
+			err = errors.Join(errClose, err)
+		}
 		u.ioLargeSem.Release(1)
-		return nil, nil, walker.ErrCancel
+		return nil, nil, errors.Join(err, walker.ErrCancel)
 	}
 	node.Digest = d.ToProto()
 	// The streamer is responsible for closign the file and releasing both ioSem and ioLargeSem.
 	return node, &blob{digest: node.Digest, reader: f}, nil
 }
 
+// uploadBundler handles files below the small threshold which are buffered in-memory.
 func (u *uploaderv2) uploadBundler(ctx context.Context) {
 	// TODO: should pipe to query before bundling for upload.
 	bundle := make(uploadRequestBundle)
@@ -678,11 +677,9 @@ func (u *uploaderv2) uploadBundler(ctx context.Context) {
 				continue
 			}
 
-			r := &repb.BatchUpdateBlobsRequest_Request{Digest: b.digest}
-			if len(b.bytes) > 0 {
-				r.Data = b.bytes
-			} else {
-				// TODO read the file
+			r := &repb.BatchUpdateBlobsRequest_Request{
+				Digest: b.digest,
+				Data:   b.bytes,
 			}
 			rSize := proto.Size(r)
 
@@ -774,7 +771,11 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	}
 }
 
+// uploadStreamer handles files above the small threshold.
+// For files above the large threshold, this method is only responsible for releasing
+// associated holds on io and large io, which must have been aquired during digestion.
+// For other files, only an io hold is acquired and released in this method.
 func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 	// TODO: implement streamer.
-	// TODO: release IO and large IO holds when done.
+	// TODO: release IO and large IO holds when done with a file that is larger than the large threshold.
 }
