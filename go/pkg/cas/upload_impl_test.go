@@ -268,8 +268,9 @@ func TestBatching_WriteBytes(t *testing.T) {
 			if test.retryPolicy == nil {
 				test.retryPolicy = &retryNever
 			}
-			rpcCfg.RetryPolicy = *test.retryPolicy
-			u, err := cas.NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
+			testRpcCfg := rpcCfg
+			testRpcCfg.RetryPolicy = *test.retryPolicy
+			u, err := cas.NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", testRpcCfg, testRpcCfg, testRpcCfg, ioCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}

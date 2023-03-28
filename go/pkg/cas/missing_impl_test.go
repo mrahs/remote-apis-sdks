@@ -96,8 +96,11 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
 	digests := []digest.Digest{{Hash: "a"}, {Hash: "b"}, {Hash: "c"}}
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
 	for i := 0; i < 100; i++ {
 		go func() {
+			defer ctxCancel()
 			missing, err := u.MissingBlobs(context.Background(), digests)
 			if err != nil {
 				t.Errorf("MissingBlobs failed: %v", err)
@@ -107,6 +110,9 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 			}
 		}()
 	}
+	// This call might execute before any call to MissingBlobs which might cause races
+	// with wait groups. Blocking this goroutine allows another to wake up and use the wait groups before calling Close.
+	<-ctx.Done()
 	_ = u.Close()
 }
 

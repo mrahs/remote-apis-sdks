@@ -145,13 +145,14 @@ type uploaderv2 struct {
 
 // Close blocks until all resources have been cleaned up.
 // It always returns nil.
+// It must be called after at least one of the methods has been called to avoid races with wait groups.
 func (u *uploaderv2) Close() error {
 	// Wait for filesystem walks first, since they may still trigger requests.
 	u.walkWg.Wait()
+	// Wait for query callers to stop triggering requests and drain their responses.
+	u.queryCallerWg.Wait()
 	// Wait for gRPC methods, since they may still issue reponses.
 	u.grpcWg.Wait()
-	// Wait for query callers to drain their responses.
-	u.queryCallerWg.Wait()
 	// Wait for upload callers to drain their responses.
 	u.uploadCallerWg.Wait()
 	close(u.queryChan)
