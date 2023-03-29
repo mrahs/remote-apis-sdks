@@ -56,7 +56,7 @@ type uploadCaller = chan UploadResponse
 type blob struct {
 	digest *repb.Digest
 	bytes  []byte
-	reader io.ReadCloser
+	reader io.ReadSeekCloser
 	path   string
 	tag    string
 }
@@ -68,6 +68,10 @@ type blob struct {
 // In case of error while the returned stats indicate that all the bytes were sent, it is still not a guarantee all the bytes
 // were received by the server since an acknlowedgement was not observed.
 func (u *batchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (*Stats, error) {
+	return u.writeBytes(ctx, name, r, size, offset, finish)
+}
+
+func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (*Stats, error) {
 	if err := u.streamSem.Acquire(ctx, 1); err != nil {
 		// err is always ctx.Err(), so abort immediately.
 		return nil, err
@@ -80,7 +84,9 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, r io.Rea
 	var errCompr error
 	var nRawBytes int64
 	var encWg sync.WaitGroup
+	var withCompression bool
 	if size >= u.ioCfg.CompressionSizeThreshold {
+		withCompression = true
 		pr, pw := io.Pipe()
 		// Closing pr always returns a nil error, but also sends ErrClosedPipe to pw.
 		defer pr.Close()
@@ -176,7 +182,8 @@ func (u *batchingUploader) WriteBytes(ctx context.Context, name string, r io.Rea
 	}
 
 	// Close the reader to signal to the encoder's goroutine to terminate.
-	if srcCloser, ok := src.(io.Closer); ok {
+	// However, do not close the reader if it is the given argument; hence the boolean guard.
+	if srcCloser, ok := src.(io.Closer); ok && withCompression {
 		if errClose := srcCloser.Close(); errClose != nil {
 			err = errors.Join(ErrIO, errClose, err)
 		}
@@ -388,15 +395,16 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 				defer u.walkSem.Release(1)
 
 				// TODO: implement walker.
-				walker.DepthFirst(req.Path, func(path ep.Abs, info fs.FileInfo, err error) error {
+				stats := Stats{}
+				walker.DepthFirst(req.Path, func(path ep.Abs, info fs.FileInfo, err error) (walker.NextStep, error) {
 					select {
 					case <-ctx.Done():
-						return walker.ErrCancel
+						return walker.Cancel, nil
 					default:
 					}
 
 					if err != nil {
-						return walker.ErrCancel
+						return walker.Cancel, nil
 					}
 
 					key := path.String() + req.ShouldSkip.String()
@@ -406,44 +414,51 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 					if info == nil {
 						// Excluded.
 						if req.ShouldSkip.Path(path.String()) {
-							return walker.ErrSkip
+							return walker.Skip, nil
 						}
 
 						// Already processed by another request.
+						// WARN: this can still cause the same file to be digested twice at the same time.
+						// Consider caching a notifier that other goroutines can block on while waiting for the value to be computed.
+						// This can be made more efficient if the walker can be instructed to retry this path later and continue traversing.
 						if rawNode, ok := u.ioCfg.Cache.Load(key); ok {
+							stats.CacheHitCount += 1
 							// No duplicates assuming the same path is never visited twice for the same request.
 							u.dirChildren.Append(parentKey, rawNode)
 							// Dispatching to ensure proper stats calculation.
+							// TODO: consider removing this if cache hit count is all that is needed.
 							switch node := rawNode.(type) {
 							case *repb.DirectoryNode:
 								dispatch(blob{digest: node.Digest, tag: req.tag})
 							case *repb.FileNode:
 								dispatch(blob{digest: node.Digest, tag: req.tag})
 							}
-							return ErrSkip
+							return walker.Skip, nil
 						}
 
 						// Access it.
-						return nil
+						return walker.Continue, nil
 					}
 
 					// Excluded.
 					if req.ShouldSkip.File(path.String(), info.Mode()) {
-						return walker.ErrSkip
+						return walker.Skip, nil
 					}
 
 					switch {
 					case info.Mode()&fs.ModeSymlink == fs.ModeSymlink:
-						node, err := u.digesetSymlink(req.Path, path, req.SymlinkOptions)
+						stats.InputSymlinkCount += 1
+						node, nextStep, err := u.digesetSymlink(req.Path, path, req.SymlinkOptions)
 						if node != nil {
 							u.ioCfg.Cache.Store(key, node)
 							u.dirChildren.Append(parentKey, node)
 						}
-						return err
+						return nextStep, err
 
 					case info.Mode().IsDir():
+						stats.InputDirCount += 1
 						// All the descendants have already been visited since it's a DFS traversal.
-						node, b, err := u.digestDirectory(path, u.dirChildren.Load(key))
+						node, b, nextStep, err := u.digestDirectory(path, u.dirChildren.Load(key))
 						if node != nil {
 							u.ioCfg.Cache.Store(key, node)
 							u.dirChildren.Append(parentKey, node)
@@ -451,10 +466,11 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 						if b != nil {
 							dispatch(blob{digest: node.Digest, bytes: b, tag: req.tag})
 						}
-						return err
+						return nextStep, err
 
 					case info.Mode().IsRegular():
-						node, blb, err := u.digestFile(ctx, path, info)
+						stats.InputFileCount += 1
+						node, blb, nextStep, err := u.digestFile(ctx, path, info)
 						if node != nil {
 							u.ioCfg.Cache.Store(key, node)
 							u.dirChildren.Append(parentKey, node)
@@ -463,11 +479,11 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 							blb.tag = req.tag
 							dispatch(*blb)
 						}
-						return err
+						return nextStep, err
 
 					default:
 						// Skip everything else (e.g. sockets and pipes).
-						return walker.ErrSkip
+						return walker.Skip, nil
 					}
 				})
 			}()
@@ -478,20 +494,20 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 }
 
 // digestSymlink might need to follow target and/or construct a symlink node and append it to its parent directory node.
-func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (*repb.SymlinkNode, error) {
+func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (*repb.SymlinkNode, walker.NextStep, error) {
 	// Replace symlink with target.
 	if slo.Resolve() {
-		return nil, walker.ErrReplace
+		return nil, walker.Replace, nil
 	}
 	if slo.ResolveExternal() {
 		if _, err := ep.Descendant(root, path); err != nil {
-			return nil, walker.ErrReplace
+			return nil, walker.Replace, nil
 		}
 	}
 
 	target, err := os.Readlink(path.String())
 	if err != nil {
-		return nil, errors.Join(err, walker.ErrCancel)
+		return nil, walker.Cancel, err
 	}
 
 	// Cannot access the target since it might be relative to the symlink directory, not the cwd of the process.
@@ -499,7 +515,7 @@ func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (
 	if filepath.IsAbs(target) {
 		targetRelative, err = filepath.Rel(path.Dir().String(), target)
 		if err != nil {
-			return nil, errors.Join(err, walker.ErrCancel)
+			return nil, walker.Cancel, err
 		}
 	} else {
 		targetRelative = target
@@ -509,14 +525,14 @@ func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (
 	if slo.NoDangling() {
 		_, err := os.Lstat(target)
 		if err != nil {
-			return nil, errors.Join(err, walker.ErrCancel)
+			return nil, walker.Cancel, err
 		}
 	}
 
 	var node *repb.SymlinkNode
 	if slo.Preserve() {
 		if err != nil {
-			return nil, errors.Join(err, walker.ErrCancel)
+			return nil, walker.Cancel, err
 		}
 		node = &repb.SymlinkNode{
 			Name:   path.Base().String(),
@@ -525,13 +541,13 @@ func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (
 	}
 
 	if slo.IncludeTarget() {
-		return node, nil
+		return node, walker.Continue, nil
 	}
-	return node, walker.ErrSkip
+	return node, walker.Skip, nil
 }
 
 // digestDirectory constructs a hash-deterministic directory node and returns it along with the corresponding bytes of the direcotry proto.
-func (u *uploaderv2) digestDirectory(path ep.Abs, children []interface{}) (*repb.DirectoryNode, []byte, error) {
+func (u *uploaderv2) digestDirectory(path ep.Abs, children []interface{}) (*repb.DirectoryNode, []byte, walker.NextStep, error) {
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
 		Name: path.Base().String(),
@@ -558,20 +574,20 @@ func (u *uploaderv2) digestDirectory(path ep.Abs, children []interface{}) (*repb
 	})
 	b, err := proto.Marshal(dir)
 	if err != nil {
-		return nil, nil, errors.Join(err, walker.ErrCancel)
+		return nil, nil, walker.Cancel, err
 	}
 	d := digest.NewFromBlob(b)
 	node.Digest = d.ToProto()
-	return node, b, nil
+	return node, b, walker.Continue, nil
 }
 
 // digestFile constructs a file node and returns it along with the blob to be dispatched.
 // If the file size exceeds the large threshold, both IO and large IO holds are retianed upon returning and it's
 // the responsibility of the streamer to release them.
 // This allows the walker to collect the digest and proceed without having to wait for the streamer.
-func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileInfo) (node *repb.FileNode, blb *blob, err error) {
+func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileInfo) (node *repb.FileNode, blb *blob, nextStep walker.NextStep, err error) {
 	if err := u.ioSem.Acquire(ctx, 1); err != nil {
-		return nil, nil, walker.ErrCancel
+		return nil, nil, walker.Cancel, nil
 	}
 	defer func() {
 		// Keep the IO hold if the streamer is going to assume ownership of it.
@@ -588,7 +604,7 @@ func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileIn
 	if info.Size() <= u.ioCfg.SmallFileSizeThreshold {
 		f, err := os.Open(path.String())
 		if err != nil {
-			return nil, nil, errors.Join(err, walker.ErrCancel)
+			return nil, nil, walker.Cancel, err
 		}
 		defer func() {
 			if errClose := f.Close(); errClose != nil {
@@ -598,28 +614,28 @@ func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileIn
 
 		b, err := io.ReadAll(f)
 		if err != nil {
-			return nil, nil, errors.Join(err, walker.ErrCancel)
+			return nil, nil, walker.Cancel, err
 		}
 		node.Digest = digest.NewFromBlob(b).ToProto()
-		return node, &blob{digest: node.Digest, bytes: b}, nil
+		return node, &blob{digest: node.Digest, bytes: b}, walker.Continue, nil
 	}
 
 	if info.Size() < u.ioCfg.LargeFileSizeThreshold {
 		d, err := digest.NewFromFile(path.String())
 		if err != nil {
-			return nil, nil, errors.Join(err, walker.ErrCancel)
+			return nil, nil, walker.Cancel, err
 		}
 		node.Digest = d.ToProto()
-		return node, &blob{digest: node.Digest, path: path.String()}, nil
+		return node, &blob{digest: node.Digest, path: path.String()}, walker.Continue, nil
 	}
 
 	if err := u.ioLargeSem.Acquire(ctx, 1); err != nil {
-		return nil, nil, walker.ErrCancel
+		return nil, nil, walker.Cancel, nil
 	}
 	f, err := os.Open(path.String())
 	if err != nil {
 		u.ioLargeSem.Release(1)
-		return nil, nil, errors.Join(err, walker.ErrCancel)
+		return nil, nil, walker.Cancel, err
 	}
 	d, err := digest.NewFromReader(f)
 	if err != nil {
@@ -628,11 +644,11 @@ func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileIn
 			err = errors.Join(errClose, err)
 		}
 		u.ioLargeSem.Release(1)
-		return nil, nil, errors.Join(err, walker.ErrCancel)
+		return nil, nil, walker.Cancel, err
 	}
 	node.Digest = d.ToProto()
 	// The streamer is responsible for closign the file and releasing both ioSem and ioLargeSem.
-	return node, &blob{digest: node.Digest, reader: f}, nil
+	return node, &blob{digest: node.Digest, reader: f}, walker.Continue, nil
 }
 
 // uploadBundler handles files below the small threshold which are buffered in-memory.
@@ -720,20 +736,23 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	}
 
 	var uploaded []digest.Digest
-	var failed map[digest.Digest]error
+	failed := make(map[digest.Digest]error)
+	digestRetryCount := make(map[digest.Digest]int64)
 	var res *repb.BatchUpdateBlobsResponse
 	var err error
 	ctx, ctxCancel := context.WithCancel(ctx)
 	err = u.withTimeout(u.queryRpcConfig.Timeout, ctxCancel, func() error {
 		return u.withRetry(ctx, u.uploadRpcConfig.RetryPolicy, func() error {
-			// This call can have partial failures. Only retry failed requests.
+			// This call can have partial failures. Only retry retryable failed requests.
 			res, err = u.cas.BatchUpdateBlobs(ctx, req)
 			reqErr := err
 			req.Requests = nil
 			for _, r := range res.Responses {
 				if err := status.FromProto(r.Status).Err(); err != nil {
 					if retry.TransientOnly(err) {
-						req.Requests = append(req.Requests, bundle[digest.NewFromProtoUnvalidated(r.Digest)].req)
+						d := digest.NewFromProtoUnvalidated(r.Digest)
+						req.Requests = append(req.Requests, bundle[d].req)
+						digestRetryCount[d]++
 						reqErr = err
 						continue
 					}
@@ -747,27 +766,64 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	})
 	ctxCancel()
 
-	if err != nil {
-		err = errors.Join(ErrGRPC, err)
-	}
+	// TODO: should collate responses by UploadRequest
 
-	// TODO should collate responses by UploadRequest
 	// Reprot uploaded.
 	for _, d := range uploaded {
 		u.notifyUploadCallers(UploadResponse{
 			Digest: d,
-			Stats:  Stats{}, // TODO
+			Stats: Stats{
+				BytesRequested:      d.Size,
+				TotalBytesMoved:     d.Size + digestRetryCount[d],
+				EffectiveBytesMoved: d.Size,
+				LogicalBytesBatched: d.Size,
+				CacheMissCount:      1,
+				BatchedCount:        1,
+			},
 		}, bundle[d].tags...)
 		delete(bundle, d)
 	}
 
-	// Report failed.
-	for d := range failed {
+	// Report individually failed requests.
+	for d, dErr := range failed {
+		if dErr != nil {
+			dErr = err
+		}
+		if dErr != nil {
+			dErr = errors.Join(ErrGRPC, dErr)
+		}
 		u.notifyUploadCallers(UploadResponse{
 			Digest: d,
-			Stats:  Stats{}, // TODO
-			Err:    failed[d],
+			Stats: Stats{
+				BytesRequested:  d.Size,
+				TotalBytesMoved: d.Size + digestRetryCount[d],
+				CacheMissCount:  1,
+				BatchedCount:    1,
+			},
+			Err: dErr,
 		}, bundle[d].tags...)
+		delete(bundle, d)
+	}
+
+	if err == nil && len(bundle) == 0 {
+		return
+	}
+
+	if err != nil {
+		err = errors.Join(ErrGRPC, err)
+	}
+	// Report failed requests due to call failure.
+	for d, item := range bundle {
+		u.notifyUploadCallers(UploadResponse{
+			Digest: d,
+			Stats: Stats{
+				BytesRequested:  d.Size,
+				TotalBytesMoved: d.Size + digestRetryCount[d],
+				CacheMissCount:  1,
+				BatchedCount:    1,
+			},
+			Err: err,
+		}, item.tags...)
 	}
 }
 
@@ -776,6 +832,63 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 // associated holds on io and large io, which must have been aquired during digestion.
 // For other files, only an io hold is acquired and released in this method.
 func (u *uploaderv2) uploadStreamer(ctx context.Context) {
-	// TODO: implement streamer.
-	// TODO: release IO and large IO holds when done with a file that is larger than the large threshold.
+	for {
+		select {
+		case b, ok := <-u.uploadStreamerChan:
+			if !ok {
+				// This should never happen since this channel is never closed.
+				return
+			}
+
+			if b.digest.SizeBytes >= u.ioCfg.LargeFileSizeThreshold {
+				// io and large io holds were already acquired during digestion and will be released downstream.
+				// For large files, we can take advantage of the automatic presence check of the streaming API
+				// which will immediately report a cache hit. I.e. no need to query for a missing digest.
+				// WARN: this could still stream the same file multiple times concurrently since the API will only report a cache hit upon completion.
+				go u.callStream(ctx, b)
+				continue
+			}
+
+			if err := u.ioSem.Acquire(ctx, 1); err != nil {
+				return
+			}
+
+			// WARN: same issue as large files; should bundle here.
+			f, err := os.Open(b.path)
+			if err != nil {
+				u.notifyUploadCallers(UploadResponse{
+					Digest: digest.NewFromProtoUnvalidated(b.digest),
+					Stats:  Stats{}, // TODO
+					Err:    errors.Join(ErrIO, err),
+				}, b.tag)
+				continue
+			}
+			b.reader = f
+			go u.callStream(ctx, b)
+		case <-ctx.Done():
+		}
+	}
+}
+
+func (u *uploaderv2) callStream(ctx context.Context, b blob) {
+	var s *Stats
+	_, err := b.reader.Seek(0, io.SeekStart)
+	if err != nil {
+		err = errors.Join(ErrIO, err)
+	} else {
+		s, err = u.writeBytes(ctx, "", b.reader, b.digest.SizeBytes, 0, true)
+	}
+	// io and large io holds were acquired during digestion and must be released here.
+	if errClose := b.reader.Close(); errClose != nil {
+		err = errors.Join(ErrIO, errClose, err)
+	}
+	u.ioSem.Release(1)
+	if b.digest.SizeBytes >= u.ioCfg.LargeFileSizeThreshold {
+		u.ioLargeSem.Release(1)
+	}
+	u.notifyUploadCallers(UploadResponse{
+		Digest: digest.NewFromProtoUnvalidated(b.digest),
+		Stats:  *s,
+		Err:    err,
+	}, b.tag)
 }

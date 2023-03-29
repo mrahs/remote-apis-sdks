@@ -139,22 +139,28 @@ type Stats struct {
 	LogicalBytesMoved int64
 
 	// TotalBytesMoved is the total number of bytes moved over the wire.
+	// This may not be accurate since a gRPC call may be interrupted in which case this number may be higher than the real one.
 	// It may be larger than (retries) or smaller than BytesRequested (compression, cache hits or partial response).
 	TotalBytesMoved int64
 
 	// EffectiveBytesMoved is the total number of bytes moved over the wire, excluding retries.
+	// This may not be accurate since a gRPC call may be interrupted in which case this number may be higher than the real one.
+	// For failures, this is reported as 0.
 	// It may be higher than BytesRequested (compression headers), but never higher than BytesMoved.
 	EffectiveBytesMoved int64
 
 	// LogicalBytesCached is the total number of bytes not moved over the wire due to caching (either remotely or locally).
+	// For failures, this is reported as 0.
 	LogicalBytesCached int64
 
 	// LogicalBytesStreamed is the total number of logical bytes moved by the streaming API.
 	// It may be larger than (retries) or smaller than (cache hits or partial response) than the requested size.
+	// For failures, this is reported as 0.
 	LogicalBytesStreamed int64
 
 	// LogicalBytesBatched is the total number of logical bytes moved by the batching API.
 	// It may be larger than (retries) or smaller than (cache hits or partial response) the requested size.
+	// For failures, this is reported as 0.
 	LogicalBytesBatched int64
 
 	// InputFileCount is the number of processed regular files.
@@ -163,7 +169,7 @@ type Stats struct {
 	// InputDirCount is the number of processed directories.
 	InputDirCount int64
 
-	// InputSymlinkCount is the number of processed symlinks.
+	// InputSymlinkCount is the number of processed symlinks (not the number of symlinks in the uploaded merkle tree which may be lower).
 	InputSymlinkCount int64
 
 	// CacheHitCount is the number of cache hits.
