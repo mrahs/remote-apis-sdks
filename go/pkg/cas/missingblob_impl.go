@@ -108,9 +108,19 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
 //
 // The caller must close the specified input channel as a termination signal.
-// The returned channel is closed when no more responses are available for this call. This could indicate
-// completion or abortion (in case the context was canceled).
+// The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
+// All received requests will have corresponding responses sent on the returned channel.
+//
+// The returned channel is unbuffered and will be closed after the input channel is closed and no more responses are available for this call.
+// This could indicate completion or cancelation (in case the context was canceled).
+// Slow consumption speed on this channel affects the consumption speed on the input channel.
 func (u *streamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
+	return u.missingBlobsStreamer(ctx, in)
+}
+
+// missingBlobsStreamer is defined on the underlying uploader to be accessible by the upload code.
+// For user documentation, see the public method streamingUploader.MissingBlobs.
+func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	// The implementation here acts like a pipe with a count-based coordinator.
 	// Closing the input channel should not close the pipe until all the requests are piped through to the responses channel.
 	// At the same time, all goroutines must abort when the context is done.
@@ -217,6 +227,7 @@ func (u *uploaderv2) registerQueryCaller(ctx context.Context) (string, <-chan Mi
 	return tag, qc
 }
 
+// notifyQueryCallers is a helper method that fans-out a response to all subscribed callers.
 func (u *uploaderv2) notifyQueryCallers(r MissingBlobsResponse, tags ...string) {
 	// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
 	u.queryCallerMutex.Lock()
@@ -231,7 +242,7 @@ func (u *uploaderv2) notifyQueryCallers(r MissingBlobsResponse, tags ...string) 
 }
 
 // callMissingBlobs calls the gRPC endpoint and notifies query callers of the results.
-// It assumes ownership of the reqs argument.
+// It assumes ownership of the bundle argument.
 func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
 	if len(bundle) < 1 {
 		return
@@ -289,6 +300,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 	}
 }
 
+// queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
 func (u *uploaderv2) queryProcessor(ctx context.Context) {
 	defer u.processorWg.Done()
 
@@ -319,7 +331,6 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 		select {
 		case req, ok := <-u.queryChan:
 			if !ok {
-				// This should never happen since this channel is never closed.
 				return
 			}
 

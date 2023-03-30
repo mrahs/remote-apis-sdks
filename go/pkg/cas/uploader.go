@@ -98,7 +98,7 @@ type uploaderv2 struct {
 	uploadRpcConfig GRPCConfig
 	streamRpcConfig GRPCConfig
 
-	// Throttling controls.
+	// gRPC throttling controls.
 	querySem    *semaphore.Weighted
 	uploadSem   *semaphore.Weighted
 	streamSem   *semaphore.Weighted
@@ -123,7 +123,7 @@ type uploaderv2 struct {
 	// uploadChan is the fan-in channel for uploads.
 	// All senders must also listen on the context to avoid deadlocks.
 	uploadChan         chan UploadRequest
-	uploadBundlerChan  chan blob
+	uploadBatcherChan  chan blob
 	uploadStreamerChan chan blob
 	// grpcWg is used to wait for in-flight gRPC calls upon graceful termination.
 	grpcWg sync.WaitGroup
@@ -157,7 +157,7 @@ func (u *uploaderv2) Close() error {
 	u.uploadCallerWg.Wait()
 	close(u.queryChan)
 	close(u.uploadChan)
-	close(u.uploadBundlerChan)
+	close(u.uploadBatcherChan)
 	close(u.uploadStreamerChan)
 	u.processorWg.Wait()
 	return nil
@@ -241,7 +241,7 @@ func newUploaderv2(
 
 		queryChan:          make(chan missingBlobRequest),
 		uploadChan:         make(chan UploadRequest),
-		uploadBundlerChan:  make(chan blob),
+		uploadBatcherChan:  make(chan blob),
 		uploadStreamerChan: make(chan blob),
 		queryCaller:        make(map[string]queryCaller),
 		uploadCaller:       make(map[string]uploadCaller),

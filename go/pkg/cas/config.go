@@ -81,6 +81,10 @@ type IOConfig struct {
 	// Must be > 0.
 	ConcurrentWalksLimit int
 
+	// ConcurrentWalkerVisits sets the upper bound of concurrent visits per walk.
+	// Must b > 0.
+	ConcurrentWalkerVisits int
+
 	// OpenFilesLimit sets the upper bound for the number of files being simultanuously processed.
 	// Must be > 0.
 	OpenFilesLimit int
@@ -216,7 +220,7 @@ func isValidRpcCfg(cfg *GRPCConfig) error {
 }
 
 func isValidIOCfg(cfg *IOConfig) error {
-	if cfg.ConcurrentWalksLimit < 1 || cfg.OpenFilesLimit < 1 || cfg.OpenLargeFilesLimit < 1 || cfg.BufferSize < 1 {
+	if cfg.ConcurrentWalksLimit < 1 || cfg.ConcurrentWalkerVisits < 1 || cfg.OpenFilesLimit < 1 || cfg.OpenLargeFilesLimit < 1 || cfg.BufferSize < 1 {
 		return ErrZeroOrNegativeLimit
 	}
 	if cfg.SmallFileSizeThreshold < 0 || cfg.LargeFileSizeThreshold < 0 || cfg.CompressionSizeThreshold < 0 {

@@ -1,6 +1,7 @@
 package walker
 
 import (
+	"errors"
 	"io/fs"
 
 	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
@@ -18,6 +19,10 @@ const (
 	// With a symlink, it indicates that the walker should skip following the target.
 	Skip
 
+	// Defer indicates that the walker should buffer the path to be revisited later and continue traversing other paths.
+	// The exact behavior is implementation dependant.
+	Defer
+
 	// Replace indicates that the walker should follow the symlink and report all subsequent related
 	// paths as descendants of the symlink path.
 	// I.e. if the symlink path was /foo/bar, and its target was /baz/file.ext, the target is reported as /foo/bar.
@@ -29,6 +34,9 @@ const (
 	Cancel
 )
 
+// ErrInvalidArgument indicates a fatal error due to an invalid argument.
+var ErrInvalidArgument = errors.New("walker: invalid argument")
+
 // WalkFunc defines the callback signature that clients must specify for walker implementatinos.
 // More details about when this function is called and how its return values are used
 // is provided by each walker implementation in this package.
@@ -36,10 +44,18 @@ type WalkFunc func(path ep.Abs, info fs.FileInfo, err error) (NextStep, error)
 
 // DepthFirst walks the filesystem tree rooted at the specified root in DFS style traversal.
 //
-// The specified function is called twice for each path, including root. The first call is made
+// The concurencyLimit value must be > 0.
+//
+// The specified function may be called concurrently based on the specified concurrencyLimit value.
+// It is called twice for each path, including root. The first call is made
 // before making any IO calls, and only the path is provided to the function.
+//
 // At this point, the client may instruct the walker to skip the path by returning Skip or to access
 // the path by returning Continue.
+// Alternatively, the client may return Defer to instruct the walker to buffer the path to be visited after all other siblings
+// have been visited.
+// Deferred paths block traversing back up the tree since a parent requires all its children to be processed before itself to honour the DFS contract.
+//
 // The second call is made only if the first call returned Continue and after making an IO call to stat the file.
 // If the second call returns Skip and the path is a directory, the walker will skip the directory's tree.
 // At any point, the client may return Cancel to cancel the entire walk.
@@ -48,7 +64,11 @@ type WalkFunc func(path ep.Abs, info fs.FileInfo, err error) (NextStep, error)
 //
 // The error returned by the walk is nil if no errors were encountered. Otherwise, it's a collection
 // of errors returned by the callback function.
-func DepthFirst(root ep.Abs, fn WalkFunc) error {
+func DepthFirst(root ep.Abs, concurrencyLimit int, fn WalkFunc) error {
+	if concurrencyLimit < 1 || fn == nil {
+		return ErrInvalidArgument
+	}
+
 	// TODO
-	return nil
+	panic("not yet implemented")
 }

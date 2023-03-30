@@ -359,29 +359,56 @@ func (u *uploaderv2) notifyUploadCallers(r UploadResponse, tags ...string) {
 
 // uploadDispatcher is the entry point for upload requests.
 // It starts by computing a merkle tree from the file system view specified by the request and its filter.
-// Files and blobs are uploaded during the digestion to minimize IO induced latency. This effectively
-// optimizes for frequent uploads of never-seen-before files.
+// Files and blobs are uploaded during the digestion to minimize IO induced latency.
+//
+// This effectively optimizes for frequent uploads of never-seen-before files.
 // Using a depth-first style file traversal suits this use-case.
+//
 // To optimize for frequent uploads of the same files, consider computing the merkle tree separately
 // then construct a list of blobs that are missing from the CAS and upload that list.
 func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
+	// Set up a pipe for presence checking.
+	queryChan := make(chan digest.Digest)
+	queryResChan := u.missingBlobsStreamer(ctx, queryChan)
+	digestBlob := sync.Map{}
+
+	u.processorWg.Add(1)
+	go func() {
+		defer u.processorWg.Done()
+		// Context handling is done upstream in the missing blobs call.
+		for queryRes := range queryResChan {
+			if queryRes.Err != nil {
+				// TODO: notify
+			}
+			if queryRes.Missing {
+				if b, ok := digestBlob.Load(queryRes.Digest); ok {
+					u.uploadBatcherChan <- b.(blob)
+				}
+			}
+			// TODO: notify cache hit
+		}
+	}()
+
 	dispatch := func(b blob) {
 		switch {
 		case len(b.bytes) == 0 && b.reader == nil && b.path == "":
-			// TODO: cache hit; just notify the uploader.
+			// TODO: notify cache hit
 		case len(b.bytes) > 0:
-			u.uploadBundlerChan <- b
+			// TODO: bundle
+			d := digest.NewFromProtoUnvalidated(b.digest)
+			if _, ok := digestBlob.LoadOrStore(d, b); !ok {
+				queryChan <- d
+			}
 		default:
 			u.uploadStreamerChan <- b
 		}
 	}
 
-	// TODO: cooridnate with bundler and streamer to collect results related to each request.
+	// TODO: cooridnate with batcher and streamer to collect results related to each request.
 	for {
 		select {
 		case req, ok := <-u.uploadChan:
 			if !ok {
-				// This should never happen since this channel is never closed.
 				return
 			}
 
@@ -396,7 +423,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 
 				// TODO: implement walker.
 				stats := Stats{}
-				walker.DepthFirst(req.Path, func(path ep.Abs, info fs.FileInfo, err error) (walker.NextStep, error) {
+				walker.DepthFirst(req.Path, u.ioCfg.ConcurrentWalkerVisits, func(path ep.Abs, info fs.FileInfo, err error) (walker.NextStep, error) {
 					select {
 					case <-ctx.Done():
 						return walker.Cancel, nil
@@ -417,23 +444,13 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 							return walker.Skip, nil
 						}
 
-						// Already processed by another request.
+						// A cache hit here indicates a cyclic symlink or two callers attempting to upload the exact same path.
+						// In both cases, deferring is the right call. Once the upload is processed, both uploaders, or the same one in the first case, will
+						// revisit the path to get the processing result.
 						// WARN: this can still cause the same file to be digested twice at the same time.
 						// Consider caching a notifier that other goroutines can block on while waiting for the value to be computed.
-						// This can be made more efficient if the walker can be instructed to retry this path later and continue traversing.
-						if rawNode, ok := u.ioCfg.Cache.Load(key); ok {
-							stats.CacheHitCount += 1
-							// No duplicates assuming the same path is never visited twice for the same request.
-							u.dirChildren.Append(parentKey, rawNode)
-							// Dispatching to ensure proper stats calculation.
-							// TODO: consider removing this if cache hit count is all that is needed.
-							switch node := rawNode.(type) {
-							case *repb.DirectoryNode:
-								dispatch(blob{digest: node.Digest, tag: req.tag})
-							case *repb.FileNode:
-								dispatch(blob{digest: node.Digest, tag: req.tag})
-							}
-							return walker.Skip, nil
+						if _, ok := u.ioCfg.Cache.Load(key); ok {
+							return walker.Defer, nil
 						}
 
 						// Access it.
@@ -445,6 +462,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 						return walker.Skip, nil
 					}
 
+					stats.DigestCount += 1
 					switch {
 					case info.Mode()&fs.ModeSymlink == fs.ModeSymlink:
 						stats.InputSymlinkCount += 1
@@ -651,9 +669,8 @@ func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileIn
 	return node, &blob{digest: node.Digest, reader: f}, walker.Continue, nil
 }
 
-// uploadBundler handles files below the small threshold which are buffered in-memory.
-func (u *uploaderv2) uploadBundler(ctx context.Context) {
-	// TODO: should pipe to query before bundling for upload.
+// uploadBatcher handles files below the small threshold which are buffered in-memory.
+func (u *uploaderv2) uploadBatcher(ctx context.Context) {
 	bundle := make(uploadRequestBundle)
 	bundleSize := u.uploadRequestBaseSize
 
@@ -679,9 +696,8 @@ func (u *uploaderv2) uploadBundler(ctx context.Context) {
 
 	for {
 		select {
-		case b, ok := <-u.uploadBundlerChan:
+		case b, ok := <-u.uploadBatcherChan:
 			if !ok {
-				// This should never happen since this channel is never closed.
 				return
 			}
 
@@ -828,15 +844,16 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 }
 
 // uploadStreamer handles files above the small threshold.
-// For files above the large threshold, this method is only responsible for releasing
-// associated holds on io and large io, which must have been aquired during digestion.
+// Unlike the batched call, presence check is not required for streaming files because the API
+// handles this automatically: https://github.com/bazelbuild/remote-apis/blob/0cd22f7b466ced15d7803e8845d08d3e8d2c51bc/build/bazel/remote/execution/v2/remote_execution.proto#L250-L254
+// For files above the large threshold, this method assumes the io and large io holds are
+// already acquired and will release them approperiately.
 // For other files, only an io hold is acquired and released in this method.
 func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 	for {
 		select {
 		case b, ok := <-u.uploadStreamerChan:
 			if !ok {
-				// This should never happen since this channel is never closed.
 				return
 			}
 
@@ -858,7 +875,7 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 			if err != nil {
 				u.notifyUploadCallers(UploadResponse{
 					Digest: digest.NewFromProtoUnvalidated(b.digest),
-					Stats:  Stats{}, // TODO
+					Stats:  Stats{BytesRequested: b.digest.SizeBytes},
 					Err:    errors.Join(ErrIO, err),
 				}, b.tag)
 				continue
