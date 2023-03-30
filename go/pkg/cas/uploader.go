@@ -137,6 +137,9 @@ type uploaderv2 struct {
 
 	// uploadCaller is set of active upload callers and their associated channels.
 	uploadCaller map[string]uploadCaller
+	// uploadReqCaller associates a request tag to its owner caller tag, which is useful to collate blobs per request (via its request tag)
+	// before sending the response to its caller (via its caller tag).
+	uploadReqCaller sync.Map
 	// uploadCallerMutex is necessary since the map holds references which can survive the atomicity of sync.Map.
 	uploadCallerMutex sync.Mutex
 	// uploadCallerWg is used to wait for in-flight receivers upon graceful termination.
@@ -151,7 +154,7 @@ func (u *uploaderv2) Close() error {
 	u.walkWg.Wait()
 	// Wait for query callers to stop triggering requests and drain their responses.
 	u.queryCallerWg.Wait()
-	// Wait for gRPC methods, since they may still issue reponses.
+	// Wait for gRPC methods, since they may still issue responses.
 	u.grpcWg.Wait()
 	// Wait for upload callers to drain their responses.
 	u.uploadCallerWg.Wait()
@@ -256,7 +259,7 @@ func newUploaderv2(
 }
 
 // NewBatchingUploader creates a new instance of the batching uploader interface.
-// The specified configs must be compatbile with the capabilities of the server
+// The specified configs must be compatible with the capabilities of the server
 // which the specified clients are connected to.
 func NewBatchingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
@@ -269,7 +272,7 @@ func NewBatchingUploader(
 }
 
 // NewStreamingUploader creates a new instance of the streaming uploader interface.
-// The specified configs must be compatbile with the capabilities of the server
+// The specified configs must be compatible with the capabilities of the server
 // which the specified clients are connected to.
 func NewStreamingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,

@@ -1,6 +1,7 @@
 package cas
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -53,11 +54,15 @@ type uploadRequestBundle = map[digest.Digest]uploadRequestBundleItem
 
 type uploadCaller = chan UploadResponse
 
+// blob associates a digest with its original bytes.
+// Only one of bytes, path or reader is used, in that order.
+// If the bytes field is set, the blob is either batched or streamed based on gRPC size limits.
+// If the path or reader field is set, the blob is streamed.
 type blob struct {
 	digest *repb.Digest
 	bytes  []byte
-	reader io.ReadSeekCloser
 	path   string
+	reader io.ReadSeekCloser
 	tag    string
 }
 
@@ -78,7 +83,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	}
 	defer u.streamSem.Release(1)
 
-	var src = r
+	src := r
 
 	// If compression is enabled, plug in the encoder via a pipe.
 	var errCompr error
@@ -189,7 +194,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 		}
 	}
 
-	// This theoratically will block until the encoder's goroutine returns.
+	// This theoretically will block until the encoder's goroutine returns.
 	// However, closing the reader eventually terminates that goroutine.
 	// This is necessary because the encoder's goroutine currently owns errCompr and nRawBytes.
 	encWg.Wait()
@@ -270,8 +275,8 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.O
 	stats := &Stats{}
 	var missing []digest.Digest
 	var err error
-	var total = len(paths)
-	var i = 0
+	total := len(paths)
+	i := 0
 	for r := range resChan {
 		switch {
 		case r.Err != nil:
@@ -389,6 +394,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 		}
 	}()
 
+	// A helper for dispatching from appropriate sites.
 	dispatch := func(b blob) {
 		switch {
 		case len(b.bytes) == 0 && b.reader == nil && b.path == "":
@@ -404,7 +410,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 		}
 	}
 
-	// TODO: cooridnate with batcher and streamer to collect results related to each request.
+	// Digestion and dispatching loop.
 	for {
 		select {
 		case req, ok := <-u.uploadChan:
@@ -416,6 +422,11 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 				// err is always ctx.Err()
 				return
 			}
+
+			// Create a tag for this request and associate it with the caller.
+			tag := uuid.New()
+			u.uploadReqCaller.Store(tag, req.tag)
+			// Start the walk.
 			u.walkWg.Add(1)
 			go func() {
 				defer u.walkWg.Done()
@@ -482,7 +493,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 							u.dirChildren.Append(parentKey, node)
 						}
 						if b != nil {
-							dispatch(blob{digest: node.Digest, bytes: b, tag: req.tag})
+							dispatch(blob{digest: node.Digest, bytes: b, tag: tag})
 						}
 						return nextStep, err
 
@@ -494,7 +505,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 							u.dirChildren.Append(parentKey, node)
 						}
 						if blb != nil {
-							blb.tag = req.tag
+							blb.tag = tag
 							dispatch(*blb)
 						}
 						return nextStep, err
@@ -503,7 +514,8 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 						// Skip everything else (e.g. sockets and pipes).
 						return walker.Skip, nil
 					}
-				})
+				},
+				)
 			}()
 		case <-ctx.Done():
 			return
@@ -511,7 +523,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 	}
 }
 
-// digestSymlink might need to follow target and/or construct a symlink node and append it to its parent directory node.
+// digestSymlink might need to follow target and/or construct a symlink node.
 func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (*repb.SymlinkNode, walker.NextStep, error) {
 	// Replace symlink with target.
 	if slo.Resolve() {
@@ -564,7 +576,7 @@ func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (
 	return node, walker.Skip, nil
 }
 
-// digestDirectory constructs a hash-deterministic directory node and returns it along with the corresponding bytes of the direcotry proto.
+// digestDirectory constructs a hash-deterministic directory node and returns it along with the corresponding bytes of the directory proto.
 func (u *uploaderv2) digestDirectory(path ep.Abs, children []interface{}) (*repb.DirectoryNode, []byte, walker.NextStep, error) {
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
@@ -650,22 +662,38 @@ func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileIn
 	if err := u.ioLargeSem.Acquire(ctx, 1); err != nil {
 		return nil, nil, walker.Cancel, nil
 	}
+	defer func() {
+		if err != nil {
+			u.ioLargeSem.Release(1)
+		}
+	}()
+
 	f, err := os.Open(path.String())
 	if err != nil {
-		u.ioLargeSem.Release(1)
 		return nil, nil, walker.Cancel, err
 	}
+	defer func() {
+		if err != nil {
+			errClose := f.Close()
+			if errClose != nil {
+				err = errors.Join(errClose, err)
+			}
+		}
+	}()
+
 	d, err := digest.NewFromReader(f)
 	if err != nil {
-		errClose := f.Close()
-		if errClose != nil {
-			err = errors.Join(errClose, err)
-		}
-		u.ioLargeSem.Release(1)
 		return nil, nil, walker.Cancel, err
 	}
+
+	// Reset the offset for the streamer.
+	_, err = f.Seek(0, io.SeekStart)
+	if err != nil {
+		return nil, nil, walker.Cancel, err
+	}
+
 	node.Digest = d.ToProto()
-	// The streamer is responsible for closign the file and releasing both ioSem and ioLargeSem.
+	// The streamer is responsible for closing the file and releasing both ioSem and ioLargeSem.
 	return node, &blob{digest: node.Digest, reader: f}, walker.Continue, nil
 }
 
@@ -701,6 +729,18 @@ func (u *uploaderv2) uploadBatcher(ctx context.Context) {
 				return
 			}
 
+			r := &repb.BatchUpdateBlobsRequest_Request{
+				Digest: b.digest,
+				Data:   b.bytes,
+			}
+			rSize := proto.Size(r)
+
+			// Reroute oversized blobs to the streamer.
+			if rSize >= u.uploadRpcConfig.BytesLimit {
+				u.uploadStreamerChan <- b
+				continue
+			}
+
 			d := digest.NewFromProtoUnvalidated(b.digest)
 			item, ok := bundle[d]
 			if ok {
@@ -709,13 +749,6 @@ func (u *uploaderv2) uploadBatcher(ctx context.Context) {
 				continue
 			}
 
-			r := &repb.BatchUpdateBlobsRequest_Request{
-				Digest: b.digest,
-				Data:   b.bytes,
-			}
-			rSize := proto.Size(r)
-
-			// Oversized blobs are already filtered by the dispatcher.
 			if bundleSize+rSize >= u.uploadRpcConfig.BytesLimit {
 				handle()
 			}
@@ -784,7 +817,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 
 	// TODO: should collate responses by UploadRequest
 
-	// Reprot uploaded.
+	// Report uploaded.
 	for _, d := range uploaded {
 		u.notifyUploadCallers(UploadResponse{
 			Digest: d,
@@ -850,6 +883,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 // already acquired and will release them approperiately.
 // For other files, only an io hold is acquired and released in this method.
 func (u *uploaderv2) uploadStreamer(ctx context.Context) {
+	// TODO: bundle
 	for {
 		select {
 		case b, ok := <-u.uploadStreamerChan:
@@ -857,7 +891,22 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 				return
 			}
 
-			if b.digest.SizeBytes >= u.ioCfg.LargeFileSizeThreshold {
+			if err := u.streamSem.Acquire(ctx, 1); err != nil {
+				return
+			}
+
+			if len(b.bytes) > 0 {
+				b.reader = bytes.NewReader(b.bytes)
+				go func() {
+					defer u.streamSem.Release(1)
+					u.callStream(ctx, b)
+				}()
+				continue
+			}
+
+			if len(b.path) > 0 {
+			}
+			if b.reader != nil {
 				// io and large io holds were already acquired during digestion and will be released downstream.
 				// For large files, we can take advantage of the automatic presence check of the streaming API
 				// which will immediately report a cache hit. I.e. no need to query for a missing digest.
@@ -866,21 +915,7 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 				continue
 			}
 
-			if err := u.ioSem.Acquire(ctx, 1); err != nil {
-				return
-			}
-
 			// WARN: same issue as large files; should bundle here.
-			f, err := os.Open(b.path)
-			if err != nil {
-				u.notifyUploadCallers(UploadResponse{
-					Digest: digest.NewFromProtoUnvalidated(b.digest),
-					Stats:  Stats{BytesRequested: b.digest.SizeBytes},
-					Err:    errors.Join(ErrIO, err),
-				}, b.tag)
-				continue
-			}
-			b.reader = f
 			go u.callStream(ctx, b)
 		case <-ctx.Done():
 		}
@@ -888,13 +923,30 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 }
 
 func (u *uploaderv2) callStream(ctx context.Context, b blob) {
-	var s *Stats
-	_, err := b.reader.Seek(0, io.SeekStart)
-	if err != nil {
-		err = errors.Join(ErrIO, err)
+	var name string
+	if b.digest.SizeBytes >= u.ioCfg.CompressionSizeThreshold {
+		name = MakeCompressedWriteResourceName(u.instanceName, b.digest.Hash, b.digest.SizeBytes)
 	} else {
-		s, err = u.writeBytes(ctx, "", b.reader, b.digest.SizeBytes, 0, true)
+		name = MakeWriteResourceName(u.instanceName, b.digest.Hash, b.digest.SizeBytes)
 	}
+	var s *Stats
+	var err error
+
+	reader := b.reader
+	shouldRelease := true
+	shouldClose := false
+	if len(b.bytes) > 0 {
+		reader = bytes.NewReader(b.bytes)
+	} else if len(b.path) > 0 {
+		if err := u.ioSem.Acquire(ctx, 1); err != nil {
+			return
+		}
+		reader = f
+		shouldClose = true
+	}
+
+	s, err = u.writeBytes(ctx, "", reader, b.digest.SizeBytes, 0, true) // TODO: resource name
+
 	// io and large io holds were acquired during digestion and must be released here.
 	if errClose := b.reader.Close(); errClose != nil {
 		err = errors.Join(ErrIO, errClose, err)

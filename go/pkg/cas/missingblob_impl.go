@@ -112,7 +112,7 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // All received requests will have corresponding responses sent on the returned channel.
 //
 // The returned channel is unbuffered and will be closed after the input channel is closed and no more responses are available for this call.
-// This could indicate completion or cancelation (in case the context was canceled).
+// This could indicate completion or cancellation (in case the context was canceled).
 // Slow consumption speed on this channel affects the consumption speed on the input channel.
 func (u *streamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	return u.missingBlobsStreamer(ctx, in)
@@ -278,7 +278,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 		missing = digests
 	}
 
-	// Reprot missing.
+	// Report missing.
 	for _, dpb := range missing {
 		d := digest.NewFromProtoUnvalidated(dpb)
 		u.notifyQueryCallers(MissingBlobsResponse{

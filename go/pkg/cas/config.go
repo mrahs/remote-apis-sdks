@@ -102,6 +102,7 @@ type IOConfig struct {
 	// the number of blobs buffered for uploading (and whatever the GC hasn't freed yet).
 	// In the extreme case, the number of buffered bytes for small files (not including streaming buffers) equals
 	// the concurrency limit for the upload gRPC call, times the bytes limit per call, times this value.
+	// Note that the amount of memory used to buffer a directory blob is not included in this estimate.
 	// Must be >= 0.
 	SmallFileSizeThreshold int64
 
@@ -124,7 +125,7 @@ type IOConfig struct {
 	OptimizeForDiskLocality bool
 
 	// Cache is a read/write cache for digested files.
-	// The key is the file path and the assocaited exclusion filter.
+	// The key is the file path and the associated exclusion filter.
 	// The value is a struct containing a digest and proto message that represents the digested node. It's meant for internal use only.
 	// Providing a cache here allows for reusing entries between clients.
 	// Cache entries are never evicted which assumes the files are never edited during the lifetime of the cache entry.
