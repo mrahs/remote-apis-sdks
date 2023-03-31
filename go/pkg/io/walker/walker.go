@@ -10,32 +10,34 @@ import (
 type NextStep int
 
 const (
-	// Continue indicates that the walker should continue traversing.
-	// For symlinks, it indicates that the walker should follow the target.
+	// Continue continues traversing and follows symlinks.
 	Continue NextStep = iota
 
-	// Skip is useful with directories and symlinks.
-	// With a directory, it indicates that the walker should skip the children.
-	// With a symlink, it indicates that the walker should skip following the target.
+	// Skip skips the file, the entire directory tree, or following the symlink.
 	Skip
 
-	// Defer indicates that the walker should buffer the path to be revisited later and continue traversing other paths.
-	// The exact behavior is implementation dependant.
+	// Defer reschedules the path for another visit and continues traversing.
+	// The exact behavior is implementation dependent.
 	Defer
 
-	// Replace indicates that the walker should follow the symlink and report all subsequent related
-	// paths as descendants of the symlink path.
-	// I.e. if the symlink path was /foo/bar, and its target was /baz/file.ext, the target is reported as /foo/bar.
-	// Replacing a symlink to a directory means all children are reported as descendats of the symlink path.
+	// Replace follows the target of a symlink, but reports every path from that sub-traversal as a relative
+	// path of the symlink's path.
+	// For example, if the target is a file, its path would be that of the symlink. If it is a directory, every descendent
+	// of that directory will be reported as a child of the directory and the directory will have the path of the symlink.
 	// This behavior is equivalent to copying the entire tree of the target in place of the symlink.
 	Replace
 
-	// Cancel indicates that the walker should cancel the entire walk.
+	// Cancel cancels the entire walk gracefully.
 	Cancel
 )
 
-// ErrInvalidArgument indicates a fatal error due to an invalid argument.
-var ErrInvalidArgument = errors.New("walker: invalid argument")
+var (
+	// ErrInvalidArgument indicates a fatal error due to an invalid argument.
+	ErrInvalidArgument = errors.New("walker: invalid argument")
+
+	// ErrInvalidNextStep indicates a fatal error due to an invalid next step returned by the callback.
+	ErrInvalidNextStep = errors.New("walker: invalid next step")
+)
 
 // WalkFunc defines the callback signature that clients must specify for walker implementatinos.
 // More details about when this function is called and how its return values are used
@@ -61,6 +63,8 @@ type WalkFunc func(path ep.Abs, info fs.FileInfo, err error) (NextStep, error)
 // At any point, the client may return Cancel to cancel the entire walk.
 // If a symlink is encountered, the function must return Skip to avoid triggering a recursive walk on the symlink target.
 // Alternatively, returning Replace will instruct the walker to traverse the target as if its path is that of the symlink itself.
+//
+// An unexpected NextStep value cancels the entire walk.
 //
 // The error returned by the walk is nil if no errors were encountered. Otherwise, it's a collection
 // of errors returned by the callback function.

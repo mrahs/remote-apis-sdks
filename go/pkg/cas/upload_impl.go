@@ -20,7 +20,6 @@ import (
 	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/klauspost/compress/zstd"
-	"github.com/pborman/uuid"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -29,13 +28,13 @@ import (
 // UploadRequest represents a path to start uploading from.
 // If the path is a directory, its entire tree is traversed and only files that are not excluded
 // by the filter are uploaded.
-// Any symlinks are handled according to the specified options.
+// Symlinks are handled according to the specified options.
 type UploadRequest struct {
 	Path           ep.Abs
 	SymlinkOptions slo.Options
 	ShouldSkip     ep.Filter
 	// For internal use.
-	tag string
+	tag tag
 }
 
 // UploadResponse represents an upload result for a single blob (which may represent a tree of files).
@@ -47,12 +46,10 @@ type UploadResponse struct {
 
 type uploadRequestBundleItem struct {
 	req  *repb.BatchUpdateBlobsRequest_Request
-	tags []string
+	tags []tag
 }
 
 type uploadRequestBundle = map[digest.Digest]uploadRequestBundleItem
-
-type uploadCaller = chan UploadResponse
 
 // blob associates a digest with its original bytes.
 // Only one of bytes, path or reader is used, in that order.
@@ -63,17 +60,15 @@ type blob struct {
 	bytes  []byte
 	path   string
 	reader io.ReadSeekCloser
-	tag    string
+	tag    tag
 }
 
-// WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
-// The specified size is used to toggle compression as well as report some stats. It must be reflect the actual number of bytes the specified reader has to give.
-// If finish is true, the server is notified to finalize the resource name and further writes may not succeed.
-// The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
-// In case of error while the returned stats indicate that all the bytes were sent, it is still not a guarantee all the bytes
-// were received by the server since an acknlowedgement was not observed.
-func (u *batchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (*Stats, error) {
-	return u.writeBytes(ctx, name, r, size, offset, finish)
+func (u *batchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error) {
+	return u.writeBytes(ctx, name, r, size, offset, true)
+}
+
+func (u *batchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error) {
+	return u.writeBytes(ctx, name, r, size, offset, false)
 }
 
 func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (*Stats, error) {
@@ -241,14 +236,6 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	return stats, err
 }
 
-// Upload processes the specified blobs for upload. Blobs that already exist in the CAS are not uploaded.
-// Any path or file that matches the specified filter is excluded.
-// Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
-//
-// Returns a slice of the digests of the blobs that were uploaded (excluding the ones that already exist in the CAS).
-// If the returned error is nil, any digest that is not in the returned slice was already in the CAS, and any digest
-// that is in the slice may have been successfully uploaded or not.
-// If the returned error is not nil, the returned slice may be incomplete.
 func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.Options, shouldSkip ep.Filter) ([]digest.Digest, *Stats, error) {
 	if len(paths) < 1 {
 		return nil, nil, nil
@@ -261,7 +248,7 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.O
 	ctxUploadCaller, ctxUploaderCallerCancel := context.WithCancel(ctx)
 	defer ctxUploaderCallerCancel()
 
-	tag, resChan := u.registerUploadCaller(ctxUploadCaller)
+	tag, resChan := u.uploadPubSub.subscribe(ctxUploadCaller)
 	go func() {
 		for _, p := range paths {
 			select {
@@ -277,7 +264,8 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.O
 	var err error
 	total := len(paths)
 	i := 0
-	for r := range resChan {
+	for rawR := range resChan {
+		r := rawR.(UploadResponse)
 		switch {
 		case r.Err != nil:
 			missing = append(missing, r.Digest)
@@ -308,58 +296,8 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.O
 	return missing, stats, err
 }
 
-// Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
 func (u *streamingUploader) Upload(context.Context, <-chan ep.Abs, slo.Options, ep.Filter) <-chan UploadResponse {
 	panic("not yet implemented")
-}
-
-// registerUploadCaller returns a new channel to the caller to read responses from.
-//
-// Only requests associated with the returned tag are sent on the returned channel.
-//
-// The returned channel is closed when the specified context is done. The caller should
-// ensure the context is canceled at the right time to avoid send-on-closed-channel errors
-// and avoid deadlocks.
-//
-// The caller must continue to drain the returned channel until it is closed to avoid deadlocks.
-func (u *uploaderv2) registerUploadCaller(ctx context.Context) (string, <-chan UploadResponse) {
-	tag := uuid.New()
-
-	// Serialize this block to avoid concurrent map-read-write errors.
-	u.uploadCallerMutex.Lock()
-	uc, ok := u.uploadCaller[tag]
-	if !ok {
-		uc = make(chan UploadResponse)
-		u.uploadCaller[tag] = uc
-	}
-	u.uploadCallerMutex.Unlock()
-
-	u.uploadCallerWg.Add(1)
-	go func() {
-		<-ctx.Done()
-		// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
-		u.uploadCallerMutex.Lock()
-		delete(u.uploadCaller, tag)
-		u.uploadCallerMutex.Unlock()
-
-		close(uc)
-		u.uploadCallerWg.Done()
-	}()
-
-	return tag, uc
-}
-
-func (u *uploaderv2) notifyUploadCallers(r UploadResponse, tags ...string) {
-	// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
-	u.uploadCallerMutex.Lock()
-	defer u.uploadCallerMutex.Unlock()
-	for _, tag := range tags {
-		uc, ok := u.uploadCaller[tag]
-		if ok {
-			// Possible deadlock if the receiver had abandoned the channel.
-			uc <- r
-		}
-	}
 }
 
 // uploadDispatcher is the entry point for upload requests.
@@ -424,8 +362,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 			}
 
 			// Create a tag for this request and associate it with the caller.
-			tag := uuid.New()
-			u.uploadReqCaller.Store(tag, req.tag)
+			// TODO: req pubsub
 			// Start the walk.
 			u.walkWg.Add(1)
 			go func() {
@@ -493,7 +430,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 							u.dirChildren.Append(parentKey, node)
 						}
 						if b != nil {
-							dispatch(blob{digest: node.Digest, bytes: b, tag: tag})
+							dispatch(blob{digest: node.Digest, bytes: b, tag: req.tag})
 						}
 						return nextStep, err
 
@@ -505,7 +442,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 							u.dirChildren.Append(parentKey, node)
 						}
 						if blb != nil {
-							blb.tag = tag
+							blb.tag = req.tag
 							dispatch(*blb)
 						}
 						return nextStep, err
@@ -612,7 +549,7 @@ func (u *uploaderv2) digestDirectory(path ep.Abs, children []interface{}) (*repb
 }
 
 // digestFile constructs a file node and returns it along with the blob to be dispatched.
-// If the file size exceeds the large threshold, both IO and large IO holds are retianed upon returning and it's
+// If the file size exceeds the large threshold, both IO and large IO holds are retained upon returning and it's
 // the responsibility of the streamer to release them.
 // This allows the walker to collect the digest and proceed without having to wait for the streamer.
 func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileInfo) (node *repb.FileNode, blb *blob, nextStep walker.NextStep, err error) {
@@ -736,7 +673,7 @@ func (u *uploaderv2) uploadBatcher(ctx context.Context) {
 			rSize := proto.Size(r)
 
 			// Reroute oversized blobs to the streamer.
-			if rSize >= u.uploadRpcConfig.BytesLimit {
+			if rSize >= (u.uploadRpcConfig.BytesLimit - u.uploadRequestBaseSize) {
 				u.uploadStreamerChan <- b
 				continue
 			}
@@ -766,9 +703,6 @@ func (u *uploaderv2) uploadBatcher(ctx context.Context) {
 		case <-bundleTicker.C:
 			handle()
 		case <-ctx.Done():
-			// Nothing to wait for since all the senders and receivers should have terminated as well.
-			// The only things that might still be in-flight are the gRPC calls, which will eventually terminate since
-			// there are no active query callers.
 			return
 		}
 	}
@@ -819,7 +753,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 
 	// Report uploaded.
 	for _, d := range uploaded {
-		u.notifyUploadCallers(UploadResponse{
+		u.uploadPubSub.publish(UploadResponse{
 			Digest: d,
 			Stats: Stats{
 				BytesRequested:      d.Size,
@@ -841,7 +775,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 		if dErr != nil {
 			dErr = errors.Join(ErrGRPC, dErr)
 		}
-		u.notifyUploadCallers(UploadResponse{
+		u.uploadPubSub.publish(UploadResponse{
 			Digest: d,
 			Stats: Stats{
 				BytesRequested:  d.Size,
@@ -863,7 +797,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	}
 	// Report failed requests due to call failure.
 	for d, item := range bundle {
-		u.notifyUploadCallers(UploadResponse{
+		u.uploadPubSub.publish(UploadResponse{
 			Digest: d,
 			Stats: Stats{
 				BytesRequested:  d.Size,
@@ -891,73 +825,59 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 				return
 			}
 
+			// Block the streamer if the gRPC call is being throttled.
 			if err := u.streamSem.Acquire(ctx, 1); err != nil {
 				return
 			}
 
-			if len(b.bytes) > 0 {
-				b.reader = bytes.NewReader(b.bytes)
-				go func() {
-					defer u.streamSem.Release(1)
-					u.callStream(ctx, b)
+			var name string
+			if b.digest.SizeBytes >= u.ioCfg.CompressionSizeThreshold {
+				name = MakeCompressedWriteResourceName(u.instanceName, b.digest.Hash, b.digest.SizeBytes)
+			} else {
+				name = MakeWriteResourceName(u.instanceName, b.digest.Hash, b.digest.SizeBytes)
+			}
+
+			go func() (stats Stats, err error) {
+				defer u.streamSem.Release(1)
+				defer func() {
+					u.uploadPubSub.publish(UploadResponse{
+						Digest: digest.NewFromProtoUnvalidated(b.digest),
+						Stats:  stats,
+						Err:    err,
+					}, b.tag)
 				}()
-				continue
-			}
 
-			if len(b.path) > 0 {
-			}
-			if b.reader != nil {
-				// io and large io holds were already acquired during digestion and will be released downstream.
-				// For large files, we can take advantage of the automatic presence check of the streaming API
-				// which will immediately report a cache hit. I.e. no need to query for a missing digest.
-				// WARN: this could still stream the same file multiple times concurrently since the API will only report a cache hit upon completion.
-				go u.callStream(ctx, b)
-				continue
-			}
+				var reader io.Reader
 
-			// WARN: same issue as large files; should bundle here.
-			go u.callStream(ctx, b)
+				if len(b.bytes) > 0 {
+					reader = bytes.NewReader(b.bytes)
+				}
+
+				if len(b.path) > 0 {
+					f, errOpen := os.Open(b.path)
+					if errOpen != nil {
+						return Stats{BytesRequested: b.digest.SizeBytes}, errors.Join(ErrIO, errOpen)
+					}
+					defer func() {
+						if errClose := f.Close(); errClose != nil {
+							err = errors.Join(ErrIO, errClose, err)
+						}
+					}()
+					reader = f
+				}
+
+				if b.reader != nil {
+					reader = b.reader
+					// IO holds were acquired during digestion for large files and are expected to be released here.
+					defer u.ioSem.Release(1)
+					defer u.ioLargeSem.Release(1)
+				}
+
+				s, err := u.writeBytes(ctx, name, reader, b.digest.SizeBytes, 0, true)
+				return *s, err
+			}()
+
 		case <-ctx.Done():
 		}
 	}
-}
-
-func (u *uploaderv2) callStream(ctx context.Context, b blob) {
-	var name string
-	if b.digest.SizeBytes >= u.ioCfg.CompressionSizeThreshold {
-		name = MakeCompressedWriteResourceName(u.instanceName, b.digest.Hash, b.digest.SizeBytes)
-	} else {
-		name = MakeWriteResourceName(u.instanceName, b.digest.Hash, b.digest.SizeBytes)
-	}
-	var s *Stats
-	var err error
-
-	reader := b.reader
-	shouldRelease := true
-	shouldClose := false
-	if len(b.bytes) > 0 {
-		reader = bytes.NewReader(b.bytes)
-	} else if len(b.path) > 0 {
-		if err := u.ioSem.Acquire(ctx, 1); err != nil {
-			return
-		}
-		reader = f
-		shouldClose = true
-	}
-
-	s, err = u.writeBytes(ctx, "", reader, b.digest.SizeBytes, 0, true) // TODO: resource name
-
-	// io and large io holds were acquired during digestion and must be released here.
-	if errClose := b.reader.Close(); errClose != nil {
-		err = errors.Join(ErrIO, errClose, err)
-	}
-	u.ioSem.Release(1)
-	if b.digest.SizeBytes >= u.ioCfg.LargeFileSizeThreshold {
-		u.ioLargeSem.Release(1)
-	}
-	u.notifyUploadCallers(UploadResponse{
-		Digest: digest.NewFromProtoUnvalidated(b.digest),
-		Stats:  *s,
-		Err:    err,
-	}, b.tag)
 }

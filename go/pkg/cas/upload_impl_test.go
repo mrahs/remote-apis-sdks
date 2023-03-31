@@ -274,7 +274,12 @@ func TestBatching_WriteBytes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
-			stats, err := u.WriteBytes(context.Background(), "", bytes.NewReader(test.b), int64(len(test.b)), test.offset, test.finish)
+			var stats *cas.Stats
+			if test.finish {
+				stats, err = u.WriteBytes(context.Background(), "", bytes.NewReader(test.b), int64(len(test.b)), test.offset)
+			} else {
+				stats, err = u.WriteBytesPartial(context.Background(), "", bytes.NewReader(test.b), int64(len(test.b)), test.offset)
+			}
 			if test.wantErr == nil && err != nil {
 				t.Errorf("WriteBytes failed: %v", err)
 			}

@@ -8,7 +8,6 @@ import (
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-	"github.com/pborman/uuid"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -22,12 +21,12 @@ type MissingBlobsResponse struct {
 // missingBlobRequest associates a digest with a tag the identifies the requester.
 type missingBlobRequest struct {
 	digest digest.Digest
-	tag    string
+	tag    tag
 }
 
 // missingBlobRequestBundle is a set of digests, each is associated with multiple tags (query callers).
 // It is used for unified requests when multiple concurrent requesters share seats in the same bundle.
-type missingBlobRequestBundle = map[digest.Digest][]string
+type missingBlobRequestBundle = map[digest.Digest][]tag
 
 // queryCaller is channel that represents an active query caller who is listening
 // on it waiting for responses.
@@ -37,12 +36,6 @@ type missingBlobRequestBundle = map[digest.Digest][]string
 // See registerQueryCaller for details.
 type queryCaller = chan MissingBlobsResponse
 
-// MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
-//
-// The digests are batched based on the set gRPC limits (count and size).
-// Errors from a batch do not affect other batches, but all digests from such bad batches will be reported as missing by this call.
-// In other words, if an error is returned, any digest that is not in the returned slice is not missing.
-// If no error is returned, the returned slice contains all the missing digests.
 func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
 	if len(digests) < 1 {
 		return nil, nil
@@ -55,11 +48,11 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(ctx)
 	defer ctxQueryCallerCancel()
 
-	tag, resChan := u.registerQueryCaller(ctxQueryCaller)
+	tag, resChan := u.queryPubSub.subscribe(ctxQueryCaller)
 
-	u.queryCallerWg.Add(1)
+	u.processorWg.Add(1)
 	go func() {
-		defer u.queryCallerWg.Done()
+		defer u.processorWg.Done()
 		for _, d := range digests {
 			select {
 			case <-ctx.Done():
@@ -73,7 +66,8 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	var err error
 	var total = len(digests)
 	var i = 0
-	for r := range resChan {
+	for rawR := range resChan {
+		r := rawR.(MissingBlobsResponse)
 		switch {
 		case r.Err != nil:
 			missing = append(missing, r.Digest)
@@ -105,15 +99,6 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	return missing, err
 }
 
-// MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
-//
-// The caller must close the specified input channel as a termination signal.
-// The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
-// All received requests will have corresponding responses sent on the returned channel.
-//
-// The returned channel is unbuffered and will be closed after the input channel is closed and no more responses are available for this call.
-// This could indicate completion or cancellation (in case the context was canceled).
-// Slow consumption speed on this channel affects the consumption speed on the input channel.
 func (u *streamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	return u.missingBlobsStreamer(ctx, in)
 }
@@ -129,14 +114,14 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 
 	ch := make(chan MissingBlobsResponse)
 	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(ctx)
-	tag, resChan := u.registerQueryCaller(ctxQueryCaller)
+	tag, resChan := u.queryPubSub.subscribe(ctxQueryCaller)
 
 	// Counter.
 	pending := 0
 	pendingChan := make(chan int)
-	u.queryCallerWg.Add(1)
+	u.processorWg.Add(1)
 	go func() {
-		defer u.queryCallerWg.Done()
+		defer u.processorWg.Done()
 		defer ctxQueryCallerCancel()
 		done := false
 		for {
@@ -156,21 +141,21 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 	}()
 
 	// Receiver.
-	u.queryCallerWg.Add(1)
+	u.processorWg.Add(1)
 	go func() {
-		defer u.queryCallerWg.Done()
+		defer u.processorWg.Done()
 		// Continue to drain until the processor closes the channel to avoid deadlocks.
 		for r := range resChan {
-			ch <- r
+			ch <- r.(MissingBlobsResponse)
 			pendingChan <- -1
 		}
 		close(ch)
 	}()
 
 	// Sender.
-	u.queryCallerWg.Add(1)
+	u.processorWg.Add(1)
 	go func() {
-		defer u.queryCallerWg.Done()
+		defer u.processorWg.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -188,57 +173,6 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 	}()
 
 	return ch
-}
-
-// registerQueryCaller returns a new channel to the caller to read responses from.
-//
-// Only requests associated with the returned tag are sent on the returned channel.
-//
-// The returned channel is closed when the specified context is done. The caller should
-// ensure the context is canceled at the right time to avoid send-on-closed-channel errors
-// and avoid deadlocks.
-//
-// The caller must continue to drain the returned channel until it is closed to avoid deadlocks.
-func (u *uploaderv2) registerQueryCaller(ctx context.Context) (string, <-chan MissingBlobsResponse) {
-	tag := uuid.New()
-
-	// Serialize this block to avoid concurrent map-read-write errors.
-	u.queryCallerMutex.Lock()
-	qc, ok := u.queryCaller[tag]
-	if !ok {
-		qc = make(chan MissingBlobsResponse)
-		u.queryCaller[tag] = qc
-	}
-	u.queryCallerMutex.Unlock()
-
-	u.queryCallerWg.Add(1)
-	go func() {
-		defer u.queryCallerWg.Done()
-		<-ctx.Done()
-
-		// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
-		u.queryCallerMutex.Lock()
-		delete(u.queryCaller, tag)
-		u.queryCallerMutex.Unlock()
-
-		close(qc)
-	}()
-
-	return tag, qc
-}
-
-// notifyQueryCallers is a helper method that fans-out a response to all subscribed callers.
-func (u *uploaderv2) notifyQueryCallers(r MissingBlobsResponse, tags ...string) {
-	// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
-	u.queryCallerMutex.Lock()
-	defer u.queryCallerMutex.Unlock()
-	for _, tag := range tags {
-		qc, ok := u.queryCaller[tag]
-		if ok {
-			// Possible deadlock if the receiver had abandoned the channel.
-			qc <- r
-		}
-	}
 }
 
 // callMissingBlobs calls the gRPC endpoint and notifies query callers of the results.
@@ -281,7 +215,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 	// Report missing.
 	for _, dpb := range missing {
 		d := digest.NewFromProtoUnvalidated(dpb)
-		u.notifyQueryCallers(MissingBlobsResponse{
+		u.queryPubSub.publish(MissingBlobsResponse{
 			Digest:  d,
 			Missing: true,
 			Err:     err,
@@ -291,7 +225,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 
 	// Report non-missing.
 	for d := range bundle {
-		u.notifyQueryCallers(MissingBlobsResponse{
+		u.queryPubSub.publish(MissingBlobsResponse{
 			Digest:  d,
 			Missing: false,
 			// This should always be nil at this point.
@@ -338,7 +272,7 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 
 			// Check oversized items.
 			if u.queryRequestBaseSize+dSize > u.queryRpcConfig.BytesLimit {
-				u.notifyQueryCallers(MissingBlobsResponse{
+				u.queryPubSub.publish(MissingBlobsResponse{
 					Digest: req.digest,
 					Err:    ErrOversizedItem,
 				}, req.tag)

@@ -6,7 +6,8 @@ go_library(
         "client.go",
         "config.go",
         "ioutil.go",
-        "missing_impl.go",
+        "missingblob_impl.go",
+        "pubsub.go",
         "slice_cache.go",
         "upload.go",
         "upload_impl.go",
@@ -41,7 +42,7 @@ go_test(
     name = "cas_test",
     srcs = [
         "client_test.go",
-        "missing_impl_test.go",
+        "missingblob_impl_test.go",
         "upload_impl_test.go",
         "upload_test.go",
         "uploader_test.go",

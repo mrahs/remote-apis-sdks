@@ -96,13 +96,20 @@ type IOConfig struct {
 	OpenLargeFilesLimit int
 
 	// SmallFileSizeThreshold sets the upper bound (inclusive) for the file size to be considered a small file.
-	// Such files are buffered entirely in memory.
+	//
+	// Files that are larger than this value (medium and large files) are uploaded via the streaming API.
+	//
+	// Small files are buffered entirely in memory and uploaded via the batching API.
+	// However, it is still possible for a file to be small in size, but still results in a request that is larger than the gRPC size limit.
+	// In that case, the file is uploaded via the streaming API instead.
+	//
 	// The amount of memory used to buffer files is affected by this value and OpenFilesLimit as well as bundling limits for gRPC.
 	// The uploader will stop buffering once the OpenFilesLimit is reached, before which the number of buffered files is bound by
 	// the number of blobs buffered for uploading (and whatever the GC hasn't freed yet).
 	// In the extreme case, the number of buffered bytes for small files (not including streaming buffers) equals
 	// the concurrency limit for the upload gRPC call, times the bytes limit per call, times this value.
 	// Note that the amount of memory used to buffer a directory blob is not included in this estimate.
+	//
 	// Must be >= 0.
 	SmallFileSizeThreshold int64
 

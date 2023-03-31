@@ -55,27 +55,73 @@ func MakeCompressedWriteResourceName(instanceName, hash string, size int64) stri
 
 // BatchingUploader provides a simple imperative API to upload to the CAS.
 type BatchingUploader interface {
-	io.Closer
 	// MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
+	//
+	// The digests are batched based on the set gRPC limits (count and size).
+	// Errors from a batch do not affect other batches, but all digests from such bad batches will be reported as missing by this call.
+	// In other words, if an error is returned, any digest that is not in the returned slice is not missing.
+	// If no error is returned, the returned slice contains all the missing digests.
 	MissingBlobs(context.Context, []digest.Digest) ([]digest.Digest, error)
 
-	// Upload digests the specified paths and upload to the CAS what is not already there.
-	// Returns a slice of the digests of the files that had to be uploaded.
+	// Upload processes the specified blobs for upload. Blobs that already exist in the CAS are not uploaded.
+	// Any path or file that matches the specified filter is excluded.
+	// Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
+	//
+	// Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
+	// The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
+	// With infinite speed and limits, every blob will uploaded exactly once. On the other extreme, every blob is uploaded
+	// alone and no unification takes place.
+	// In the average case, blobs that make it into the same bundle will be deduplicated.
+	//
+	// Returns a slice of the digests of the blobs that were uploaded (excluding the ones that already exist in the CAS).
+	// If the returned error is nil, any digest that is not in the returned slice was already in the CAS, and any digest
+	// that is in the slice may have been successfully uploaded or not.
+	// If the returned error is not nil, the returned slice may be incomplete.
 	Upload(context.Context, []ep.Abs, slo.Options, ep.Filter) ([]digest.Digest, *Stats, error)
 
-	// WriteBytes uploads all the bytes of the specified reader directly to the specified resource name starting remotely at the specified offset.
-	// If finish is true, the server is notified to finalize the resource name and no further writes are allowed.
-	WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (*Stats, error)
+	// WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
+	//
+	// The specified size is used to toggle compression as well as report some stats. It must be reflect the actual number of bytes the specified reader has to give.
+	// The server is notified to finalize the resource name and further writes may not succeed.
+	// The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
+	// In case of error while the returned stats indicate that all the bytes were sent, it is still not a guarantee all the bytes
+	// were received by the server since an acknlowedgement was not observed.
+	WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error)
+
+	// WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
+	WriteBytesPartial(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error)
+
+	// Wait blocks until all resources held by the uploader are released.
+	// It must be called after at least one of the methods has been called to avoid races with wait groups.
+	Wait()
 }
 
-// StreamingUploader provides a concurrency friendly API to upload to the CAS.
+// StreamingUploader provides a concurrency-friendly API to upload to the CAS.
 type StreamingUploader interface {
-	io.Closer
 	// MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
+	//
+	// The caller must close the specified input channel as a termination signal.
+	// The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
+	// All received requests will have corresponding responses sent on the returned channel.
+	//
+	// The returned channel is unbuffered and will be closed after the input channel is closed and no more responses are available for this call.
+	// This could indicate completion or cancellation (in case the context was canceled).
+	// Slow consumption speed on this channel affects the consumption speed on the input channel.
 	MissingBlobs(context.Context, <-chan digest.Digest) <-chan MissingBlobsResponse
 
 	// Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
+	//
+	// Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
+	// The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
+	// With infinite speed and limits, every blob will uploaded exactly once. On the other extreme, every blob is uploaded
+	// alone and no unification takes place.
+	// In the average case, blobs that make it into the same bundle will be grouped by digest. Once a digest is processed, each requester of that
+	// digest receives a copy of the coorresponding UploadResponse.
 	Upload(context.Context, <-chan ep.Abs, slo.Options, ep.Filter) <-chan UploadResponse
+
+	// Wait blocks until all resources held by the uploader are released.
+	// It must be called after at least one of the methods has been called to avoid races with wait groups.
+	Wait()
 }
 
 // batchingUplodaer implements the corresponding interface.
@@ -99,9 +145,9 @@ type uploaderv2 struct {
 	streamRpcConfig GRPCConfig
 
 	// gRPC throttling controls.
-	querySem    *semaphore.Weighted
-	uploadSem   *semaphore.Weighted
-	streamSem   *semaphore.Weighted
+	querySem  *semaphore.Weighted
+	uploadSem *semaphore.Weighted
+	streamSem *semaphore.Weighted
 
 	// IO controls.
 	ioCfg                 IOConfig
@@ -128,42 +174,27 @@ type uploaderv2 struct {
 	// grpcWg is used to wait for in-flight gRPC calls upon graceful termination.
 	grpcWg sync.WaitGroup
 
-	// queryCaller is set of active query callers and their associated channels.
-	queryCaller map[string]queryCaller
-	// queryCallerMutex is necessary since the map holds references which can survive the atomicity of sync.Map.
-	queryCallerMutex sync.Mutex
-	// queryCallerWg is used to wait for in-flight receivers upon graceful termination.
-	queryCallerWg sync.WaitGroup
-
-	// uploadCaller is set of active upload callers and their associated channels.
-	uploadCaller map[string]uploadCaller
-	// uploadReqCaller associates a request tag to its owner caller tag, which is useful to collate blobs per request (via its request tag)
-	// before sending the response to its caller (via its caller tag).
-	uploadReqCaller sync.Map
-	// uploadCallerMutex is necessary since the map holds references which can survive the atomicity of sync.Map.
-	uploadCallerMutex sync.Mutex
-	// uploadCallerWg is used to wait for in-flight receivers upon graceful termination.
-	uploadCallerWg sync.WaitGroup
+	queryPubSub     *pubSub
+	uploadPubSub    *pubSub
+	uploadReqPubSub *pubSub
 }
 
-// Close blocks until all resources have been cleaned up.
-// It always returns nil.
-// It must be called after at least one of the methods has been called to avoid races with wait groups.
-func (u *uploaderv2) Close() error {
+func (u *uploaderv2) Wait() {
 	// Wait for filesystem walks first, since they may still trigger requests.
 	u.walkWg.Wait()
-	// Wait for query callers to stop triggering requests and drain their responses.
-	u.queryCallerWg.Wait()
+	// Wait for query subscribers to stop triggering requests and drain their responses.
+	u.queryPubSub.wait()
 	// Wait for gRPC methods, since they may still issue responses.
 	u.grpcWg.Wait()
-	// Wait for upload callers to drain their responses.
-	u.uploadCallerWg.Wait()
+	// Wait for upload requests to collect their responses.
+	u.uploadReqPubSub.wait()
+	// Wait for upload subscribers to drain their responses.
+	u.uploadPubSub.wait()
 	close(u.queryChan)
 	close(u.uploadChan)
 	close(u.uploadBatcherChan)
 	close(u.uploadStreamerChan)
 	u.processorWg.Wait()
-	return nil
 }
 
 func (u *uploaderv2) withRetry(ctx context.Context, retryPolicy retry.BackoffPolicy, fn func() error) error {
@@ -189,8 +220,8 @@ func (u *uploaderv2) withTimeout(timeout time.Duration, cancelFn context.CancelF
 
 func newUploaderv2(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
-	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig) (*uploaderv2, error) {
-
+	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
+) (*uploaderv2, error) {
 	if cas == nil || byteStream == nil {
 		return nil, ErrNilClient
 	}
@@ -243,11 +274,11 @@ func newUploaderv2(
 		dirChildren: initSliceCache(),
 
 		queryChan:          make(chan missingBlobRequest),
+		queryPubSub:        newPubSub(),
 		uploadChan:         make(chan UploadRequest),
+		uploadPubSub:       newPubSub(),
 		uploadBatcherChan:  make(chan blob),
 		uploadStreamerChan: make(chan blob),
-		queryCaller:        make(map[string]queryCaller),
-		uploadCaller:       make(map[string]uploadCaller),
 
 		queryRequestBaseSize:  proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),
 		uploadRequestBaseSize: proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),
@@ -263,7 +294,8 @@ func newUploaderv2(
 // which the specified clients are connected to.
 func NewBatchingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
-	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig) (BatchingUploader, error) {
+	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
+) (BatchingUploader, error) {
 	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
@@ -276,7 +308,8 @@ func NewBatchingUploader(
 // which the specified clients are connected to.
 func NewStreamingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
-	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig) (StreamingUploader, error) {
+	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
+) (StreamingUploader, error) {
 	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err

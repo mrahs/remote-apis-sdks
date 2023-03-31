@@ -32,6 +32,7 @@ var (
 	}
 	ioCfg = cas.IOConfig{
 		ConcurrentWalksLimit:     1,
+		ConcurrentWalkerVisits:   1,
 		OpenFilesLimit:           1,
 		OpenLargeFilesLimit:      1,
 		SmallFileSizeThreshold:   1,
@@ -88,9 +89,11 @@ type byHash []digest.Digest
 func (a byHash) Len() int {
 	return len(a)
 }
+
 func (a byHash) Swap(i, j int) {
 	a[i], a[j] = a[j], a[i]
 }
+
 func (a byHash) Less(i, j int) bool {
 	return a[i].Hash < a[j].Hash
 }

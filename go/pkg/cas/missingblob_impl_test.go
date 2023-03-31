@@ -82,7 +82,7 @@ func TestBatching_MissingBlobs(t *testing.T) {
 			if diff := cmp.Diff(test.wantDigests, missing); diff != "" {
 				t.Errorf("missing mismatch, (-want +got): %s", diff)
 			}
-			_ = u.Close()
+			u.Wait()
 		})
 	}
 }
@@ -113,7 +113,7 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 	// This call might execute before any call to MissingBlobs which might cause races
 	// with wait groups. Blocking this goroutine allows another to wake up and use the wait groups before calling Close.
 	<-ctx.Done()
-	_ = u.Close()
+	u.Wait()
 }
 
 func TestBatching_MissingBlobsAbort(t *testing.T) {
@@ -136,7 +136,7 @@ func TestBatching_MissingBlobsAbort(t *testing.T) {
 	if diff := cmp.Diff(digests, missing); diff != "" {
 		t.Errorf("missing mismatch, (-want +got): %s", diff)
 	}
-	_ = u.Close()
+	u.Wait()
 }
 
 func TestStreaming_MissingBlobs(t *testing.T) {
@@ -169,5 +169,5 @@ func TestStreaming_MissingBlobs(t *testing.T) {
 			}
 		}
 	}()
-	_ = u.Close()
+	u.Wait()
 }
