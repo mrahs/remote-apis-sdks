@@ -133,9 +133,9 @@ type IOConfig struct {
 
 	// Cache is a read/write cache for digested files.
 	// The key is the file path and the associated exclusion filter.
-	// The value is a struct containing a digest and proto message that represents the digested node. It's meant for internal use only.
+	// The value is a a proto message that represents one of repb.SymlinkNode, repb.DirectoryNode, repb.FileNode.
 	// Providing a cache here allows for reusing entries between clients.
-	// Cache entries are never evicted which assumes the files are never edited during the lifetime of the cache entry.
+	// Cache entries are never evicted which implies the assumption that the files are never edited during the lifetime of the cache entry.
 	Cache sync.Map
 }
 
@@ -220,14 +220,14 @@ func (s *Stats) Add(other Stats) {
 	s.StreamedCount += other.StreamedCount
 }
 
-func isValidRpcCfg(cfg *GRPCConfig) error {
+func validateGrpcConfig(cfg *GRPCConfig) error {
 	if cfg.ConcurrentCallsLimit < 1 || cfg.ItemsLimit < 1 || cfg.BytesLimit < 1 {
 		return ErrZeroOrNegativeLimit
 	}
 	return nil
 }
 
-func isValidIOCfg(cfg *IOConfig) error {
+func validateIOConfig(cfg *IOConfig) error {
 	if cfg.ConcurrentWalksLimit < 1 || cfg.ConcurrentWalkerVisits < 1 || cfg.OpenFilesLimit < 1 || cfg.OpenLargeFilesLimit < 1 || cfg.BufferSize < 1 {
 		return ErrZeroOrNegativeLimit
 	}

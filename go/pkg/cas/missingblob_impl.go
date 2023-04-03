@@ -48,11 +48,11 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(ctx)
 	defer ctxQueryCallerCancel()
 
-	tag, resChan := u.queryPubSub.subscribe(ctxQueryCaller)
+	tag, resChan := u.queryPubSub.sub(ctxQueryCaller)
 
-	u.processorWg.Add(1)
+	u.workerWg.Add(1)
 	go func() {
-		defer u.processorWg.Done()
+		defer u.workerWg.Done()
 		for _, d := range digests {
 			select {
 			case <-ctx.Done():
@@ -114,14 +114,14 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 
 	ch := make(chan MissingBlobsResponse)
 	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(ctx)
-	tag, resChan := u.queryPubSub.subscribe(ctxQueryCaller)
+	tag, resChan := u.queryPubSub.sub(ctxQueryCaller)
 
 	// Counter.
 	pending := 0
 	pendingChan := make(chan int)
-	u.processorWg.Add(1)
+	u.workerWg.Add(1)
 	go func() {
-		defer u.processorWg.Done()
+		defer u.workerWg.Done()
 		defer ctxQueryCallerCancel()
 		done := false
 		for {
@@ -141,9 +141,9 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 	}()
 
 	// Receiver.
-	u.processorWg.Add(1)
+	u.workerWg.Add(1)
 	go func() {
-		defer u.processorWg.Done()
+		defer u.workerWg.Done()
 		// Continue to drain until the processor closes the channel to avoid deadlocks.
 		for r := range resChan {
 			ch <- r.(MissingBlobsResponse)
@@ -153,9 +153,9 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 	}()
 
 	// Sender.
-	u.processorWg.Add(1)
+	u.workerWg.Add(1)
 	go func() {
-		defer u.processorWg.Done()
+		defer u.workerWg.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -215,7 +215,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 	// Report missing.
 	for _, dpb := range missing {
 		d := digest.NewFromProtoUnvalidated(dpb)
-		u.queryPubSub.publish(MissingBlobsResponse{
+		u.queryPubSub.pub(MissingBlobsResponse{
 			Digest:  d,
 			Missing: true,
 			Err:     err,
@@ -225,7 +225,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 
 	// Report non-missing.
 	for d := range bundle {
-		u.queryPubSub.publish(MissingBlobsResponse{
+		u.queryPubSub.pub(MissingBlobsResponse{
 			Digest:  d,
 			Missing: false,
 			// This should always be nil at this point.
@@ -272,7 +272,7 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 
 			// Check oversized items.
 			if u.queryRequestBaseSize+dSize > u.queryRpcConfig.BytesLimit {
-				u.queryPubSub.publish(MissingBlobsResponse{
+				u.queryPubSub.pub(MissingBlobsResponse{
 					Digest: req.digest,
 					Err:    ErrOversizedItem,
 				}, req.tag)

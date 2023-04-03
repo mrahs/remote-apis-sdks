@@ -248,7 +248,7 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.O
 	ctxUploadCaller, ctxUploaderCallerCancel := context.WithCancel(ctx)
 	defer ctxUploaderCallerCancel()
 
-	tag, resChan := u.uploadPubSub.subscribe(ctxUploadCaller)
+	tag, resChan := u.uploadPubSub.sub(ctxUploadCaller)
 	go func() {
 		for _, p := range paths {
 			select {
@@ -315,9 +315,9 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 	queryResChan := u.missingBlobsStreamer(ctx, queryChan)
 	digestBlob := sync.Map{}
 
-	u.processorWg.Add(1)
+	u.workerWg.Add(1)
 	go func() {
-		defer u.processorWg.Done()
+		defer u.workerWg.Done()
 		// Context handling is done upstream in the missing blobs call.
 		for queryRes := range queryResChan {
 			if queryRes.Err != nil {
@@ -753,7 +753,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 
 	// Report uploaded.
 	for _, d := range uploaded {
-		u.uploadPubSub.publish(UploadResponse{
+		u.uploadPubSub.pub(UploadResponse{
 			Digest: d,
 			Stats: Stats{
 				BytesRequested:      d.Size,
@@ -775,7 +775,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 		if dErr != nil {
 			dErr = errors.Join(ErrGRPC, dErr)
 		}
-		u.uploadPubSub.publish(UploadResponse{
+		u.uploadPubSub.pub(UploadResponse{
 			Digest: d,
 			Stats: Stats{
 				BytesRequested:  d.Size,
@@ -797,7 +797,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	}
 	// Report failed requests due to call failure.
 	for d, item := range bundle {
-		u.uploadPubSub.publish(UploadResponse{
+		u.uploadPubSub.pub(UploadResponse{
 			Digest: d,
 			Stats: Stats{
 				BytesRequested:  d.Size,
@@ -840,7 +840,7 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 			go func() (stats Stats, err error) {
 				defer u.streamSem.Release(1)
 				defer func() {
-					u.uploadPubSub.publish(UploadResponse{
+					u.uploadPubSub.pub(UploadResponse{
 						Digest: digest.NewFromProtoUnvalidated(b.digest),
 						Stats:  stats,
 						Err:    err,

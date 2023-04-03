@@ -162,7 +162,8 @@ type uploaderv2 struct {
 	uploadRequestBaseSize int
 
 	// Concurrency controls.
-	processorWg sync.WaitGroup
+	processorWg sync.WaitGroup // Main event loops.
+	workerWg sync.WaitGroup // Messaging goroutines downstream of event loops.
 	// queryChan is the fan-in channel for queries.
 	// All senders must also listen on the context to avoid deadlocks.
 	queryChan chan missingBlobRequest
@@ -174,9 +175,9 @@ type uploaderv2 struct {
 	// grpcWg is used to wait for in-flight gRPC calls upon graceful termination.
 	grpcWg sync.WaitGroup
 
-	queryPubSub     *pubSub
-	uploadPubSub    *pubSub
-	uploadReqPubSub *pubSub
+	queryPubSub     *pubsub
+	uploadPubSub    *pubsub
+	uploadReqPubSub *pubsub
 }
 
 func (u *uploaderv2) Wait() {
@@ -190,6 +191,9 @@ func (u *uploaderv2) Wait() {
 	u.uploadReqPubSub.wait()
 	// Wait for upload subscribers to drain their responses.
 	u.uploadPubSub.wait()
+	// Wait for workers to ensure all senders are done.
+	u.workerWg.Wait()
+	// Close channels to let processors terminate.
 	close(u.queryChan)
 	close(u.uploadChan)
 	close(u.uploadBatcherChan)
@@ -225,16 +229,16 @@ func newUploaderv2(
 	if cas == nil || byteStream == nil {
 		return nil, ErrNilClient
 	}
-	if err := isValidRpcCfg(&queryCfg); err != nil {
+	if err := validateGrpcConfig(&queryCfg); err != nil {
 		return nil, err
 	}
-	if err := isValidRpcCfg(&uploadCfg); err != nil {
+	if err := validateGrpcConfig(&uploadCfg); err != nil {
 		return nil, err
 	}
-	if err := isValidRpcCfg(&streamCfg); err != nil {
+	if err := validateGrpcConfig(&streamCfg); err != nil {
 		return nil, err
 	}
-	if err := isValidIOCfg(&ioCfg); err != nil {
+	if err := validateIOConfig(&ioCfg); err != nil {
 		return nil, err
 	}
 
@@ -276,9 +280,10 @@ func newUploaderv2(
 		queryChan:          make(chan missingBlobRequest),
 		queryPubSub:        newPubSub(),
 		uploadChan:         make(chan UploadRequest),
-		uploadPubSub:       newPubSub(),
 		uploadBatcherChan:  make(chan blob),
 		uploadStreamerChan: make(chan blob),
+		uploadPubSub:       newPubSub(),
+		uploadReqPubSub:    newPubSub(),
 
 		queryRequestBaseSize:  proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),
 		uploadRequestBaseSize: proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),
