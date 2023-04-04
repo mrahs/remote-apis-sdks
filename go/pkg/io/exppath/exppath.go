@@ -99,7 +99,7 @@ func NewRel(pathParts ...string) (Rel, error) {
 	return &rel{path: path}, nil
 }
 
-// JoinAbs is a convenient method to join multiple paths into an aboslute path.
+// JoinAbs is a convenient method to join multiple paths into an absolute path.
 func JoinAbs(root Abs, parts ...Rel) Abs {
 	ps := make([]string, len(parts)+1)
 	ps[0] = root.String()

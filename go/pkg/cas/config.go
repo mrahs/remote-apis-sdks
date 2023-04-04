@@ -1,6 +1,7 @@
 package cas
 
 import (
+	"math"
 	"sync"
 	"time"
 
@@ -35,7 +36,7 @@ const (
 	DefaultOpenLargeFilesLimit = 2
 
 	// DefaultCompressionSizeThreshold is disabled by default.
-	DefaultCompressionSizeThreshold = -1
+	DefaultCompressionSizeThreshold = math.MaxInt64
 
 	// BufferSize is based on GCS recommendations.
 	// See: https://cloud.google.com/compute/docs/disks/optimizing-pd-performance#io-size
@@ -59,7 +60,7 @@ type GRPCConfig struct {
 	// Must be > 0.
 	ItemsLimit int
 
-	// BundleTimeout sets the maximum duration a call is held while bundling.
+	// BundleTimeout sets the maximum duration a call is delayed while bundling.
 	// Bundling is used to ammortize the cost of a gRPC call over time. Instead of sending
 	// many requests with few items, bunlding attempt to maximize the number of items sent in a single request.
 	// This includes waiting for a bit to see if more items are requested.
@@ -90,9 +91,10 @@ type IOConfig struct {
 	OpenFilesLimit int
 
 	// OpenLargeFilesLimit sets the upper bound for the number of large files being simultanuously processed.
-	// Must be > 0.
-	// Open large files count towards open files. I.e. the following inequality is always effectively true:
+	//
+	// This value counts towards open files. I.e. the following inequality is always effectively true:
 	// OpenFilesLimit >= OpenLargeFilesLimit
+	// Must be > 0.
 	OpenLargeFilesLimit int
 
 	// SmallFileSizeThreshold sets the upper bound (inclusive) for the file size to be considered a small file.
@@ -108,7 +110,7 @@ type IOConfig struct {
 	// the number of blobs buffered for uploading (and whatever the GC hasn't freed yet).
 	// In the extreme case, the number of buffered bytes for small files (not including streaming buffers) equals
 	// the concurrency limit for the upload gRPC call, times the bytes limit per call, times this value.
-	// Note that the amount of memory used to buffer a directory blob is not included in this estimate.
+	// Note that the amount of memory used to buffer bytes of a generated proto messages is not included in this estimate.
 	//
 	// Must be >= 0.
 	SmallFileSizeThreshold int64
@@ -128,7 +130,7 @@ type IOConfig struct {
 	BufferSize int
 
 	// OptimizeForDiskLocality enables sorting files by path before they are written to disk to optimize for disk locality.
-	// Assuming files under the same directory are located close to each other on disk, the such files are batched together.
+	// Assuming files under the same directory are located close to each other on disk, then such files are batched together.
 	OptimizeForDiskLocality bool
 
 	// Cache is a read/write cache for digested files.

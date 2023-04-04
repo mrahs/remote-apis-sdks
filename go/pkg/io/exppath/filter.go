@@ -33,8 +33,8 @@ func (p *Filter) File(path string, mode fs.FileMode) bool {
 // A zero filter has regexp compiled from the empty string and 0 mode.
 //
 // It can be used as a stable identifier. However, keep in mind that
-// multiple regular expressions may yeild the same automaton. I.e. even
-// if two filters have different identifiers, they may still yeild the same
+// multiple regular expressions may yield the same automaton. I.e. even
+// if two filters have different identifiers, they may still yield the same
 // traversal result.
 func (p *Filter) String() string {
 	reStr := p.Regexp.String()
