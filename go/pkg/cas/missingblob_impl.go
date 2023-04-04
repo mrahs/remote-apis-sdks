@@ -12,6 +12,9 @@ import (
 )
 
 // MissingBlobsResponse represents a query result for a single digest.
+//
+// If the error field is set, the boolean field value is meaningless.
+// I.e. users should check the error before evaluating the boolean field.
 type MissingBlobsResponse struct {
 	Digest  digest.Digest
 	Missing bool
@@ -72,7 +75,7 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 		case r.Err != nil:
 			missing = append(missing, r.Digest)
 			// Don't join the same error from a batch more than once.
-			// This may not prevent similar errors from multiple batches sine errors.Is does not necessarily match by content.
+			// This may not prevent similar errors from multiple batches since errors.Is does not necessarily match by content.
 			if !errors.Is(err, r.Err) {
 				err = errors.Join(r.Err, err)
 			}

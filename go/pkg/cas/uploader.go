@@ -41,6 +41,13 @@ var (
 
 	// ErrOversizedItem indicates an item that is too large to fit into the set byte limit for the corresponding gRPC call.
 	ErrOversizedItem = errors.New("cas: oversized item")
+
+	// EOR indicates the end of a stream of responses for a particular subscriber.
+	//
+	// It is used to signal to the subscriber that no further responses are to be expected for the request in context.
+	// This is useful for upload requests that generate multiple responses for each single request so the subscriber can tell
+	// when to unsubscribe.
+	EOR = errors.New("end of response")
 )
 
 // MakeWriteResourceName returns a valid resource name for writing an uncompressed blob.
@@ -61,6 +68,7 @@ type BatchingUploader interface {
 	// Errors from a batch do not affect other batches, but all digests from such bad batches will be reported as missing by this call.
 	// In other words, if an error is returned, any digest that is not in the returned slice is not missing.
 	// If no error is returned, the returned slice contains all the missing digests.
+	// The returned error wraps a number of errors proportional to the length of the specified slice.
 	MissingBlobs(context.Context, []digest.Digest) ([]digest.Digest, error)
 
 	// Upload processes the specified blobs for upload. Blobs that already exist in the CAS are not uploaded.
@@ -74,9 +82,10 @@ type BatchingUploader interface {
 	// In the average case, blobs that make it into the same bundle will be deduplicated.
 	//
 	// Returns a slice of the digests of the blobs that were uploaded (excluding the ones that already exist in the CAS).
-	// If the returned error is nil, any digest that is not in the returned slice was already in the CAS, and any digest
-	// that is in the slice may have been successfully uploaded or not.
-	// If the returned error is not nil, the returned slice may be incomplete.
+	// If the returned error is nil, any digest that is not in the returned slice was already in the CAS.
+	// If the returned error is not nil, the returned slice may be incomplete (fatal error) and every digest
+	// in it may or may not have been successfully uploaded (individual errors).
+	// The returned error wraps a number of errors proportional to the length of the specified slice.
 	Upload(context.Context, []ep.Abs, slo.Options, ep.Filter) ([]digest.Digest, *Stats, error)
 
 	// WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
@@ -163,7 +172,7 @@ type uploaderv2 struct {
 
 	// Concurrency controls.
 	processorWg sync.WaitGroup // Main event loops.
-	workerWg sync.WaitGroup // Messaging goroutines downstream of event loops.
+	workerWg    sync.WaitGroup // Messaging goroutines downstream of event loops.
 	// queryChan is the fan-in channel for queries.
 	// All senders must also listen on the context to avoid deadlocks.
 	queryChan chan missingBlobRequest
@@ -175,9 +184,12 @@ type uploaderv2 struct {
 	// grpcWg is used to wait for in-flight gRPC calls upon graceful termination.
 	grpcWg sync.WaitGroup
 
-	queryPubSub     *pubsub
-	uploadPubSub    *pubsub
-	uploadReqPubSub *pubsub
+	// queryPubSub routes responses to callers.
+	queryPubSub        *pubsub
+	// uploadCallerPubSub routes responses to callers.
+	uploadCallerPubSub *pubsub
+	// uploadReqPubSub routes responses internally.
+	uploadReqPubSub    *pubsub
 }
 
 func (u *uploaderv2) Wait() {
@@ -190,7 +202,7 @@ func (u *uploaderv2) Wait() {
 	// Wait for upload requests to collect their responses.
 	u.uploadReqPubSub.wait()
 	// Wait for upload subscribers to drain their responses.
-	u.uploadPubSub.wait()
+	u.uploadCallerPubSub.wait()
 	// Wait for workers to ensure all senders are done.
 	u.workerWg.Wait()
 	// Close channels to let processors terminate.
@@ -257,7 +269,7 @@ func newUploaderv2(
 
 		ioCfg: ioCfg,
 		buffers: sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				// Since the buffers are never resized, treating the slice as a pointer-like
 				// type for this pool is safe.
 				buf := make([]byte, ioCfg.BufferSize)
@@ -265,7 +277,7 @@ func newUploaderv2(
 			},
 		},
 		zstdEncoders: sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				// Providing a nil writer implies that the encoder needs to be
 				// (re)initilaized with a writer using enc.Reset(w) before using it.
 				enc, _ := zstd.NewWriter(nil)
@@ -282,7 +294,7 @@ func newUploaderv2(
 		uploadChan:         make(chan UploadRequest),
 		uploadBatcherChan:  make(chan blob),
 		uploadStreamerChan: make(chan blob),
-		uploadPubSub:       newPubSub(),
+		uploadCallerPubSub: newPubSub(),
 		uploadReqPubSub:    newPubSub(),
 
 		queryRequestBaseSize:  proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),

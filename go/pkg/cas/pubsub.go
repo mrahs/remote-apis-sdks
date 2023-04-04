@@ -56,9 +56,12 @@ func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 	return t, subscriber
 }
 
-// pub fans-out a response to all subscribers sequentially.
+// pub is a blocking call that fans-out a response to all specified (by tag) subscribers sequentially.
+//
 // Returns when all active subscribers have received their copies.
-// May deadlock if a subscriber never reveives its copy.
+// May deadlock if an active subscriber never reveives its copy.
+// Inactive subscribers (expired by cancelling their context) are skipped.
+//
 // A busy subscriber does not block others from receiving their copies. It is instead
 // rescheduled for another attempt once all others get a chance to receive.
 // To prevent a temporarily infinite round-robin loop from consuming too much CPU, each subscriber

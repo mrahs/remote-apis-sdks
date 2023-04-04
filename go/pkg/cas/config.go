@@ -133,12 +133,15 @@ type IOConfig struct {
 	// Assuming files under the same directory are located close to each other on disk, then such files are batched together.
 	OptimizeForDiskLocality bool
 
-	// Cache is a read/write cache for digested files.
+	// UploadCache is a read/write cache for digested files.
+	//
 	// The key is the file path and the associated exclusion filter.
-	// The value is a a proto message that represents one of repb.SymlinkNode, repb.DirectoryNode, repb.FileNode.
+	// The underlying value is an UploadResponse value (not a pointer). If the value (the interface, not the underlying value)
+	// is nil, the file is already being processed by another goroutine.
+	// If the key does not exist, the file hasn't been seen yet.
 	// Providing a cache here allows for reusing entries between clients.
-	// Cache entries are never evicted which implies the assumption that the files are never edited during the lifetime of the cache entry.
-	Cache sync.Map
+	// UploadCache entries are never evicted which implies the assumption that the files are never modified during the lifetime of the cache entry.
+	UploadCache sync.Map
 }
 
 // Stats represents potential metrics reported by various methods.
@@ -193,6 +196,7 @@ type Stats struct {
 	CacheMissCount int64
 
 	// DigestCount is the number of processed digests.
+	// The counter is incremened regardless of digestion failures.
 	DigestCount int64
 
 	// BatchedCount is the number of batched files.
@@ -205,6 +209,9 @@ type Stats struct {
 
 // Add mutates the stats by adding all the corresponding fields of the specified instance.
 func (s *Stats) Add(other Stats) {
+	if s == nil {
+		return
+	}
 	s.BytesRequested += other.BytesRequested
 	s.LogicalBytesMoved += other.LogicalBytesMoved
 	s.TotalBytesMoved += other.TotalBytesMoved
@@ -220,6 +227,27 @@ func (s *Stats) Add(other Stats) {
 	s.DigestCount += other.DigestCount
 	s.BatchedCount += other.BatchedCount
 	s.StreamedCount += other.StreamedCount
+}
+
+// ToCacheHit returns a copy of the stats that represents a cache hit of the original.
+// All "bytes moving" stats are zeroed-out and cache stats are updated based on other values.
+// Everything else remains the same.
+func (s *Stats) ToCacheHit() Stats {
+	if s == nil {
+		return Stats{}
+	}
+	hit := *s
+	hit.LogicalBytesMoved = 0
+	hit.TotalBytesMoved = 0
+	hit.EffectiveBytesMoved = 0
+	hit.LogicalBytesCached = hit.BytesRequested
+	hit.LogicalBytesStreamed = 0
+	hit.LogicalBytesBatched = 0
+	hit.CacheHitCount = hit.DigestCount
+	hit.CacheMissCount = 0
+	hit.BatchedCount = 0
+	hit.StreamedCount = 0
+	return hit
 }
 
 func validateGrpcConfig(cfg *GRPCConfig) error {

@@ -248,8 +248,10 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.O
 	ctxUploadCaller, ctxUploaderCallerCancel := context.WithCancel(ctx)
 	defer ctxUploaderCallerCancel()
 
-	tag, resChan := u.uploadPubSub.sub(ctxUploadCaller)
+	tag, resChan := u.uploadCallerPubSub.sub(ctxUploadCaller)
+	u.workerWg.Add(1)
 	go func() {
+		defer u.workerWg.Done()
 		for _, p := range paths {
 			select {
 			case <-ctx.Done():
@@ -260,40 +262,26 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.O
 	}()
 
 	stats := &Stats{}
-	var missing []digest.Digest
+	var uploaded []digest.Digest
 	var err error
-	total := len(paths)
-	i := 0
+	// The channel will be closed if the context is cancelled so no need to watch the context here.
 	for rawR := range resChan {
 		r := rawR.(UploadResponse)
 		switch {
-		case r.Err != nil:
-			missing = append(missing, r.Digest)
-			// Don't join the same error from a batch more than once.
-			// This may not prevent similar errors from multiple batches sine errors.Is does not necessarily match by content.
-			if !errors.Is(err, r.Err) {
-				err = errors.Join(r.Err, err)
-			}
+		case errors.Is(r.Err, EOR):
+			ctxUploaderCallerCancel()
+			// It's tempting to break here, but the channel must be drained until the publisher closes it.
+
+		case r.Err == nil:
+			uploaded = append(uploaded, r.Digest)
+
+		default:
+			err = errors.Join(r.Err, err)
 		}
 		stats.Add(r.Stats)
-		i += 1
-		if i >= total {
-			ctxUploaderCallerCancel()
-			// It's tempting to break here, but the channel must be drained until the processor closes it.
-		}
 	}
 
-	// Request aborted, possibly midflight. Reporting a hit as a miss is safer than otherwise.
-	if ctx.Err() != nil {
-		return missing, stats, ctx.Err()
-	}
-
-	// Ideally, this should never be true at this point. Otherwise, it's a fatal error.
-	if i < total {
-		panic(fmt.Sprintf("channel closed unexpectedly: got %d msgs, want %d", i, total))
-	}
-
-	return missing, stats, err
+	return uploaded, stats, err
 }
 
 func (u *streamingUploader) Upload(context.Context, <-chan ep.Abs, slo.Options, ep.Filter) <-chan UploadResponse {
@@ -313,36 +301,59 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 	// Set up a pipe for presence checking.
 	queryChan := make(chan digest.Digest)
 	queryResChan := u.missingBlobsStreamer(ctx, queryChan)
-	digestBlob := sync.Map{}
+	digestBlobs := initSliceCache()
 
 	u.workerWg.Add(1)
 	go func() {
 		defer u.workerWg.Done()
-		// Context handling is done upstream in the missing blobs call.
+		// The channel is closed when the context is cancelled so no need to watch the context here.
 		for queryRes := range queryResChan {
+			blobs := digestBlobs.LoadAndDelete(queryRes.Digest)
+
 			if queryRes.Err != nil {
-				// TODO: notify
+				tags := make([]tag, 0, len(blobs))
+				for _, b := range blobs {
+					tags = append(tags, b.(blob).tag)
+				}
+				u.uploadCallerPubSub.pub(UploadResponse{
+					Digest: queryRes.Digest,
+					Stats:  Stats{BytesRequested: queryRes.Digest.Size},
+					Err:    queryRes.Err,
+				}, tags...)
+				continue
 			}
+
 			if queryRes.Missing {
-				if b, ok := digestBlob.Load(queryRes.Digest); ok {
+				// Let the upload processors handle unification.
+				for _, b := range blobs {
 					u.uploadBatcherChan <- b.(blob)
 				}
+				continue
 			}
-			// TODO: notify cache hit
+
+			// Notify callers of a cache hit.
+			tags := make([]tag, 0, len(blobs))
+			for _, b := range blobs {
+				tags = append(tags, b.(blob).tag)
+			}
+			u.uploadCallerPubSub.pub(UploadResponse{
+				Digest: queryRes.Digest,
+				Stats: Stats{
+					BytesRequested:     queryRes.Digest.Size,
+					LogicalBytesCached: queryRes.Digest.Size,
+					CacheHitCount:      1,
+				},
+			}, tags...)
 		}
 	}()
 
-	// A helper for dispatching from appropriate sites.
+	// A helper for dispatching from appropriate call sites.
 	dispatch := func(b blob) {
 		switch {
-		case len(b.bytes) == 0 && b.reader == nil && b.path == "":
-			// TODO: notify cache hit
 		case len(b.bytes) > 0:
-			// TODO: bundle
 			d := digest.NewFromProtoUnvalidated(b.digest)
-			if _, ok := digestBlob.LoadOrStore(d, b); !ok {
-				queryChan <- d
-			}
+			digestBlobs.Append(d, b)
+			queryChan <- d
 		default:
 			u.uploadStreamerChan <- b
 		}
@@ -360,108 +371,128 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 				// err is always ctx.Err()
 				return
 			}
+			// walkSem is released downstream.
+			u.digestAndUploadTree(ctx, req.Path, req.ShouldSkip, req.SymlinkOptions, req.tag, dispatch)
 
-			// Create a tag for this request and associate it with the caller.
-			// TODO: req pubsub
-			// Start the walk.
-			u.walkWg.Add(1)
-			go func() {
-				defer u.walkWg.Done()
-				defer u.walkSem.Release(1)
-
-				// TODO: implement walker.
-				stats := Stats{}
-				walker.DepthFirst(req.Path, u.ioCfg.ConcurrentWalkerVisits, func(path ep.Abs, info fs.FileInfo, err error) (walker.NextStep, error) {
-					select {
-					case <-ctx.Done():
-						return walker.Cancel, nil
-					default:
-					}
-
-					if err != nil {
-						return walker.Cancel, nil
-					}
-
-					key := path.String() + req.ShouldSkip.String()
-					parentKey := path.Dir().String() + req.ShouldSkip.String()
-
-					// Pre-access.
-					if info == nil {
-						// Excluded.
-						if req.ShouldSkip.Path(path.String()) {
-							return walker.Skip, nil
-						}
-
-						// A cache hit here indicates a cyclic symlink or two callers attempting to upload the exact same path.
-						// In both cases, deferring is the right call. Once the upload is processed, both uploaders, or the same one in the first case, will
-						// revisit the path to get the processing result.
-						// WARN: this can still cause the same file to be digested twice at the same time.
-						// Consider caching a notifier that other goroutines can block on while waiting for the value to be computed.
-						if _, ok := u.ioCfg.Cache.Load(key); ok {
-							return walker.Defer, nil
-						}
-
-						// Access it.
-						return walker.Continue, nil
-					}
-
-					// Excluded.
-					if req.ShouldSkip.File(path.String(), info.Mode()) {
-						return walker.Skip, nil
-					}
-
-					stats.DigestCount += 1
-					switch {
-					case info.Mode()&fs.ModeSymlink == fs.ModeSymlink:
-						stats.InputSymlinkCount += 1
-						node, nextStep, err := u.digesetSymlink(req.Path, path, req.SymlinkOptions)
-						if node != nil {
-							u.ioCfg.Cache.Store(key, node)
-							u.dirChildren.Append(parentKey, node)
-						}
-						return nextStep, err
-
-					case info.Mode().IsDir():
-						stats.InputDirCount += 1
-						// All the descendants have already been visited since it's a DFS traversal.
-						node, b, nextStep, err := u.digestDirectory(path, u.dirChildren.Load(key))
-						if node != nil {
-							u.ioCfg.Cache.Store(key, node)
-							u.dirChildren.Append(parentKey, node)
-						}
-						if b != nil {
-							dispatch(blob{digest: node.Digest, bytes: b, tag: req.tag})
-						}
-						return nextStep, err
-
-					case info.Mode().IsRegular():
-						stats.InputFileCount += 1
-						node, blb, nextStep, err := u.digestFile(ctx, path, info)
-						if node != nil {
-							u.ioCfg.Cache.Store(key, node)
-							u.dirChildren.Append(parentKey, node)
-						}
-						if blb != nil {
-							blb.tag = req.tag
-							dispatch(*blb)
-						}
-						return nextStep, err
-
-					default:
-						// Skip everything else (e.g. sockets and pipes).
-						return walker.Skip, nil
-					}
-				},
-				)
-			}()
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
+// digestAndUploadTree is a non-blocking call that initiates a file system walk to digest and dispatch the files for upload.
+func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root ep.Abs, filter ep.Filter, slo slo.Options, callerTag tag, dispatch func(blob)) {
+	// Create a subscriber to receive upload responses for this particular request.
+	ctxReq, ctxReqCancel := context.WithCancel(ctx)
+	defer ctxReqCancel()
+	reqTag, ch := u.uploadReqPubSub.sub(ctxReq)
+
+	u.workerWg.Add(1)
+	go func() {
+		defer u.workerWg.Done()
+		for r := range ch {
+			// Redirect the response to the caller.
+			u.uploadCallerPubSub.pub(r, callerTag)
+		}
+	}()
+
+	u.walkWg.Add(1)
+	go func() {
+		defer u.walkWg.Done()
+		defer u.walkSem.Release(1)
+
+		// TODO: implement walker.
+		stats := Stats{}
+		walker.DepthFirst(root, u.ioCfg.ConcurrentWalkerVisits, func(path ep.Abs, info fs.FileInfo, err error) (walker.NextStep, error) {
+			select {
+			case <-ctx.Done():
+				return walker.Cancel, nil
+			default:
+			}
+
+			if err != nil {
+				return walker.Cancel, nil
+			}
+
+			key := path.String() + filter.String()
+			parentKey := path.Dir().String() + filter.String()
+
+			// Pre-access.
+			if info == nil {
+				// Excluded.
+				if filter.Path(path.String()) {
+					return walker.Skip, nil
+				}
+
+				// A cache hit here indicates a cyclic symlink or multiple callers attempting to upload the exact same path with an identical filter.
+				// In both cases, deferring is the right call. Once the upload is processed, all uploaders will revisit the path to get the processing result.
+				if rawR, ok := u.ioCfg.UploadCache.Load(key); ok {
+					// Defer if in-flight.
+					if rawR == nil {
+						return walker.Defer, nil
+					}
+					// Update the stats to reflect a cache hit before publishing.
+					r := rawR.(UploadResponse)
+					r.Stats = r.Stats.ToCacheHit()
+					u.uploadCallerPubSub.pub(r, callerTag)
+					return walker.Skip, nil
+				}
+
+				// Access it.
+				return walker.Continue, nil
+			}
+
+			// Excluded.
+			if filter.File(path.String(), info.Mode()) {
+				return walker.Skip, nil
+			}
+
+			// Mark the file as being in-flight.
+			u.ioCfg.UploadCache.Store(key, nil)
+			stats.DigestCount += 1
+			switch {
+			case info.Mode()&fs.ModeSymlink == fs.ModeSymlink:
+				stats.InputSymlinkCount += 1
+				node, nextStep, err := u.digestSymlink(root, path, slo)
+				if node != nil {
+					u.dirChildren.Append(parentKey, node)
+				}
+				return nextStep, err
+
+			case info.Mode().IsDir():
+				stats.InputDirCount += 1
+				// All the descendants have already been visited (DFS).
+				node, b, nextStep, err := u.digestDirectory(path, u.dirChildren.Load(key))
+				if node != nil {
+					u.dirChildren.Append(parentKey, node)
+				}
+				if b != nil {
+					dispatch(blob{digest: node.Digest, bytes: b, tag: reqTag})
+				}
+				return nextStep, err
+
+			case info.Mode().IsRegular():
+				stats.InputFileCount += 1
+				node, blb, nextStep, err := u.digestFile(ctx, path, info)
+				if node != nil {
+					u.dirChildren.Append(parentKey, node)
+				}
+				if blb != nil {
+					blb.tag = reqTag
+					dispatch(*blb)
+				}
+				return nextStep, err
+
+			default:
+				// Skip everything else (e.g. sockets and pipes).
+				return walker.Skip, nil
+			}
+		})
+	}()
+}
+
 // digestSymlink might need to follow target and/or construct a symlink node.
-func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (*repb.SymlinkNode, walker.NextStep, error) {
+func (u *uploaderv2) digestSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (*repb.SymlinkNode, walker.NextStep, error) {
 	// Replace symlink with target.
 	if slo.Resolve() {
 		return nil, walker.Replace, nil
@@ -514,7 +545,7 @@ func (u *uploaderv2) digesetSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (
 }
 
 // digestDirectory constructs a hash-deterministic directory node and returns it along with the corresponding bytes of the directory proto.
-func (u *uploaderv2) digestDirectory(path ep.Abs, children []interface{}) (*repb.DirectoryNode, []byte, walker.NextStep, error) {
+func (u *uploaderv2) digestDirectory(path ep.Abs, children []any) (*repb.DirectoryNode, []byte, walker.NextStep, error) {
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
 		Name: path.Base().String(),
@@ -749,11 +780,9 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	})
 	ctxCancel()
 
-	// TODO: should collate responses by UploadRequest
-
 	// Report uploaded.
 	for _, d := range uploaded {
-		u.uploadPubSub.pub(UploadResponse{
+		u.uploadReqPubSub.pub(UploadResponse{
 			Digest: d,
 			Stats: Stats{
 				BytesRequested:      d.Size,
@@ -775,7 +804,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 		if dErr != nil {
 			dErr = errors.Join(ErrGRPC, dErr)
 		}
-		u.uploadPubSub.pub(UploadResponse{
+		u.uploadReqPubSub.pub(UploadResponse{
 			Digest: d,
 			Stats: Stats{
 				BytesRequested:  d.Size,
@@ -797,7 +826,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	}
 	// Report failed requests due to call failure.
 	for d, item := range bundle {
-		u.uploadPubSub.pub(UploadResponse{
+		u.uploadReqPubSub.pub(UploadResponse{
 			Digest: d,
 			Stats: Stats{
 				BytesRequested:  d.Size,
@@ -840,7 +869,7 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 			go func() (stats Stats, err error) {
 				defer u.streamSem.Release(1)
 				defer func() {
-					u.uploadPubSub.pub(UploadResponse{
+					u.uploadReqPubSub.pub(UploadResponse{
 						Digest: digest.NewFromProtoUnvalidated(b.digest),
 						Stats:  stats,
 						Err:    err,
