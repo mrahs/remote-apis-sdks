@@ -782,17 +782,25 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 
 	// Report uploaded.
 	for _, d := range uploaded {
+		s := Stats{
+			BytesRequested:      d.Size,
+			TotalBytesMoved:     d.Size * digestRetryCount[d],
+			EffectiveBytesMoved: d.Size,
+			LogicalBytesBatched: d.Size,
+			CacheMissCount:      1,
+			BatchedCount:        1,
+		}
+		sCached := s.ToCacheHit()
+
+		tags := bundle[d].tags
+		t := u.uploadReqPubSub.pubOnce(UploadResponse{
+			Digest: d,
+			Stats:  s,
+		}, tags...)
 		u.uploadReqPubSub.pub(UploadResponse{
 			Digest: d,
-			Stats: Stats{
-				BytesRequested:      d.Size,
-				TotalBytesMoved:     d.Size + digestRetryCount[d],
-				EffectiveBytesMoved: d.Size,
-				LogicalBytesBatched: d.Size,
-				CacheMissCount:      1,
-				BatchedCount:        1,
-			},
-		}, bundle[d].tags...)
+			Stats:  sCached,
+		}, excludeTag(tags, t)...)
 		delete(bundle, d)
 	}
 
@@ -804,16 +812,24 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 		if dErr != nil {
 			dErr = errors.Join(ErrGRPC, dErr)
 		}
+		tags := bundle[d].tags
+		s := Stats{
+			BytesRequested:  d.Size,
+			TotalBytesMoved: d.Size * digestRetryCount[d],
+			CacheMissCount:  1,
+			BatchedCount:    1,
+		}
+		sCached := s.ToCacheHit()
+		t := u.uploadReqPubSub.pubOnce(UploadResponse{
+			Digest: d,
+			Stats:  s,
+			Err:    dErr,
+		}, tags...)
 		u.uploadReqPubSub.pub(UploadResponse{
 			Digest: d,
-			Stats: Stats{
-				BytesRequested:  d.Size,
-				TotalBytesMoved: d.Size + digestRetryCount[d],
-				CacheMissCount:  1,
-				BatchedCount:    1,
-			},
-			Err: dErr,
-		}, bundle[d].tags...)
+			Stats:  sCached,
+			Err:    dErr,
+		}, excludeTag(tags, t)...)
 		delete(bundle, d)
 	}
 
@@ -824,18 +840,27 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	if err != nil {
 		err = errors.Join(ErrGRPC, err)
 	}
+
 	// Report failed requests due to call failure.
 	for d, item := range bundle {
+		tags := item.tags
+		s := Stats{
+			BytesRequested:  d.Size,
+			TotalBytesMoved: d.Size * digestRetryCount[d],
+			CacheMissCount:  1,
+			BatchedCount:    1,
+		}
+		sCached := s.ToCacheHit()
+		t := u.uploadReqPubSub.pubOnce(UploadResponse{
+			Digest: d,
+			Stats:  s,
+			Err:    err,
+		}, tags...)
 		u.uploadReqPubSub.pub(UploadResponse{
 			Digest: d,
-			Stats: Stats{
-				BytesRequested:  d.Size,
-				TotalBytesMoved: d.Size + digestRetryCount[d],
-				CacheMissCount:  1,
-				BatchedCount:    1,
-			},
-			Err: err,
-		}, item.tags...)
+			Stats:  sCached,
+			Err:    err,
+		}, excludeTag(tags, t)...)
 	}
 }
 
@@ -843,10 +868,10 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 // Unlike the batched call, presence check is not required for streaming files because the API
 // handles this automatically: https://github.com/bazelbuild/remote-apis/blob/0cd22f7b466ced15d7803e8845d08d3e8d2c51bc/build/bazel/remote/execution/v2/remote_execution.proto#L250-L254
 // For files above the large threshold, this method assumes the io and large io holds are
-// already acquired and will release them approperiately.
+// already acquired and will release them accordingly.
 // For other files, only an io hold is acquired and released in this method.
 func (u *uploaderv2) uploadStreamer(ctx context.Context) {
-	// TODO: bundle
+	digestTags := initSliceCache()
 	for {
 		select {
 		case b, ok := <-u.uploadStreamerChan:
@@ -854,8 +879,15 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 				return
 			}
 
+			d := digest.NewFromProtoUnvalidated(b.digest)
+			if l := digestTags.Append(d, b.tag); l > 1 {
+				// Already in-flight.
+				continue
+			}
+
 			// Block the streamer if the gRPC call is being throttled.
 			if err := u.streamSem.Acquire(ctx, 1); err != nil {
+				// err is always ctx.Err()
 				return
 			}
 
@@ -869,19 +901,32 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 			go func() (stats Stats, err error) {
 				defer u.streamSem.Release(1)
 				defer func() {
-					u.uploadReqPubSub.pub(UploadResponse{
-						Digest: digest.NewFromProtoUnvalidated(b.digest),
+					tagsRaw := digestTags.LoadAndDelete(d)
+					tags := make([]tag, 0, len(tagsRaw))
+					for _, t := range tagsRaw {
+						tags = append(tags, t.(tag))
+					}
+					sCached := stats.ToCacheHit()
+					t := u.uploadReqPubSub.pubOnce(UploadResponse{
+						Digest: d,
 						Stats:  stats,
 						Err:    err,
-					}, b.tag)
+					}, tags...)
+					u.uploadReqPubSub.pubOnce(UploadResponse{
+						Digest: d,
+						Stats:  sCached,
+						Err:    err,
+					}, excludeTag(tags, t)...)
 				}()
 
 				var reader io.Reader
 
+				// Small file or a proto message (node).
 				if len(b.bytes) > 0 {
 					reader = bytes.NewReader(b.bytes)
 				}
 
+				// Medium file.
 				if len(b.path) > 0 {
 					f, errOpen := os.Open(b.path)
 					if errOpen != nil {
@@ -895,6 +940,7 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 					reader = f
 				}
 
+				// Large file.
 				if b.reader != nil {
 					reader = b.reader
 					// IO holds were acquired during digestion for large files and are expected to be released here.

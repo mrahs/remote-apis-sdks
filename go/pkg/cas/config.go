@@ -243,7 +243,12 @@ func (s *Stats) ToCacheHit() Stats {
 	hit.LogicalBytesCached = hit.BytesRequested
 	hit.LogicalBytesStreamed = 0
 	hit.LogicalBytesBatched = 0
+	// for trees
 	hit.CacheHitCount = hit.DigestCount
+	// for blobs
+	if hit.CacheHitCount == 0 {
+		hit.CacheHitCount = 1
+	}
 	hit.CacheMissCount = 0
 	hit.BatchedCount = 0
 	hit.StreamedCount = 0

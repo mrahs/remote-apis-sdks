@@ -26,10 +26,12 @@ func (c *sliceCache) LoadAndDelete(key any) []any {
 }
 // Append appends the specified value to the slice associated with the specified key.
 // If the key does not exist, a new empty slice is created and the value is appended to it.
-func (c *sliceCache) Append(key any, val any) {
+// Returns the length of the associated slice.
+func (c *sliceCache) Append(key any, val any) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.store[key] = append(c.store[key], val)
+	return len(c.store[key])
 }
 
 // initSliceCache returns a properly initialized struct (not a pointer, hence, init rather than new).

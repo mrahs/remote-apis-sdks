@@ -69,22 +69,40 @@ func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 // Blocking 10ms for every subscriber amortizes much better than blocking 10ms for every
 // iteration on the subscribers, even though both have the same worst-case cost.
 // For example, if out of 10 subscribers 5 were busy for 1ms, the attempt will cost ~5ms instead of 10ms.
-func (ps *pubsub) pub(r any, ts ...tag) {
+func (ps *pubsub) pub(m any, tags ...tag) {
+	_ = ps.pubN(m, len(tags), tags...)
+}
+
+// pubOnce is like pub, but delivers the message only once. The tag of the receiver that got
+// the message is returned.
+func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
+	received := ps.pubN(m, 1, tags...)
+	return received[0]
+}
+
+// pubN is for internal use only.
+func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 	// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	var toRetry []tag
+	var received []tag
 	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 	for {
-		for _, t := range ts {
+		for _, t := range tags {
 			subscriber, ok := ps.subs[t]
 			if !ok {
 				continue
 			}
 			// Send now or reschedule if the subscriber is not ready.
 			select {
-			case subscriber <- r:
+			case subscriber <- m:
+				received = append(received, t)
+				if len(received) >= n {
+					return received
+				}
 			case <-ticker.C:
 				toRetry = append(toRetry, t)
 			}
@@ -93,9 +111,10 @@ func (ps *pubsub) pub(r any, ts ...tag) {
 			break
 		}
 		// Reuse the underlying arrays by swapping slices and resetting one of them.
-		ts, toRetry = toRetry, ts
+		tags, toRetry = toRetry, tags
 		toRetry = toRetry[:0]
 	}
+	return received
 }
 
 // wait blocks until all subscribers have unsubscribed.
@@ -105,4 +124,15 @@ func (ps *pubsub) wait() {
 
 func newPubSub() *pubsub {
 	return &pubsub{subs: make(map[tag]chan any)}
+}
+
+func excludeTag(tags []tag, et tag) []tag {
+	ts := make([]tag, 0, len(tags)-1)
+	for _, t := range tags {
+		if t == et {
+			continue
+		}
+		ts = append(ts, t)
+	}
+	return ts
 }
