@@ -52,9 +52,8 @@ type uploadRequestBundleItem struct {
 type uploadRequestBundle = map[digest.Digest]uploadRequestBundleItem
 
 // blob associates a digest with its original bytes.
-// Only one of bytes, path or reader is used, in that order.
-// If the bytes field is set, the blob is either batched or streamed based on gRPC size limits.
-// If the path or reader field is set, the blob is streamed.
+// Only one of reader, path, or bytes is used, in that order.
+// See uploadStreamer implementation below.
 type blob struct {
 	digest *repb.Digest
 	bytes  []byte
@@ -921,13 +920,18 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 
 				var reader io.Reader
 
-				// Small file or a proto message (node).
-				if len(b.bytes) > 0 {
-					reader = bytes.NewReader(b.bytes)
-				}
+				// In the off chance that the blob is mis-constructed (more than one content field is set), start
+				// with b.reader to ensure any held locks are released.
+				switch {
+				// Large file.
+				case b.reader != nil:
+					reader = b.reader
+					// IO holds were acquired during digestion for large files and are expected to be released here.
+					defer u.ioSem.Release(1)
+					defer u.ioLargeSem.Release(1)
 
 				// Medium file.
-				if len(b.path) > 0 {
+				case len(b.path) > 0:
 					f, errOpen := os.Open(b.path)
 					if errOpen != nil {
 						return Stats{BytesRequested: b.digest.SizeBytes}, errors.Join(ErrIO, errOpen)
@@ -938,14 +942,10 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 						}
 					}()
 					reader = f
-				}
 
-				// Large file.
-				if b.reader != nil {
-					reader = b.reader
-					// IO holds were acquired during digestion for large files and are expected to be released here.
-					defer u.ioSem.Release(1)
-					defer u.ioLargeSem.Release(1)
+				// Small file or a proto message (node).
+				case len(b.bytes) > 0:
+					reader = bytes.NewReader(b.bytes)
 				}
 
 				s, err := u.writeBytes(ctx, name, reader, b.digest.SizeBytes, 0, true)
