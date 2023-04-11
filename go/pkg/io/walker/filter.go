@@ -1,4 +1,4 @@
-package exppath
+package walker
 
 import (
 	"fmt"

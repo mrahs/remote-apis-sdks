@@ -1,15 +1,15 @@
-package exppath_test
+package walker_test
 
 import (
 	"path/filepath"
 	"regexp"
 	"testing"
 
-	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 )
 
 func TestFilterMatch(t *testing.T) {
-	f := ep.Filter{
+	f := walker.Filter{
 		Regexp: regexp.MustCompile("/bar/"),
 		Mode:   4,
 	}
@@ -24,27 +24,27 @@ func TestFilterMatch(t *testing.T) {
 func TestFilterString(t *testing.T) {
 	tests := []struct {
 		name   string
-		filter ep.Filter
+		filter walker.Filter
 		want   string
 	}{
 		{
 			name:   "empty",
-			filter: ep.Filter{},
+			filter: walker.Filter{},
 			want:   "",
 		},
 		{
 			name:   "regexp_only",
-			filter: ep.Filter{Regexp: regexp.MustCompile("/bar/.*")},
+			filter: walker.Filter{Regexp: regexp.MustCompile("/bar/.*")},
 			want:   "/bar/.*;0",
 		},
 		{
 			name:   "regexp_and_mode",
-			filter: ep.Filter{Regexp: regexp.MustCompile("/bar/.*"), Mode: 4},
+			filter: walker.Filter{Regexp: regexp.MustCompile("/bar/.*"), Mode: 4},
 			want:   "/bar/.*;4",
 		},
 		{
 			name:   "mode_only",
-			filter: ep.Filter{Mode: 4},
+			filter: walker.Filter{Mode: 4},
 			want:   ";4",
 		},
 	}

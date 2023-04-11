@@ -1,9 +1,18 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "walker",
-    srcs = ["walker.go"],
+    srcs = [
+        "filter.go",
+        "walker.go",
+    ],
     importpath = "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker",
     visibility = ["//visibility:public"],
     deps = ["//go/pkg/io/exppath"],
+)
+
+go_test(
+    name = "walker_test",
+    srcs = ["filter_test.go"],
+    deps = [":walker"],
 )
