@@ -3,9 +3,18 @@ package walker
 import (
 	"errors"
 	"io/fs"
+	"os"
 
 	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
 )
+
+type FileSystem struct {
+	Lstat func(path string) (fs.FileInfo, error)
+}
+
+var FS = &FileSystem{
+	Lstat: os.Lstat,
+}
 
 type NextStep int
 
@@ -42,7 +51,7 @@ var (
 // WalkFunc defines the callback signature that clients must specify for walker implementatinos.
 // More details about when this function is called and how its return values are used
 // is provided by each walker implementation in this package.
-type WalkFunc func(path ep.Abs, info fs.FileInfo, err error) (NextStep, error)
+type WalkFunc func(path ep.Abs, virtualPath ep.Abs, info fs.FileInfo, err error) (NextStep, error)
 
 // DepthFirst walks the filesystem tree rooted at the specified root in DFS style traversal.
 //
@@ -63,16 +72,170 @@ type WalkFunc func(path ep.Abs, info fs.FileInfo, err error) (NextStep, error)
 // At any point, the client may return Cancel to cancel the entire walk.
 // If a symlink is encountered, the function must return Skip to avoid triggering a recursive walk on the symlink target.
 // Alternatively, returning Replace will instruct the walker to traverse the target as if its path is that of the symlink itself.
+// If accessing the path caused an error, the only valid next steps are Cancel or Skip.
+// Defer is not a valid next step here because the path has already been processed.
 //
 // An unexpected NextStep value cancels the entire walk.
 //
 // The error returned by the walk is nil if no errors were encountered. Otherwise, it's a collection
 // of errors returned by the callback function.
-func DepthFirst(root ep.Abs, concurrencyLimit int, fn WalkFunc) error {
+func DepthFirst(root ep.Abs, exclude *Filter, concurrencyLimit int, fn WalkFunc) error {
 	if concurrencyLimit < 1 || fn == nil {
 		return ErrInvalidArgument
 	}
 
-	// TODO
-	panic("not yet implemented")
+	var err error
+	w := &walker{
+		levels: &stack{},
+		fn:     fn,
+	}
+	if exclude != nil {
+		w.filter = &Filter{Regexp: exclude.Regexp, Mode: exclude.Mode}
+	}
+	w.levels.push(&stack{[]any{entry{parent: root}}})
+
+	for w.levels.len() > 0 {
+		w.currentLevel = w.levels.pop().(*stack)
+		for w.currentLevel.len() > 0 {
+			e := w.currentLevel.pop().(entry)
+
+			// Pre-access.
+			info, next, errPre := w.pre(e)
+			err = errors.Join(errPre, err)
+			if next == Cancel {
+				return err
+			}
+			if next == Skip {
+				continue
+			}
+
+			if info.IsDir() {
+				w.currentLevel.push(e)
+				continue
+			}
+
+			// Post-access.
+			next, errPost := w.post(e, info)
+			err = errors.Join(errPost, err)
+			if next == Cancel {
+				return err
+			}
+			if next == Skip {
+				continue
+			}
+		}
+	}
+
+	return err
+}
+
+type level struct {
+	dir     ep.Abs
+	pending *stack
+}
+
+type entry struct {
+	path          ep.Rel
+	parent        ep.Abs
+	virtualParent ep.Abs
+}
+
+func (e entry) abs() ep.Abs {
+	if e.path == nil {
+		return e.parent
+	}
+	return ep.JoinAbs(e.parent, e.path)
+}
+
+func (e entry) virtual() ep.Abs {
+	if e.path == nil {
+		return e.virtualParent
+	}
+	return ep.JoinAbs(e.virtualParent, e.path)
+}
+
+type walker struct {
+	levels       *stack
+	currentLevel *stack
+	filter       *Filter
+	fn           WalkFunc
+}
+
+// pre performs pre-access routine and reduces the next step to Cancel, Skip or Continue.
+func (w *walker) pre(e entry) (fs.FileInfo, NextStep, error) {
+	var err error
+
+	p := e.abs()
+	if w.filter != nil && w.filter.Path(p.String()) {
+		return nil, Skip, nil
+	}
+	v := e.virtual()
+
+	next, errClient := w.fn(p, v, nil, nil)
+	err = errors.Join(errClient, err)
+	if next == Cancel {
+		return nil, Cancel, err
+	}
+	if next == Skip {
+		return nil, Skip, err
+	}
+	if next == Defer {
+		w.currentLevel.pending.addLast(e)
+		return nil, Continue, err
+	}
+	if next != Continue {
+		return nil, Cancel, errors.Join(ErrInvalidNextStep, err)
+	}
+
+	info, errStat := FS.Lstat(p.String())
+	if errStat != nil {
+		next, errClient = w.fn(p, v, info, errStat)
+		err = errors.Join(errClient, err)
+		if next == Cancel {
+			return nil, Cancel, err
+		}
+		if next != Skip {
+			return nil, Cancel, errors.Join(ErrInvalidNextStep, err)
+		}
+		return nil, Skip, err
+	}
+
+	if w.filter != nil && w.filter.File(p.String(), info.Mode()) {
+		return nil, Skip, nil
+	}
+
+	return info, Continue, err
+}
+
+// post performs post-access routine and reduces the next step to Cancel, Skip or Continue.
+func (w *walker) post(e entry, info fs.FileInfo) (NextStep, error) {
+	var err error
+
+	p := e.abs()
+	v := e.virtual()
+	next, errClient := w.fn(p, v, info, nil)
+	err = errors.Join(errClient, err)
+	if next == Cancel {
+		return Cancel, err
+	}
+	if next == Skip {
+		return Skip, err
+	}
+	if next == Replace && isSymlink(info) {
+		w.currentLevel.pending.push(entry{parent: p, virtualParent: v})
+		return Continue, err
+	}
+	if next != Continue {
+		return Cancel, errors.Join(ErrInvalidNextStep, err)
+	}
+
+	return Continue, err
+}
+
+func isDir(info fs.FileInfo) bool {
+	return info.Mode().IsDir()
+}
+
+func isSymlink(info fs.FileInfo) bool {
+	return info.Mode()&fs.ModeSymlink == fs.ModeSymlink
 }

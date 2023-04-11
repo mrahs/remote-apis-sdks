@@ -32,7 +32,7 @@ import (
 type UploadRequest struct {
 	Path           ep.Abs
 	SymlinkOptions slo.Options
-	ShouldSkip     ep.Filter
+	ShouldSkip     *walker.Filter
 	// For internal use.
 	tag tag
 }
@@ -235,7 +235,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	return stats, err
 }
 
-func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.Options, shouldSkip ep.Filter) ([]digest.Digest, *Stats, error) {
+func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.Options, shouldSkip *walker.Filter) ([]digest.Digest, *Stats, error) {
 	if len(paths) < 1 {
 		return nil, nil, nil
 	}
@@ -283,7 +283,7 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.O
 	return uploaded, stats, err
 }
 
-func (u *streamingUploader) Upload(context.Context, <-chan ep.Abs, slo.Options, ep.Filter) <-chan UploadResponse {
+func (u *streamingUploader) Upload(context.Context, <-chan ep.Abs, slo.Options, *walker.Filter) <-chan UploadResponse {
 	panic("not yet implemented")
 }
 
@@ -380,7 +380,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 }
 
 // digestAndUploadTree is a non-blocking call that initiates a file system walk to digest and dispatch the files for upload.
-func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root ep.Abs, filter ep.Filter, slo slo.Options, callerTag tag, dispatch func(blob)) {
+func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root ep.Abs, filter *walker.Filter, slo slo.Options, callerTag tag, dispatch func(blob)) {
 	// Create a subscriber to receive upload responses for this particular request.
 	ctxReq, ctxReqCancel := context.WithCancel(ctx)
 	defer ctxReqCancel()
@@ -402,7 +402,7 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root ep.Abs, filte
 
 		// TODO: implement walker.
 		stats := Stats{}
-		walker.DepthFirst(root, u.ioCfg.ConcurrentWalkerVisits, func(path ep.Abs, info fs.FileInfo, err error) (walker.NextStep, error) {
+		walker.DepthFirst(root, filter, u.ioCfg.ConcurrentWalkerVisits, func(path ep.Abs, virtualPath ep.Abs, info fs.FileInfo, err error) (walker.NextStep, error) {
 			select {
 			case <-ctx.Done():
 				return walker.Cancel, nil
@@ -413,16 +413,11 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root ep.Abs, filte
 				return walker.Cancel, nil
 			}
 
-			key := path.String() + filter.String()
-			parentKey := path.Dir().String() + filter.String()
+			key := virtualPath.String() + filter.String()
+			parentKey := virtualPath.Dir().String() + filter.String()
 
 			// Pre-access.
 			if info == nil {
-				// Excluded.
-				if filter.Path(path.String()) {
-					return walker.Skip, nil
-				}
-
 				// A cache hit here indicates a cyclic symlink or multiple callers attempting to upload the exact same path with an identical filter.
 				// In both cases, deferring is the right call. Once the upload is processed, all uploaders will revisit the path to get the processing result.
 				if rawR, ok := u.ioCfg.UploadCache.Load(key); ok {
@@ -439,11 +434,6 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root ep.Abs, filte
 
 				// Access it.
 				return walker.Continue, nil
-			}
-
-			// Excluded.
-			if filter.File(path.String(), info.Mode()) {
-				return walker.Skip, nil
 			}
 
 			// Mark the file as being in-flight.
