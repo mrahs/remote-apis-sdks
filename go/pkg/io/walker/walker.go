@@ -5,7 +5,7 @@ import (
 	"io/fs"
 	"os"
 
-	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 )
 
 type FileSystem struct {
@@ -51,7 +51,7 @@ var (
 // WalkFunc defines the callback signature that clients must specify for walker implementatinos.
 // More details about when this function is called and how its return values are used
 // is provided by each walker implementation in this package.
-type WalkFunc func(path ep.Abs, virtualPath ep.Abs, info fs.FileInfo, err error) (NextStep, error)
+type WalkFunc func(path impath.Abs, virtualPath impath.Abs, info fs.FileInfo, err error) (NextStep, error)
 
 // DepthFirst walks the filesystem tree rooted at the specified root in DFS style traversal.
 //
@@ -79,7 +79,7 @@ type WalkFunc func(path ep.Abs, virtualPath ep.Abs, info fs.FileInfo, err error)
 //
 // The error returned by the walk is nil if no errors were encountered. Otherwise, it's a collection
 // of errors returned by the callback function.
-func DepthFirst(root ep.Abs, exclude *Filter, concurrencyLimit int, fn WalkFunc) error {
+func DepthFirst(root impath.Abs, exclude *Filter, concurrencyLimit int, fn WalkFunc) error {
 	if concurrencyLimit < 1 || fn == nil {
 		return ErrInvalidArgument
 	}
@@ -130,28 +130,28 @@ func DepthFirst(root ep.Abs, exclude *Filter, concurrencyLimit int, fn WalkFunc)
 }
 
 type level struct {
-	dir     ep.Abs
+	dir     impath.Abs
 	pending *stack
 }
 
 type entry struct {
-	path          ep.Rel
-	parent        ep.Abs
-	virtualParent ep.Abs
+	path          impath.Rel
+	parent        impath.Abs
+	virtualParent impath.Abs
 }
 
-func (e entry) abs() ep.Abs {
+func (e entry) abs() impath.Abs {
 	if e.path == nil {
 		return e.parent
 	}
-	return ep.JoinAbs(e.parent, e.path)
+	return impath.JoinAbs(e.parent, e.path)
 }
 
-func (e entry) virtual() ep.Abs {
+func (e entry) virtual() impath.Abs {
 	if e.path == nil {
 		return e.virtualParent
 	}
-	return ep.JoinAbs(e.virtualParent, e.path)
+	return impath.JoinAbs(e.virtualParent, e.path)
 }
 
 type walker struct {
@@ -180,7 +180,7 @@ func (w *walker) pre(e entry) (fs.FileInfo, NextStep, error) {
 		return nil, Skip, err
 	}
 	if next == Defer {
-		w.currentLevel.pending.addLast(e)
+		// w.currentLevel.pending.addLast(e)
 		return nil, Continue, err
 	}
 	if next != Continue {
@@ -222,7 +222,7 @@ func (w *walker) post(e entry, info fs.FileInfo) (NextStep, error) {
 		return Skip, err
 	}
 	if next == Replace && isSymlink(info) {
-		w.currentLevel.pending.push(entry{parent: p, virtualParent: v})
+		// w.currentLevel.pending.push(entry{parent: p, virtualParent: v})
 		return Continue, err
 	}
 	if next != Continue {

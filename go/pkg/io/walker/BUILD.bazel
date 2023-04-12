@@ -4,7 +4,7 @@ go_library(
     name = "walker",
     srcs = [
         "filter.go",
-        "queue.go",
+        "stack.go",
         "walker.go",
     ],
     importpath = "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker",

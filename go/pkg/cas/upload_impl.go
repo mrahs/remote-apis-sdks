@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
-	ep "github.com/bazelbuild/remote-apis-sdks/go/pkg/io/exppath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
@@ -30,7 +30,7 @@ import (
 // by the filter are uploaded.
 // Symlinks are handled according to the specified options.
 type UploadRequest struct {
-	Path           ep.Abs
+	Path           impath.Abs
 	SymlinkOptions slo.Options
 	ShouldSkip     *walker.Filter
 	// For internal use.
@@ -235,7 +235,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	return stats, err
 }
 
-func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.Options, shouldSkip *walker.Filter) ([]digest.Digest, *Stats, error) {
+func (u *batchingUploader) Upload(ctx context.Context, paths []impath.Abs, slo slo.Options, shouldSkip *walker.Filter) ([]digest.Digest, *Stats, error) {
 	if len(paths) < 1 {
 		return nil, nil, nil
 	}
@@ -283,7 +283,7 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []ep.Abs, slo slo.O
 	return uploaded, stats, err
 }
 
-func (u *streamingUploader) Upload(context.Context, <-chan ep.Abs, slo.Options, *walker.Filter) <-chan UploadResponse {
+func (u *streamingUploader) Upload(context.Context, <-chan impath.Abs, slo.Options, *walker.Filter) <-chan UploadResponse {
 	panic("not yet implemented")
 }
 
@@ -380,7 +380,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 }
 
 // digestAndUploadTree is a non-blocking call that initiates a file system walk to digest and dispatch the files for upload.
-func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root ep.Abs, filter *walker.Filter, slo slo.Options, callerTag tag, dispatch func(blob)) {
+func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root impath.Abs, filter *walker.Filter, slo slo.Options, callerTag tag, dispatch func(blob)) {
 	// Create a subscriber to receive upload responses for this particular request.
 	ctxReq, ctxReqCancel := context.WithCancel(ctx)
 	defer ctxReqCancel()
@@ -402,7 +402,7 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root ep.Abs, filte
 
 		// TODO: implement walker.
 		stats := Stats{}
-		walker.DepthFirst(root, filter, u.ioCfg.ConcurrentWalkerVisits, func(path ep.Abs, virtualPath ep.Abs, info fs.FileInfo, err error) (walker.NextStep, error) {
+		walker.DepthFirst(root, filter, u.ioCfg.ConcurrentWalkerVisits, func(path impath.Abs, virtualPath impath.Abs, info fs.FileInfo, err error) (walker.NextStep, error) {
 			select {
 			case <-ctx.Done():
 				return walker.Cancel, nil
@@ -481,13 +481,13 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root ep.Abs, filte
 }
 
 // digestSymlink might need to follow target and/or construct a symlink node.
-func (u *uploaderv2) digestSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (*repb.SymlinkNode, walker.NextStep, error) {
+func (u *uploaderv2) digestSymlink(root impath.Abs, path impath.Abs, slo slo.Options) (*repb.SymlinkNode, walker.NextStep, error) {
 	// Replace symlink with target.
 	if slo.Resolve() {
 		return nil, walker.Replace, nil
 	}
 	if slo.ResolveExternal() {
-		if _, err := ep.Descendant(root, path); err != nil {
+		if _, err := impath.Descendant(root, path); err != nil {
 			return nil, walker.Replace, nil
 		}
 	}
@@ -534,7 +534,7 @@ func (u *uploaderv2) digestSymlink(root ep.Abs, path ep.Abs, slo slo.Options) (*
 }
 
 // digestDirectory constructs a hash-deterministic directory node and returns it along with the corresponding bytes of the directory proto.
-func (u *uploaderv2) digestDirectory(path ep.Abs, children []any) (*repb.DirectoryNode, []byte, walker.NextStep, error) {
+func (u *uploaderv2) digestDirectory(path impath.Abs, children []any) (*repb.DirectoryNode, []byte, walker.NextStep, error) {
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
 		Name: path.Base().String(),
@@ -572,7 +572,7 @@ func (u *uploaderv2) digestDirectory(path ep.Abs, children []any) (*repb.Directo
 // If the file size exceeds the large threshold, both IO and large IO holds are retained upon returning and it's
 // the responsibility of the streamer to release them.
 // This allows the walker to collect the digest and proceed without having to wait for the streamer.
-func (u *uploaderv2) digestFile(ctx context.Context, path ep.Abs, info fs.FileInfo) (node *repb.FileNode, blb *blob, nextStep walker.NextStep, err error) {
+func (u *uploaderv2) digestFile(ctx context.Context, path impath.Abs, info fs.FileInfo) (node *repb.FileNode, blb *blob, nextStep walker.NextStep, err error) {
 	if err := u.ioSem.Acquire(ctx, 1); err != nil {
 		return nil, nil, walker.Cancel, nil
 	}
