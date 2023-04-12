@@ -4,8 +4,8 @@ type stack struct {
 	stack []any
 }
 
-func (s *stack) push(item any) {
-	s.stack = append(s.stack, item)
+func (s *stack) push(items ...any) {
+	s.stack = append(s.stack, items...)
 }
 
 func (s *stack) addLast(item any) {
