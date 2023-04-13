@@ -1,8 +1,8 @@
 package impath_test
 
 import (
-	"errors"
 	"testing"
+	"errors"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 )

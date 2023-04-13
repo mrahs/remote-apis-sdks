@@ -30,7 +30,7 @@ var (
 // The errors returned by this function are one of: ErrItemTooLarge, ErrInvalidArgument.
 func Simple(itemCount int, batchLength int, batchSize int64, sizefn SizeFunc) ([][]int, error) {
 	if itemCount <= 0 || batchLength <= 0 || batchSize <= 0 {
-		return nil, errors.Join(ErrInvalidArgument, fmt.Errorf("argument must be > 0, got: itemCount=%d, batchLength=%d, batchSize=%d", itemCount, batchLength, batchSize))
+		return nil, fmt.Errorf("%w: argument must be > 0, got: itemCount=%d, batchLength=%d, batchSize=%d", ErrInvalidArgument, itemCount, batchLength, batchSize)
 	}
 
 	var (
@@ -51,7 +51,7 @@ func Simple(itemCount int, batchLength int, batchSize int64, sizefn SizeFunc) ([
 			size = sizefn(i)
 		}
 		if size > batchSize {
-			return nil, errors.Join(ErrItemTooLarge, fmt.Errorf("item at index %d has a size %d that exceeds the batchSize %d", i, size, batchSize))
+			return nil, fmt.Errorf("%w: item at index %d has a size %d that exceeds the batchSize %d", ErrItemTooLarge, i, size, batchSize)
 		}
 
 		if bs+size > batchSize {

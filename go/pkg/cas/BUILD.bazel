@@ -18,7 +18,7 @@ go_library(
     deps = [
         "//go/pkg/cache",
         "//go/pkg/digest",
-        "//go/pkg/io/exppath",
+        "//go/pkg/io/impath",
         "//go/pkg/io/walker",
         "//go/pkg/retry",
         "//go/pkg/symlinkopts",

@@ -67,8 +67,8 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 
 	var missing []digest.Digest
 	var err error
-	var total = len(digests)
-	var i = 0
+	total := len(digests)
+	i := 0
 	for rawR := range resChan {
 		r := rawR.(MissingBlobsResponse)
 		switch {
@@ -77,7 +77,7 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			// Don't join the same error from a batch more than once.
 			// This may not prevent similar errors from multiple batches since errors.Is does not necessarily match by content.
 			if !errors.Is(err, r.Err) {
-				err = errors.Join(r.Err, err)
+				err = fmt.Errorf("%w: %v", r.Err, err)
 			}
 		case r.Missing:
 			missing = append(missing, r.Digest)
@@ -211,7 +211,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 
 	missing := res.MissingBlobDigests
 	if err != nil {
-		err = errors.Join(ErrGRPC, err)
+		err = fmt.Errorf("%w: %v", ErrGRPC, err)
 		missing = digests
 	}
 

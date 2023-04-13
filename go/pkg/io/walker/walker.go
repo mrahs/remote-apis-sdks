@@ -2,6 +2,7 @@ package walker
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 
@@ -90,36 +91,36 @@ func DepthFirst(root impath.Abs, exclude *Filter, concurrencyLimit int, fn WalkF
 			// If IO error, let the client choose whether to skip or cancel.
 			if errOpen != nil {
 				next, errClient := fn(e.path, e.path, nil, errOpen)
-				err = errors.Join(errClient, err)
+				err = fmt.Errorf("%w: %v", errClient, err)
 				if next == Cancel {
 					return err
 				}
 				if next != Skip {
-					return errors.Join(ErrBadNextStep, err)
+					return fmt.Errorf("%w: %v", ErrBadNextStep, err)
 				}
 			} else {
 				names, errRead := f.Readdirnames(128)
 				// If IO error, let the client choose whether  to skip or cancel.
 				if errRead != nil {
 					next, errClient := fn(e.path, e.path, nil, errRead)
-					err = errors.Join(errClient, err)
+					err = fmt.Errorf("%w: %v", errClient, err)
 					if next == Cancel {
 						return err
 					}
 					if next != Skip {
-						return errors.Join(ErrBadNextStep, err)
+						return fmt.Errorf("%w: %v", ErrBadNextStep, err)
 					}
 				} else {
 					for _, name := range names {
 						p, errIm := impath.ToAbs(name)
 						// This should never happen, but if it does, cancel the walk.
 						if errIm != nil {
-							err = errors.Join(errIm, err)
+							err = fmt.Errorf("%w: %v", errIm, err)
 							return err
 						}
 						// Pre-access.
 						dirElem, next, errVisit := visit(elem{path: p}, exclude, fn)
-						err = errors.Join(errVisit, err)
+						err = fmt.Errorf("%w: %v", errVisit, err)
 						if next == Cancel {
 							return err
 						}
@@ -134,7 +135,7 @@ func DepthFirst(root impath.Abs, exclude *Filter, concurrencyLimit int, fn WalkF
 					}
 				}
 				errClose := f.Close()
-				err = errors.Join(errClose, err)
+				err = fmt.Errorf("%w: %v", errClose, err)
 			}
 		}
 		// If children directories are to be queued, defer the parent and process the children first.
@@ -147,7 +148,7 @@ func DepthFirst(root impath.Abs, exclude *Filter, concurrencyLimit int, fn WalkF
 		// For new paths, pre-access.
 		// For pre-accessed paths, post-access.
 		dirElem, next, errVisit := visit(e, exclude, fn)
-		err = errors.Join(errVisit, err)
+		err = fmt.Errorf("%w: %v", errVisit, err)
 		if next == Cancel {
 			return err
 		}
@@ -172,7 +173,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 	if e.info == nil {
 		// Pre-access.
 		next, errClient := fn(e.path, e.path, nil, nil)
-		err = errors.Join(errClient, err)
+		err = fmt.Errorf("%w: %v", errClient, err)
 		if next == Cancel {
 			return nil, Cancel, err
 		}
@@ -184,18 +185,18 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 			return nil, Continue, err
 		}
 		if next != Continue {
-			return nil, Cancel, errors.Join(ErrBadNextStep, err)
+			return nil, Cancel, fmt.Errorf("%w: %v", ErrBadNextStep, err)
 		}
 
 		info, errStat := os.Lstat(e.path.String())
 		if errStat != nil {
 			next, errClient = fn(e.path, e.path, info, errStat)
-			err = errors.Join(errClient, err)
+			err = fmt.Errorf("%w: %v", errClient, err)
 			if next == Cancel {
 				return nil, Cancel, err
 			}
 			if next != Skip {
-				return nil, Cancel, errors.Join(ErrBadNextStep, err)
+				return nil, Cancel, fmt.Errorf("%w: %v", ErrBadNextStep, err)
 			}
 			return nil, Skip, err
 		}
@@ -212,7 +213,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 
 	// Post-access.
 	next, errClient := fn(e.path, e.path, e.info, nil)
-	err = errors.Join(errClient, err)
+	err = fmt.Errorf("%w: %v", errClient, err)
 	if next == Cancel {
 		return nil, Cancel, err
 	}
@@ -224,7 +225,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 		return nil, Continue, err
 	}
 	if next != Continue {
-		return nil, Cancel, errors.Join(ErrBadNextStep, err)
+		return nil, Cancel, fmt.Errorf("%w: %v", ErrBadNextStep, err)
 	}
 
 	return nil, Continue, err

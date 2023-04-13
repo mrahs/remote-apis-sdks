@@ -3,15 +3,16 @@ package cas
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"errors"
 	"sync"
 	"time"
+
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
@@ -105,7 +106,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 			// Closing the encoder is necessary to flush remaining bytes.
 			defer func() {
 				if errClose := enc.Close(); errClose != nil {
-					errCompr = errors.Join(ErrCompression, errClose, errCompr)
+					errCompr = fmt.Errorf("%w: %v: %v", ErrCompression, errClose, errCompr)
 				}
 			}()
 
@@ -118,7 +119,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 				// pr was closed first, which means the actual error is on that end.
 				return
 			case errEnc != nil:
-				errCompr = errors.Join(ErrCompression, errEnc)
+				errCompr = fmt.Errorf("%w: %v", ErrCompression, errEnc)
 				return
 			}
 		}()
@@ -129,7 +130,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 
 	stream, errStream := u.byteStream.Write(ctx)
 	if errStream != nil {
-		return nil, errors.Join(ErrGRPC, errStream)
+		return nil, fmt.Errorf("%w, %v", ErrGRPC, errStream)
 	}
 
 	buf := u.buffers.Get().([]byte)
@@ -145,7 +146,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	for {
 		n, errRead := src.Read(buf)
 		if errRead != nil && errRead != io.EOF {
-			err = errors.Join(ErrIO, errRead, err)
+			err = fmt.Errorf("%w: %v: %v", ErrIO, errRead, err)
 			break
 		}
 
@@ -162,7 +163,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 			})
 		})
 		if errStream != nil && errStream != io.EOF {
-			err = errors.Join(ErrGRPC, errStream, err)
+			err = fmt.Errorf("%w: %v: %v", ErrGRPC, errStream, err)
 			break
 		}
 
@@ -184,7 +185,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	// However, do not close the reader if it is the given argument; hence the boolean guard.
 	if srcCloser, ok := src.(io.Closer); ok && withCompression {
 		if errClose := srcCloser.Close(); errClose != nil {
-			err = errors.Join(ErrIO, errClose, err)
+			err = fmt.Errorf("%w: %v: %v", ErrIO, errClose, err)
 		}
 	}
 
@@ -193,7 +194,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	// This is necessary because the encoder's goroutine currently owns errCompr and nRawBytes.
 	encWg.Wait()
 	if errCompr != nil {
-		err = errors.Join(ErrCompression, errCompr, err)
+		err = fmt.Errorf("%w: %v: %v", ErrCompression, errCompr, err)
 	}
 
 	// Capture stats before processing errors.
@@ -224,12 +225,12 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 
 	res, errClose := stream.CloseAndRecv()
 	if errClose != nil {
-		return stats, errors.Join(ErrGRPC, errClose, err)
+		return stats, fmt.Errorf("%w: %v: %v", ErrGRPC, errClose, err)
 	}
 
 	// CommittedSize is based on the uncompressed size of the blob.
 	if !cacheHit && res.CommittedSize != size {
-		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, size), err)
+		err = fmt.Errorf("%w: committed size mismatch: got %d, want %d: %v", ErrGRPC, res.CommittedSize, size, err)
 	}
 
 	return stats, err
@@ -275,7 +276,7 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []impath.Abs, slo s
 			uploaded = append(uploaded, r.Digest)
 
 		default:
-			err = errors.Join(r.Err, err)
+			err = fmt.Errorf("%w: %v", r.Err, err)
 		}
 		stats.Add(r.Stats)
 	}
@@ -595,7 +596,7 @@ func (u *uploaderv2) digestFile(ctx context.Context, path impath.Abs, info fs.Fi
 		}
 		defer func() {
 			if errClose := f.Close(); errClose != nil {
-				err = errors.Join(errClose, err)
+				err = fmt.Errorf("%w: %v", errClose, err)
 			}
 		}()
 
@@ -633,7 +634,7 @@ func (u *uploaderv2) digestFile(ctx context.Context, path impath.Abs, info fs.Fi
 		if err != nil {
 			errClose := f.Close()
 			if errClose != nil {
-				err = errors.Join(errClose, err)
+				err = fmt.Errorf("%w: %v", errClose, err)
 			}
 		}
 	}()
@@ -799,7 +800,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 			dErr = err
 		}
 		if dErr != nil {
-			dErr = errors.Join(ErrGRPC, dErr)
+			dErr = fmt.Errorf("%w: %v", ErrGRPC, dErr)
 		}
 		tags := bundle[d].tags
 		s := Stats{
@@ -827,7 +828,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	}
 
 	if err != nil {
-		err = errors.Join(ErrGRPC, err)
+		err = fmt.Errorf("%w: %v", ErrGRPC, err)
 	}
 
 	// Report failed requests due to call failure.
@@ -924,11 +925,11 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 				case len(b.path) > 0:
 					f, errOpen := os.Open(b.path)
 					if errOpen != nil {
-						return Stats{BytesRequested: b.digest.SizeBytes}, errors.Join(ErrIO, errOpen)
+						return Stats{BytesRequested: b.digest.SizeBytes}, fmt.Errorf("%w: %v", ErrIO, errOpen)
 					}
 					defer func() {
 						if errClose := f.Close(); errClose != nil {
-							err = errors.Join(ErrIO, errClose, err)
+							err = fmt.Errorf("%w: %v: %v", ErrIO, errClose, err)
 						}
 					}()
 					reader = f

@@ -2,11 +2,11 @@ package cas
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"time"
+	"errors"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
@@ -186,11 +186,11 @@ type uploaderv2 struct {
 	grpcWg sync.WaitGroup
 
 	// queryPubSub routes responses to callers.
-	queryPubSub        *pubsub
+	queryPubSub *pubsub
 	// uploadCallerPubSub routes responses to callers.
 	uploadCallerPubSub *pubsub
 	// uploadReqPubSub routes responses internally.
-	uploadReqPubSub    *pubsub
+	uploadReqPubSub *pubsub
 }
 
 func (u *uploaderv2) Wait() {

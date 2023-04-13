@@ -3,16 +3,16 @@
 package impath
 
 import (
-	"errors"
 	"fmt"
+	"errors"
 	"path/filepath"
 	"strings"
 )
 
 var (
-	ErrNotAbsolute   = errors.New("impath: path not absolute")
+	ErrNotAbsolute   = errors.New("impath: path is not absolute")
+	ErrNotRelative   = errors.New("impath: path is not relative")
 	ErrNotDescendant = errors.New("impath: target is not descendant of base")
-	ErrNotRelative   = errors.New("impath: target is not relative to base")
 )
 
 type path string
@@ -30,27 +30,27 @@ func (p path) String() string {
 }
 
 func (p path) dir() path {
-  return path(filepath.Dir(string(p)))
+	return path(filepath.Dir(string(p)))
 }
 
 func (p path) base() path {
-  return path(filepath.Base(string(p)))
+	return path(filepath.Base(string(p)))
 }
 
 func (p Abs) Dir() Abs {
-  return Abs{path: p.dir()}
+	return Abs{path: p.dir()}
 }
 
 func (p Rel) Dir() Rel {
-  return Rel{path: p.dir()}
+	return Rel{path: p.dir()}
 }
 
 func (p Abs) Base() Abs {
-  return Abs{path: p.base()}
+	return Abs{path: p.base()}
 }
 
 func (p Rel) Base() Rel {
-  return Rel{path: p.base()}
+	return Rel{path: p.base()}
 }
 
 var (
@@ -143,10 +143,10 @@ func JoinRel(parts ...Rel) Rel {
 func Descendant(base Abs, target Abs) (Rel, error) {
 	p, err := filepath.Rel(base.String(), target.String())
 	if err != nil {
-		return zeroRel, errors.Join(ErrNotRelative, err)
+		return zeroRel, fmt.Errorf("%w: %v", ErrNotRelative, err)
 	}
 	if strings.HasPrefix(p, "..") {
-		return zeroRel, errors.Join(ErrNotDescendant, fmt.Errorf("path %q is not a descendant of %q", target, base))
+		return zeroRel, fmt.Errorf("%w: path %q is not a descendant of %q", ErrNotDescendant, target, base)
 	}
 	return Rel{path: path(p)}, nil
 }
