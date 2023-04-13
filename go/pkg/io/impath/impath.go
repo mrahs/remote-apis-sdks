@@ -4,15 +4,16 @@ package impath
 
 import (
 	"fmt"
-	"errors"
 	"path/filepath"
 	"strings"
+
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 )
 
 var (
-	ErrNotAbsolute   = errors.New("impath: path is not absolute")
-	ErrNotRelative   = errors.New("impath: path is not relative")
-	ErrNotDescendant = errors.New("impath: target is not descendant of base")
+	ErrNotAbsolute   = errors.New("path is not absolute")
+	ErrNotRelative   = errors.New("path is not relative")
+	ErrNotDescendant = errors.New("target is not descendant of base")
 )
 
 type path string
@@ -67,7 +68,7 @@ func ToAbs(pathParts ...string) (Abs, error) {
 	if filepath.IsAbs(p) {
 		return Abs{path: path(p)}, nil
 	}
-	return zeroAbs, ErrNotAbsolute
+	return zeroAbs, errors.Join(ErrNotAbsolute, fmt.Errorf("path %q", p))
 }
 
 // MustAbs is a convenient wrapper of ToAbs that is useful for constant paths.
@@ -88,7 +89,7 @@ func MustAbs(pathParts ...string) Abs {
 func ToRel(pathParts ...string) (Rel, error) {
 	p := filepath.Join(pathParts...)
 	if filepath.IsAbs(p) {
-		return zeroRel, ErrNotRelative
+		return zeroRel, errors.Join(ErrNotRelative, fmt.Errorf("path %q", p))
 	}
 	return Rel{path: path(p)}, nil
 }
@@ -117,7 +118,7 @@ func JoinAbs(parent Abs, parts ...Rel) (Abs, error) {
 	}
 	p := filepath.Join(ps...)
 	if !filepath.IsAbs(p) {
-		return zeroAbs, ErrNotAbsolute
+		return zeroAbs, errors.Join(ErrNotAbsolute, fmt.Errorf("path %q", p))
 	}
 
 	return Abs{path: path(p)}, nil
@@ -143,10 +144,10 @@ func JoinRel(parts ...Rel) Rel {
 func Descendant(base Abs, target Abs) (Rel, error) {
 	p, err := filepath.Rel(base.String(), target.String())
 	if err != nil {
-		return zeroRel, fmt.Errorf("%w: %v", ErrNotRelative, err)
+		return zeroRel, errors.Join(ErrNotRelative, err)
 	}
 	if strings.HasPrefix(p, "..") {
-		return zeroRel, fmt.Errorf("%w: path %q is not a descendant of %q", ErrNotDescendant, target, base)
+		return zeroRel, errors.Join(ErrNotDescendant, fmt.Errorf("target %q is not a descendant of base %q", target, base))
 	}
 	return Rel{path: path(p)}, nil
 }

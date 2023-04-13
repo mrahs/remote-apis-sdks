@@ -1,11 +1,12 @@
 package walker
 
 import (
-	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 )
 
@@ -84,71 +85,92 @@ func DepthFirst(root impath.Abs, exclude *Filter, concurrencyLimit int, fn WalkF
 	for pending.len() > 0 {
 		e := pending.pop().(elem)
 
-		// If it's a previously pre-accessed directory, process its children.
+		// If it's a previously pre-accessed directory, process its children unless already processed.
 		var dirs []any
-		if e.info != nil && e.info.IsDir() {
+		if !e.deferedParent && e.info != nil && e.info.IsDir() {
+			cancel := false
+
+			// If opening fails, let the client choose whether to skip or cancel.
 			f, errOpen := os.Open(e.path.String())
-			// If IO error, let the client choose whether to skip or cancel.
 			if errOpen != nil {
 				next, errClient := fn(e.path, e.path, nil, errOpen)
-				err = fmt.Errorf("%w: %v", errClient, err)
+				err = errors.Join(errClient, err)
 				if next == Cancel {
 					return err
 				}
 				if next != Skip {
-					return fmt.Errorf("%w: %v", ErrBadNextStep, err)
+					return errors.Join(ErrBadNextStep, fmt.Errorf("opening dir failed and expecting %q, but got %q", stepName(Skip), stepName(next)), err)
 				}
-			} else {
+				goto PostDirProcessing
+			}
+
+			// If reading fails, let the client choose whether to skip or cancel.
+			for {
 				names, errRead := f.Readdirnames(128)
-				// If IO error, let the client choose whether  to skip or cancel.
+				if errRead == io.EOF {
+					goto PostDirProcessing
+				}
 				if errRead != nil {
 					next, errClient := fn(e.path, e.path, nil, errRead)
-					err = fmt.Errorf("%w: %v", errClient, err)
+					err = errors.Join(errClient, err)
 					if next == Cancel {
-						return err
+						cancel = true
 					}
 					if next != Skip {
-						return fmt.Errorf("%w: %v", ErrBadNextStep, err)
+						cancel = true
+						err = errors.Join(ErrBadNextStep, fmt.Errorf("reading dir failed and expecting %q, but got %q", stepName(Skip), stepName(next)), err)
 					}
-				} else {
-					for _, name := range names {
-						p, errIm := impath.ToAbs(name)
-						// This should never happen, but if it does, cancel the walk.
-						if errIm != nil {
-							err = fmt.Errorf("%w: %v", errIm, err)
-							return err
-						}
-						// Pre-access.
-						dirElem, next, errVisit := visit(elem{path: p}, exclude, fn)
-						err = fmt.Errorf("%w: %v", errVisit, err)
-						if next == Cancel {
-							return err
-						}
-						if next == Skip {
-							continue
-						}
-						// If a directory, add to the queue.
-						if dirElem != nil {
-							dirs = append(dirs, dirElem)
-							continue
-						}
+					goto PostDirProcessing
+				}
+
+				for _, name := range names {
+					p, errIm := impath.ToAbs(e.path.String(), name)
+					// This should never happen, but if it does, cancel the walk.
+					if errIm != nil {
+						cancel = true
+						err = errors.Join(errIm, err)
+						goto PostDirProcessing
+					}
+					// Pre-access.
+					dirElem, next, errVisit := visit(elem{path: p}, exclude, fn)
+					err = errors.Join(errVisit, err)
+					if next == Cancel {
+						cancel = true
+						goto PostDirProcessing
+					}
+					if next == Skip {
+						continue
+					}
+					// If a directory, add to the queue.
+					if dirElem != nil {
+						dirs = append(dirs, *dirElem)
+						continue
 					}
 				}
+			}
+			// This label helps avoid multiple nested scopes in the previous block, which cannot be worked around
+			// using functions since the control statements act on the scope of this function.
+		PostDirProcessing:
+			if f != nil {
 				errClose := f.Close()
-				err = fmt.Errorf("%w: %v", errClose, err)
+				err = errors.Join(errClose, err)
+			}
+			if cancel {
+				return err
 			}
 		}
-		// If children directories are to be queued, defer the parent and process the children first.
+		// If children directories are to be queued, defer the parent until all its children are processed.
 		if len(dirs) > 0 {
+			e.deferedParent = true
 			pending.push(e)
 			pending.push(dirs...)
 			continue
 		}
 
 		// For new paths, pre-access.
-		// For pre-accessed paths, post-access.
+		// For pre-accessed paths (including processed directories), post-access.
 		dirElem, next, errVisit := visit(e, exclude, fn)
-		err = fmt.Errorf("%w: %v", errVisit, err)
+		err = errors.Join(errVisit, err)
 		if next == Cancel {
 			return err
 		}
@@ -156,7 +178,7 @@ func DepthFirst(root impath.Abs, exclude *Filter, concurrencyLimit int, fn WalkF
 			continue
 		}
 		if dirElem != nil {
-			pending.push(dirElem)
+			pending.push(*dirElem)
 			continue
 		}
 	}
@@ -173,7 +195,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 	if e.info == nil {
 		// Pre-access.
 		next, errClient := fn(e.path, e.path, nil, nil)
-		err = fmt.Errorf("%w: %v", errClient, err)
+		err = errors.Join(errClient, err)
 		if next == Cancel {
 			return nil, Cancel, err
 		}
@@ -185,18 +207,18 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 			return nil, Continue, err
 		}
 		if next != Continue {
-			return nil, Cancel, fmt.Errorf("%w: %v", ErrBadNextStep, err)
+			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf("in pre-access and expecting %q, but got %q", stepName(Continue), stepName(next)), err)
 		}
 
 		info, errStat := os.Lstat(e.path.String())
 		if errStat != nil {
-			next, errClient = fn(e.path, e.path, info, errStat)
-			err = fmt.Errorf("%w: %v", errClient, err)
+			next, errClient = fn(e.path, e.path, nil, errStat)
+			err = errors.Join(errClient, err)
 			if next == Cancel {
 				return nil, Cancel, err
 			}
 			if next != Skip {
-				return nil, Cancel, fmt.Errorf("%w: %v", ErrBadNextStep, err)
+				return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf("stat failed and expecting %q, but got %q", stepName(Skip), stepName(next)), err)
 			}
 			return nil, Skip, err
 		}
@@ -213,7 +235,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 
 	// Post-access.
 	next, errClient := fn(e.path, e.path, e.info, nil)
-	err = fmt.Errorf("%w: %v", errClient, err)
+	err = errors.Join(errClient, err)
 	if next == Cancel {
 		return nil, Cancel, err
 	}
@@ -225,7 +247,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 		return nil, Continue, err
 	}
 	if next != Continue {
-		return nil, Cancel, fmt.Errorf("%w: %v", ErrBadNextStep, err)
+		return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf("in post-access and expecting %q, but got %q", stepName(Continue), stepName(next)), err)
 	}
 
 	return nil, Continue, err
@@ -234,6 +256,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 type elem struct {
 	path impath.Abs
 	info fs.FileInfo
+	deferedParent bool
 }
 
 func isDir(info fs.FileInfo) bool {
@@ -242,4 +265,21 @@ func isDir(info fs.FileInfo) bool {
 
 func isSymlink(info fs.FileInfo) bool {
 	return info.Mode()&fs.ModeSymlink == fs.ModeSymlink
+}
+
+func stepName(step NextStep) string {
+	switch step {
+	case Continue:
+		return "Continue"
+	case Skip:
+		return "Skip"
+	case Defer:
+		return "Defer"
+	case Replace:
+		return "Replace"
+	case Cancel:
+		return "Cancel"
+	default:
+		return "unknown"
+	}
 }
