@@ -3,16 +3,15 @@ package cas
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
-	"errors"
 	"sync"
 	"time"
-
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
@@ -61,6 +60,7 @@ type blob struct {
 	path   string
 	reader io.ReadSeekCloser
 	tag    tag
+	err    error
 }
 
 func (u *batchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error) {
@@ -350,6 +350,11 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 	// A helper for dispatching from appropriate call sites.
 	dispatch := func(b blob) {
 		switch {
+		case b.err != nil:
+			// Digestion failed. The error should contain information about the file.
+			u.uploadCallerPubSub.pub(UploadResponse{
+				Err:    b.err,
+			}, b.tag)
 		case len(b.bytes) > 0:
 			d := digest.NewFromProtoUnvalidated(b.digest)
 			digestBlobs.Append(d, b)
@@ -401,17 +406,16 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root impath.Abs, f
 		defer u.walkWg.Done()
 		defer u.walkSem.Release(1)
 
-		// TODO: implement walker.
 		stats := Stats{}
-		walker.DepthFirst(root, filter, u.ioCfg.ConcurrentWalkerVisits, func(path impath.Abs, virtualPath impath.Abs, info fs.FileInfo, err error) (walker.NextStep, error) {
+		err := walker.DepthFirst(root, filter, u.ioCfg.ConcurrentWalkerVisits, func(path impath.Abs, virtualPath impath.Abs, info fs.FileInfo, err error) walker.NextStep {
 			select {
 			case <-ctx.Done():
-				return walker.Cancel, nil
+				return walker.Cancel
 			default:
 			}
 
 			if err != nil {
-				return walker.Cancel, nil
+				return walker.Cancel
 			}
 
 			key := virtualPath.String() + filter.String()
@@ -424,17 +428,17 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root impath.Abs, f
 				if rawR, ok := u.ioCfg.UploadCache.Load(key); ok {
 					// Defer if in-flight.
 					if rawR == nil {
-						return walker.Defer, nil
+						return walker.Defer
 					}
 					// Update the stats to reflect a cache hit before publishing.
 					r := rawR.(UploadResponse)
 					r.Stats = r.Stats.ToCacheHit()
 					u.uploadCallerPubSub.pub(r, callerTag)
-					return walker.Skip, nil
+					return walker.Skip
 				}
 
 				// Access it.
-				return walker.Continue, nil
+				return walker.Continue
 			}
 
 			// Mark the file as being in-flight.
@@ -444,26 +448,38 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root impath.Abs, f
 			case info.Mode()&fs.ModeSymlink == fs.ModeSymlink:
 				stats.InputSymlinkCount += 1
 				node, nextStep, err := u.digestSymlink(root, path, slo)
+				if err != nil {
+					dispatch(blob{err: err, tag: reqTag})
+					return walker.Cancel
+				}
 				if node != nil {
 					u.dirChildren.Append(parentKey, node)
 				}
-				return nextStep, err
+				return nextStep
 
 			case info.Mode().IsDir():
 				stats.InputDirCount += 1
 				// All the descendants have already been visited (DFS).
 				node, b, nextStep, err := u.digestDirectory(path, u.dirChildren.Load(key))
+				if err != nil {
+					dispatch(blob{err: err, tag: reqTag})
+					return walker.Cancel
+				}
 				if node != nil {
 					u.dirChildren.Append(parentKey, node)
 				}
 				if b != nil {
 					dispatch(blob{digest: node.Digest, bytes: b, tag: reqTag})
 				}
-				return nextStep, err
+				return nextStep
 
 			case info.Mode().IsRegular():
 				stats.InputFileCount += 1
 				node, blb, nextStep, err := u.digestFile(ctx, path, info)
+				if err != nil {
+					dispatch(blob{err: err, tag: reqTag})
+					return walker.Cancel
+				}
 				if node != nil {
 					u.dirChildren.Append(parentKey, node)
 				}
@@ -471,13 +487,16 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root impath.Abs, f
 					blb.tag = reqTag
 					dispatch(*blb)
 				}
-				return nextStep, err
+				return nextStep
 
 			default:
 				// Skip everything else (e.g. sockets and pipes).
-				return walker.Skip, nil
+				return walker.Skip
 			}
 		})
+		if err != nil {
+			dispatch(blob{err: err, tag: reqTag})
+		}
 	}()
 }
 

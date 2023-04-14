@@ -8,6 +8,7 @@ import (
 )
 
 // Filter specifies a filter for paths during traversal.
+// The zero value matches nothing.
 type Filter struct {
 	// Regexp specifies what paths should match with this filter.
 	//
@@ -16,25 +17,29 @@ type Filter struct {
 	//
 	// If nil, any path will match.
 	Regexp *regexp.Regexp
+
 	// Mode is matched using the equality operator.
 	Mode fs.FileMode
 }
 
 // Path matches the specified path against the regexp of this filter.
+//
+// The filter's mode is not used for matching in this method.
 func (p *Filter) Path(path string) bool {
 	if p.Regexp == nil {
-		return true
+		return false
 	}
 	return p.Regexp.MatchString(filepath.ToSlash(path))
 }
 
 // File matches the specified path and mode against the regexp and the file mode of this filter.
+//
+// If either the regexp or the mode is not set on this filter, false is returned.
 func (p *Filter) File(path string, mode fs.FileMode) bool {
-	match := mode == p.Mode
-	if match && p.Regexp != nil {
-		match = p.Regexp.MatchString(path)
+	if p.Regexp == nil || p.Mode == 0 {
+		return false
 	}
-	return match
+	return mode == p.Mode && p.Regexp.MatchString(path)
 }
 
 // String returns a string representation of the predicate.
