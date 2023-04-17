@@ -1,4 +1,4 @@
-// Package errors provides the functionality of wrapping multiple errors from go1.20.
+// Package errors provides the ability to wrap multiple errors while maintaining API compatibility with the standard package.
 package errors
 
 import "errors"
@@ -18,6 +18,7 @@ func (e *joinError) Error() string {
 	return string(b)
 }
 
+// Join wraps the specified errors into one error that prints the entire list using newline as the delimiter.
 func Join(errs ...error) error {
 	n := 0
 	for _, err := range errs {
@@ -52,13 +53,9 @@ func Join(errs ...error) error {
 	return e
 }
 
-func Is(err, target error) bool {
-	je, ok := err.(*joinError)
-	if !ok {
-		return errors.Is(err, target)
-	}
-
-	for _, e := range je.errs {
+// Is implements the corresponding interface allowing the joinError type to be forwards compatible.
+func (e *joinError) Is(target error) bool {
+	for _, e := range e.errs {
 		if errors.Is(e, target) {
 			return true
 		}
@@ -66,6 +63,12 @@ func Is(err, target error) bool {
 	return false
 }
 
+// Is delegates to the standard package.
+func Is(err, target error) bool {
+	return errors.Is(err, target)
+}
+
+// New delegates to the standard package.
 func New(text string) error {
 	return errors.New(text)
 }

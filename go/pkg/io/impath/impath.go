@@ -4,6 +4,7 @@ package impath
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -14,20 +15,21 @@ var (
 	ErrNotAbsolute   = errors.New("path is not absolute")
 	ErrNotRelative   = errors.New("path is not relative")
 	ErrNotDescendant = errors.New("target is not descendant of base")
+	Root             = os.Getenv("SYSTEMDRIVE") + string(os.PathSeparator)
 )
 
 type path string
 
-type Abs struct {
+// Absolute represents an immutable absolute path.
+// The zero value is system root, which is `/` on Unix and `C:\` on Windows.
+type Absolute struct {
 	path
 }
 
-type Rel struct {
+// Relative represents an immutable relative path.
+// The zero value is the empty path, which is an alias to the current directory `.`.
+type Relative struct {
 	path
-}
-
-func (p path) String() string {
-	return string(p)
 }
 
 func (p path) dir() path {
@@ -38,116 +40,123 @@ func (p path) base() path {
 	return path(filepath.Base(string(p)))
 }
 
-func (p Abs) Dir() Abs {
-	return Abs{path: p.dir()}
+// Dir is a convenient method that returns all path elements except the last.
+func (p Absolute) Dir() Absolute {
+	return Absolute{path: p.dir()}
 }
 
-func (p Rel) Dir() Rel {
-	return Rel{path: p.dir()}
+// Dir is a convenient method that returns all path elements except the last.
+func (p Relative) Dir() Relative {
+	return Relative{path: p.dir()}
 }
 
-func (p Abs) Base() Abs {
-	return Abs{path: p.base()}
+// Dir is a convenient method that returns the last path element.
+func (p Absolute) Base() Absolute {
+	return Absolute{path: p.base()}
 }
 
-func (p Rel) Base() Rel {
-	return Rel{path: p.base()}
+// Dir is a convenient method that returns the last path element.
+func (p Relative) Base() Relative {
+	return Relative{path: p.base()}
+}
+
+// String implements the Stringer interface and returns the path as a string.
+func (p Absolute) String() string {
+	pstr := string(p.path)
+	if pstr == "" {
+		return Root
+	}
+	return pstr
+}
+
+// String implements the Stringer interface and returns the path as a string.
+func (p Relative) String() string {
+	return string(p.path)
+}
+
+// Append is a convenient method to join additional elements to this path.
+func (p Absolute) Append(elements ...Relative) Absolute {
+	paths := make([]string, len(elements)+1)
+	paths[0] = p.String()
+	for i, p := range elements {
+		paths[i+1] = p.String()
+	}
+	return Absolute{path: path(filepath.Join(paths...))}
+}
+
+// Append is a convenient method to join additional elements to this path.
+func (p Relative) Append(elements ...Relative) Relative {
+	paths := make([]string, len(elements)+1)
+	paths[0] = p.String()
+	for i, p := range elements {
+		paths[i+1] = p.String()
+	}
+	return Relative{path: path(filepath.Join(paths...))}
 }
 
 var (
-	zeroAbs = Abs{}
-	zeroRel = Rel{}
+	zeroAbs = Absolute{}
+	zeroRel = Relative{}
 )
 
-// ToAbs creates a new absolute and clean path from the specified parts.
+// Abs creates a new absolute and clean path from the specified elements.
 //
-// If the specified parts do not join to a valid absolute path, ErrNotAbsolute is returned.
-// If error is not nil, the returned value is not valid.
-func ToAbs(pathParts ...string) (Abs, error) {
-	p := filepath.Join(pathParts...)
+// If the specified elements do not join to a valid absolute path, ErrNotAbsolute is returned.
+func Abs(elements ...string) (Absolute, error) {
+	p := filepath.Join(elements...)
 	if filepath.IsAbs(p) {
-		return Abs{path: path(p)}, nil
+		return Absolute{path: path(p)}, nil
 	}
 	return zeroAbs, errors.Join(ErrNotAbsolute, fmt.Errorf("path %q", p))
 }
 
 // MustAbs is a convenient wrapper of ToAbs that is useful for constant paths.
 //
-// If the specified parts do not join to a valid absolute path, it panics.
-func MustAbs(pathParts ...string) Abs {
-	p, err := ToAbs(pathParts...)
+// If the specified elements do not join to a valid absolute path, this function panics.
+func MustAbs(elements ...string) Absolute {
+	p, err := Abs(elements...)
 	if err != nil {
 		panic(err)
 	}
 	return p
 }
 
-// ToRel creates a new relative and clean path from the specified parts.
+// Rel creates a new relative and clean path from the specified elements.
 //
-// If the specified parts do not join to a valid absolute path, ErrNotRelative is returned.
-// If error is not nil, the returned value is not valid.
-func ToRel(pathParts ...string) (Rel, error) {
-	p := filepath.Join(pathParts...)
+// If the specified elements do not join to a valid relative path, ErrNotRelative is returned.
+func Rel(elements ...string) (Relative, error) {
+	p := filepath.Join(elements...)
 	if filepath.IsAbs(p) {
 		return zeroRel, errors.Join(ErrNotRelative, fmt.Errorf("path %q", p))
 	}
-	return Rel{path: path(p)}, nil
+	return Relative{path: path(p)}, nil
 }
 
 // MustRel is a convenient wrapper of ToRel that is useful for constant paths.
 //
-// If the specified parts do not join to a valid relative path, it pacnis.
-func MustRel(pathParts ...string) Rel {
-	p, err := ToRel(pathParts...)
+// If the specified elements do not join to a valid relative path, this function panics.
+func MustRel(elements ...string) Relative {
+	p, err := Rel(elements...)
 	if err != nil {
 		panic(err)
 	}
 	return p
-}
-
-// JoinAbs is a convenient method to join multiple paths into an absolute path.
-//
-// If the specified arguments do not join to a valid absolute path, ErrNotAbsolute is returned.
-// This happens if the parent is a zero path (not created using a function from this package).
-// If error is not nil, the returned value is not valid.
-func JoinAbs(parent Abs, parts ...Rel) (Abs, error) {
-	ps := make([]string, len(parts)+1)
-	ps[0] = parent.String()
-	for i, p := range parts {
-		ps[i+1] = p.String()
-	}
-	p := filepath.Join(ps...)
-	if !filepath.IsAbs(p) {
-		return zeroAbs, errors.Join(ErrNotAbsolute, fmt.Errorf("path %q", p))
-	}
-
-	return Abs{path: path(p)}, nil
-}
-
-// JoinRel is a convenient method to join multiple paths into a relative path.
-func JoinRel(parts ...Rel) Rel {
-	ps := make([]string, len(parts))
-	for i, p := range parts {
-		ps[i] = p.String()
-	}
-	p := filepath.Join(ps...)
-	return Rel{path: path(p)}
 }
 
 // Descendant returns a relative path to the specified base path such that
 // when joined together with the base using filepath.Join(base, path), the result
 // is lexically equivalent to the specified target path.
 //
-// All arguments are assumed to be non-zero paths (a zero path is not created using New* functions in this package).
-// An error is returned if the specified path cannot be made relative to the specified base
-// using filepath.Rel(base, target), or the target path is not a descendent of the base.
-func Descendant(base Abs, target Abs) (Rel, error) {
+// The returned error is nil, ErrNotRelative, or ErrNotDescendant.
+func Descendant(base Absolute, target Absolute) (Relative, error) {
 	p, err := filepath.Rel(base.String(), target.String())
 	if err != nil {
+		// Since the zero Absolute path is the root, this error may only happen if base and target
+		// have different roots, which is possible on Windows.
 		return zeroRel, errors.Join(ErrNotRelative, err)
 	}
 	if strings.HasPrefix(p, "..") {
 		return zeroRel, errors.Join(ErrNotDescendant, fmt.Errorf("target %q is not a descendant of base %q", target, base))
 	}
-	return Rel{path: path(p)}, nil
+	return Relative{path: path(p)}, nil
 }

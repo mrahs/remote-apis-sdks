@@ -1,13 +1,14 @@
 package impath_test
 
 import (
-	"testing"
 	"errors"
+	"path/filepath"
+	"testing"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 )
 
-func Test_ToAbs(t *testing.T) {
+func Test_Abs(t *testing.T) {
 	tests := []struct {
 		name  string
 		parts []string
@@ -16,20 +17,20 @@ func Test_ToAbs(t *testing.T) {
 	}{
 		{
 			name:  "valid",
-			parts: []string{"/foo", "bar", "baz"},
-			want:  "/foo/bar/baz",
+			parts: []string{impath.Root, "foo", "bar", "baz"},
+			want:  filepath.Join(impath.Root, "foo", "bar", "baz"),
 			err:   nil,
 		},
 		{
 			name:  "not_absolute",
 			parts: []string{"foo", "bar", "baz"},
-			want:  "",
+			want:  impath.Root,
 			err:   impath.ErrNotAbsolute,
 		},
 		{
 			name:  "not_clean",
-			parts: []string{"/foo", "bar", "..", "baz"},
-			want:  "/foo/baz",
+			parts: []string{impath.Root, "foo", "bar", "..", "baz"},
+			want:  filepath.Join(impath.Root, "foo", "baz"),
 			err:   nil,
 		},
 	}
@@ -37,7 +38,7 @@ func Test_ToAbs(t *testing.T) {
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			got, err := impath.ToAbs(test.parts...)
+			got, err := impath.Abs(test.parts...)
 			if !errors.Is(err, test.err) {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -48,7 +49,7 @@ func Test_ToAbs(t *testing.T) {
 	}
 }
 
-func Test_ToRel(t *testing.T) {
+func Test_Rel(t *testing.T) {
 	tests := []struct {
 		name  string
 		parts []string
@@ -58,19 +59,19 @@ func Test_ToRel(t *testing.T) {
 		{
 			name:  "valid",
 			parts: []string{"foo", "bar", "baz"},
-			want:  "foo/bar/baz",
+			want:  filepath.Join("foo", "bar", "baz"),
 			err:   nil,
 		},
 		{
 			name:  "not_relative",
-			parts: []string{"/foo", "bar", "baz"},
+			parts: []string{impath.Root, "foo", "bar", "baz"},
 			want:  "",
 			err:   impath.ErrNotRelative,
 		},
 		{
 			name:  "not_clean",
 			parts: []string{"foo", "bar", "..", "baz"},
-			want:  "foo/baz",
+			want:  filepath.Join("foo", "baz"),
 			err:   nil,
 		},
 	}
@@ -78,7 +79,7 @@ func Test_ToRel(t *testing.T) {
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			got, err := impath.ToRel(test.parts...)
+			got, err := impath.Rel(test.parts...)
 			if !errors.Is(err, test.err) {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -89,33 +90,33 @@ func Test_ToRel(t *testing.T) {
 	}
 }
 
-func Test_JoinAbs(t *testing.T) {
+func Test_AbsAppend(t *testing.T) {
 	tests := []struct {
 		name   string
-		parent impath.Abs
-		parts  []impath.Rel
+		parent impath.Absolute
+		parts  []impath.Relative
 		want   string
 		err    error
 	}{
 		{
 			name:   "valid",
-			parent: impath.MustAbs("/foo"),
-			parts:  []impath.Rel{impath.MustRel("bar"), impath.MustRel("baz")},
-			want:   "/foo/bar/baz",
+			parent: impath.MustAbs(impath.Root, "foo"),
+			parts:  []impath.Relative{impath.MustRel("bar"), impath.MustRel("baz")},
+			want:   filepath.Join(impath.Root, "foo", "bar", "baz"),
 			err:    nil,
 		},
 		{
 			name:   "not_clean",
-			parent: impath.MustAbs("/foo"),
-			parts:  []impath.Rel{impath.MustRel("bar"), impath.MustRel(".."), impath.MustRel("baz")},
-			want:   "/foo/baz",
+			parent: impath.MustAbs(impath.Root, "foo"),
+			parts:  []impath.Relative{impath.MustRel("bar"), impath.MustRel(".."), impath.MustRel("baz")},
+			want:   filepath.Join(impath.Root, "foo", "baz"),
 			err:    nil,
 		},
 		{
-			name:   "ivnalid",
-			parent: impath.Abs{},
-			parts:  []impath.Rel{impath.MustRel("bar"), impath.MustRel("baz")},
-			want:   "",
+			name:   "zero",
+			parent: impath.Absolute{},
+			parts:  []impath.Relative{impath.MustRel("bar"), impath.MustRel("baz")},
+			want:   filepath.Join(impath.Root, "bar", "baz"),
 			err:    impath.ErrNotAbsolute,
 		},
 	}
@@ -123,10 +124,7 @@ func Test_JoinAbs(t *testing.T) {
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			got, err := impath.JoinAbs(test.parent, test.parts...)
-			if !errors.Is(err, test.err) {
-				t.Errorf("unexpected error: %v", err)
-			}
+			got := test.parent.Append(test.parts...)
 			if got.String() != test.want {
 				t.Errorf("path mismatch: want %q, got %q", test.want, got)
 			}
@@ -134,33 +132,33 @@ func Test_JoinAbs(t *testing.T) {
 	}
 }
 
-func Test_JoinRel(t *testing.T) {
+func Test_RelAppend(t *testing.T) {
 	tests := []struct {
 		name  string
-		parts []impath.Rel
+		parts []impath.Relative
 		want  string
 	}{
 		{
 			name:  "valid",
-			parts: []impath.Rel{impath.MustRel("bar"), impath.MustRel("baz")},
-			want:  "bar/baz",
+			parts: []impath.Relative{impath.MustRel("bar"), impath.MustRel("baz")},
+			want:  filepath.Join("bar", "baz"),
 		},
 		{
 			name:  "not_clean",
-			parts: []impath.Rel{impath.MustRel("bar"), impath.MustRel(".."), impath.MustRel("baz")},
+			parts: []impath.Relative{impath.MustRel("bar"), impath.MustRel(".."), impath.MustRel("baz")},
 			want:  "baz",
 		},
 		{
-			name:  "empty_parts",
-			parts: []impath.Rel{impath.MustRel("bar"), {}, impath.MustRel("baz")},
-			want:  "bar/baz",
+			name:  "empty_elements",
+			parts: []impath.Relative{{}, impath.MustRel("bar"), {}, impath.MustRel("baz"), {}},
+			want:  filepath.Join("bar", "baz"),
 		},
 	}
 
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			got := impath.JoinRel(test.parts...)
+			got := test.parts[0].Append(test.parts[1:]...)
 			if got.String() != test.want {
 				t.Errorf("path mismatch: want %q, got %q", test.want, got)
 			}
@@ -171,38 +169,38 @@ func Test_JoinRel(t *testing.T) {
 func Test_Descendant(t *testing.T) {
 	tests := []struct {
 		name   string
-		base   impath.Abs
-		target impath.Abs
+		base   impath.Absolute
+		target impath.Absolute
 		want   string
 		err    error
 	}{
 		{
 			name:   "valid",
-			base:   impath.MustAbs("/a/b"),
-			target: impath.MustAbs("/a/b/c/d"),
-			want:   "c/d",
+			base:   impath.MustAbs(impath.Root, "a", "b"),
+			target: impath.MustAbs(impath.Root, "a", "b", "c", "d"),
+			want:   filepath.Join("c/d"),
 			err:    nil,
 		},
 		{
 			name:   "not_descendent",
-			base:   impath.MustAbs("/a/b"),
-			target: impath.MustAbs("/c/d"),
+			base:   impath.MustAbs(impath.Root, "a", "b"),
+			target:   impath.MustAbs(impath.Root, "c", "d"),
 			want:   "",
 			err:    impath.ErrNotDescendant,
 		},
 		{
-			name:   "invalid_base",
-			base:   impath.Abs{},
-			target: impath.MustAbs("/c/d"),
-			want:   "",
-			err:    impath.ErrNotRelative,
+			name:   "zero_base",
+			base:   impath.Absolute{},
+			target: impath.MustAbs(impath.Root, "c", "d"),
+			want:   filepath.Join("c", "d"),
+			err:    nil,
 		},
 		{
-			name:   "invalid_target",
-			base:   impath.MustAbs("/c/d"),
-			target: impath.Abs{},
+			name:   "zero_target",
+			base:   impath.MustAbs(impath.Root, "a", "b"),
+			target: impath.Absolute{},
 			want:   "",
-			err:    impath.ErrNotRelative,
+			err:    impath.ErrNotDescendant,
 		},
 	}
 

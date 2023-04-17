@@ -94,7 +94,7 @@ func TestWalker(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			tmp, root := makeFs(t, test.fs)
 			var seq []string
-			err := walker.DepthFirst(impath.MustAbs(root), test.filter, 1, func(path, virtualPath impath.Abs, info fs.FileInfo, err error) walker.NextStep  {
+			err := walker.DepthFirst(impath.MustAbs(root), test.filter, 1, func(path, virtualPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep  {
 				if err != nil {
 					t.Errorf("unexpected error: %v", err)
 				}

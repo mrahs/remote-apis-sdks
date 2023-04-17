@@ -87,7 +87,7 @@ type BatchingUploader interface {
 	// If the returned error is not nil, the returned slice may be incomplete (fatal error) and every digest
 	// in it may or may not have been successfully uploaded (individual errors).
 	// The returned error wraps a number of errors proportional to the length of the specified slice.
-	Upload(context.Context, []impath.Abs, slo.Options, *walker.Filter) ([]digest.Digest, *Stats, error)
+	Upload(context.Context, []impath.Absolute, slo.Options, *walker.Filter) ([]digest.Digest, *Stats, error)
 
 	// WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
 	//
@@ -127,7 +127,7 @@ type StreamingUploader interface {
 	// alone and no unification takes place.
 	// In the average case, blobs that make it into the same bundle will be grouped by digest. Once a digest is processed, each requester of that
 	// digest receives a copy of the coorresponding UploadResponse.
-	Upload(context.Context, <-chan impath.Abs, slo.Options, *walker.Filter) <-chan UploadResponse
+	Upload(context.Context, <-chan impath.Absolute, slo.Options, *walker.Filter) <-chan UploadResponse
 
 	// Wait blocks until all resources held by the uploader are released.
 	// It must be called after at least one of the methods has been called to avoid races with wait groups.

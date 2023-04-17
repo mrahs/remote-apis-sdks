@@ -45,7 +45,7 @@ var (
 // WalkFunc defines the callback signature that clients must specify for walker implementatinos.
 // More details about when this function is called and how its return values are used
 // is provided by each walker implementation in this package.
-type WalkFunc func(path impath.Abs, virtualPath impath.Abs, info fs.FileInfo, err error) NextStep
+type WalkFunc func(path impath.Absolute, virtualPath impath.Absolute, info fs.FileInfo, err error) NextStep
 
 // DepthFirst walks the filesystem tree rooted at the specified root in DFS style traversal.
 //
@@ -72,7 +72,7 @@ type WalkFunc func(path impath.Abs, virtualPath impath.Abs, info fs.FileInfo, er
 // An unexpected NextStep value cancels the entire walk.
 //
 // The error returned by the walk is either nil or ErrBadNextStep.
-func DepthFirst(root impath.Abs, exclude *Filter, concurrencyLimit int, fn WalkFunc) error {
+func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn WalkFunc) error {
 	if concurrencyLimit < 1 || fn == nil {
 		return ErrInvalidArgument
 	}
@@ -246,7 +246,7 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 }
 
 type elem struct {
-	path          impath.Abs
+	path          impath.Absolute
 	info          fs.FileInfo
 	deferedParent bool
 }
