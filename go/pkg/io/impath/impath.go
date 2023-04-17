@@ -1,5 +1,5 @@
 // Package impath (immutable path) provides immutable and distinguishable types for absolute and relative paths.
-// This allows for string guarantees at compile time, improves legibility and reduces maintenance burden.
+// This allows for strong guarantees at compile time, improves legibility and reduces maintenance burden.
 package impath
 
 import (
@@ -18,46 +18,36 @@ var (
 	Root             = os.Getenv("SYSTEMDRIVE") + string(os.PathSeparator)
 )
 
-type path string
-
 // Absolute represents an immutable absolute path.
 // The zero value is system root, which is `/` on Unix and `C:\` on Windows.
 type Absolute struct {
-	path
+	path string
 }
 
 // Relative represents an immutable relative path.
 // The zero value is the empty path, which is an alias to the current directory `.`.
 type Relative struct {
-	path
-}
-
-func (p path) dir() path {
-	return path(filepath.Dir(string(p)))
-}
-
-func (p path) base() path {
-	return path(filepath.Base(string(p)))
+	path string
 }
 
 // Dir is a convenient method that returns all path elements except the last.
 func (p Absolute) Dir() Absolute {
-	return Absolute{path: p.dir()}
+	return Absolute{path: filepath.Dir(p.path)}
 }
 
 // Dir is a convenient method that returns all path elements except the last.
 func (p Relative) Dir() Relative {
-	return Relative{path: p.dir()}
+	return Relative{path: filepath.Dir(p.path)}
 }
 
 // Dir is a convenient method that returns the last path element.
 func (p Absolute) Base() Absolute {
-	return Absolute{path: p.base()}
+	return Absolute{path: filepath.Base(p.path)}
 }
 
 // Dir is a convenient method that returns the last path element.
 func (p Relative) Base() Relative {
-	return Relative{path: p.base()}
+	return Relative{path: filepath.Base(p.path)}
 }
 
 // String implements the Stringer interface and returns the path as a string.
@@ -81,7 +71,7 @@ func (p Absolute) Append(elements ...Relative) Absolute {
 	for i, p := range elements {
 		paths[i+1] = p.String()
 	}
-	return Absolute{path: path(filepath.Join(paths...))}
+	return Absolute{path: filepath.Join(paths...)}
 }
 
 // Append is a convenient method to join additional elements to this path.
@@ -91,7 +81,7 @@ func (p Relative) Append(elements ...Relative) Relative {
 	for i, p := range elements {
 		paths[i+1] = p.String()
 	}
-	return Relative{path: path(filepath.Join(paths...))}
+	return Relative{path: filepath.Join(paths...)}
 }
 
 var (
@@ -105,7 +95,7 @@ var (
 func Abs(elements ...string) (Absolute, error) {
 	p := filepath.Join(elements...)
 	if filepath.IsAbs(p) {
-		return Absolute{path: path(p)}, nil
+		return Absolute{path: p}, nil
 	}
 	return zeroAbs, errors.Join(ErrNotAbsolute, fmt.Errorf("path %q", p))
 }
@@ -129,7 +119,7 @@ func Rel(elements ...string) (Relative, error) {
 	if filepath.IsAbs(p) {
 		return zeroRel, errors.Join(ErrNotRelative, fmt.Errorf("path %q", p))
 	}
-	return Relative{path: path(p)}, nil
+	return Relative{path: p}, nil
 }
 
 // MustRel is a convenient wrapper of ToRel that is useful for constant paths.
@@ -158,5 +148,5 @@ func Descendant(base Absolute, target Absolute) (Relative, error) {
 	if strings.HasPrefix(p, "..") {
 		return zeroRel, errors.Join(ErrNotDescendant, fmt.Errorf("target %q is not a descendant of base %q", target, base))
 	}
-	return Relative{path: path(p)}, nil
+	return Relative{path: p}, nil
 }

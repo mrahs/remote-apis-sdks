@@ -184,7 +184,7 @@ func Test_Descendant(t *testing.T) {
 		{
 			name:   "not_descendent",
 			base:   impath.MustAbs(impath.Root, "a", "b"),
-			target:   impath.MustAbs(impath.Root, "c", "d"),
+			target: impath.MustAbs(impath.Root, "c", "d"),
 			want:   "",
 			err:    impath.ErrNotDescendant,
 		},

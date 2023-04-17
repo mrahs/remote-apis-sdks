@@ -53,8 +53,13 @@ func Join(errs ...error) error {
 	return e
 }
 
-// Is implements the corresponding interface allowing the joinError type to be forwards compatible.
+// Is implements the corresponding interface allowing the joinError type to be compatible with
+// errors.Is(error) bool of the standard package without having to override it.
 func (e *joinError) Is(target error) bool {
+	if target == nil || e == nil {
+		return e == target
+	}
+
 	for _, e := range e.errs {
 		if errors.Is(e, target) {
 			return true
