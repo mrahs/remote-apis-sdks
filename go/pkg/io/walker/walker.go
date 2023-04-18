@@ -14,6 +14,7 @@ type NextStep int
 
 const (
 	// Continue continues traversing and follows symlinks.
+	// Since it's the first constant in the list, it is designated as the default (zero) step.
 	Continue NextStep = iota
 
 	// Skip skips the file, the entire directory tree, or following the symlink.
@@ -23,7 +24,7 @@ const (
 	// The exact behavior is implementation dependent.
 	Defer
 
-	// Replace follows the target of a symlink, but reports every path from that sub-traversal as a relative
+	// Replace follows the target of a symlink, but reports every path from that sub-traversal as a descendant
 	// path of the symlink's path.
 	// For example, if the target is a file, its path would be that of the symlink. If it is a directory, every descendent
 	// of that directory will be reported as a child of the directory and the directory will have the path of the symlink.
@@ -43,16 +44,18 @@ var (
 )
 
 // WalkFunc defines the callback signature that clients must specify for walker implementatinos.
-// More details about when this function is called and how its return values are used
+// More details about when this function is called and how its return value is used
 // is provided by each walker implementation in this package.
 type WalkFunc func(path impath.Absolute, virtualPath impath.Absolute, info fs.FileInfo, err error) NextStep
 
-// DepthFirst walks the filesystem tree rooted at the specified root in DFS style traversal.
+// DepthFirst walks the filesystem tree rooted at the specified root in depth-first-search style traversal.
 //
 // The concurencyLimit value must be > 0.
 //
 // The specified function may be called concurrently based on the specified concurrencyLimit value.
-// It is called twice for each path, including root. The first call is made
+// However, each path in the tree is accessed by only one goroutine at a time.
+//
+// The callback is called twice for each path, including root. The first call is made
 // before making any IO calls, and only the path is provided to the function.
 //
 // At this point, the client may instruct the walker to skip the path by returning Skip or to access
@@ -62,12 +65,16 @@ type WalkFunc func(path impath.Absolute, virtualPath impath.Absolute, info fs.Fi
 // Deferred paths block traversing back up the tree since a parent requires all its children to be processed before itself to honour the DFS contract.
 //
 // The second call is made only if the first call returned Continue and after making an IO call to stat the file.
+// If the stat syscall returns an error, it is passed to the callback to let the client decide whether to skip the path
+// or cancel the entire walk. No other step is allowed, otherwise an ErrBadNextStep is returned and the entire walk is cancelled.
+//
 // If the second call returns Skip and the path is a directory, the walker will skip the directory's tree.
+//
 // At any point, the client may return Cancel to cancel the entire walk.
-// If a symlink is encountered, the function must return Skip to avoid triggering a recursive walk on the symlink target.
+//
+// If a symlink is encountered, the callback must return Skip to avoid triggering a recursive walk on the symlink target.
 // Alternatively, returning Replace will instruct the walker to traverse the target as if its path is that of the symlink itself.
-// If accessing the path caused an error, the only valid next steps are Cancel or Skip.
-// Defer is not a valid next step here because the path has already been processed.
+// Defer is not a valid next step in any second call because the path has already been processed.
 //
 // An unexpected NextStep value cancels the entire walk.
 //
@@ -83,12 +90,22 @@ func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn 
 	}
 	pending := &stack{}
 	pending.push(elem{path: root})
+	parentIndex := &stack{}
 
 	for pending.len() > 0 {
 		e := pending.pop().(elem)
+		pi := -1
+		if parentIndex.len() > 0 {
+			pi = parentIndex.peek().(int)
+		}
 
-		// If it's a previously pre-accessed directory, process its children unless already processed.
-		if !e.deferedParent && e.info != nil && e.info.IsDir() {
+		// If all children directories of this one are done, remove it from the chain.
+		if pending.len() == pi {
+			parentIndex.pop()
+		}
+
+		// If it's a previously pre-accessed directory, process its children.
+		if !e.deferredParent && e.info != nil && e.info.IsDir() {
 			dirs, next, errDir := processDir(e, exclude, fn)
 			if next == Cancel {
 				return errDir
@@ -96,9 +113,11 @@ func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn 
 			if next == Skip {
 				continue
 			}
-			// If there are children directories to be queued, defer the parent until all its children are processed.
+			// If there are deferred children, queue them after their parent.
 			if len(dirs) > 0 {
-				e.deferedParent = true
+				e.deferredParent = true
+				// Remember the parent index to insert deferred children after it in the stack.
+				parentIndex.push(pending.len())
 				pending.push(e)
 				pending.push(dirs...)
 				continue
@@ -114,6 +133,11 @@ func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn 
 		if next == Skip {
 			continue
 		}
+		if next == Defer {
+			// Reschedule a visit before its parent.
+			pending.insert(e, pi+1)
+			continue
+		}
 		// If it's a pre-accessed directory, schedule processing and post-access.
 		if dirElem != nil {
 			pending.push(*dirElem)
@@ -126,9 +150,10 @@ func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn 
 
 // visit performs pre-access, stat, and/or post-access depending on the state of the element.
 // Return values:
-//  *elem is nil unless the path is a directory that was not post-accessed.
-//  NextStep is one of Continue, Skip, or Cancel.
-//  error is either ErrBadNextStep or nil.
+//
+//	*elem is nil unless the path is a directory that was not post-accessed.
+//	NextStep is one of Defer, Continue, Skip, or Cancel.
+//	error is either ErrBadNextStep or nil.
 func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 	// If the filter applies to the path only, use it here.
 	if exclude != nil && exclude.Mode == 0 && exclude.Path(e.path.String()) {
@@ -142,8 +167,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 			return nil, next, nil
 		}
 		if next == Defer {
-			// TODO
-			return nil, Continue, nil
+			return nil, Defer, nil
 		}
 		if next != Continue {
 			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`in pre-access and expecting "Continue", but got %q`, stepName(next)))
@@ -190,9 +214,10 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 // All the files (non-directories) will be completely visited within this call.
 // All the directories will be pre-accessed and stat'ed, but not post-accessed.
 // Return values:
-//  dirs is nil unless the directory had child-directories that were pre-accessed and stat'ed and still require processing and post-access.
-//  next is one of Continue, Skip, or Cancel.
-//  err is one of ErrBadNextStep or nil.
+//
+//	[]any is nil unless the directory had defered-children.
+//	NextStep is one of Continue, Skip, or Cancel.
+//	error is one of ErrBadNextStep or nil.
 func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 	// If opening fails, let the client choose whether to skip or cancel.
 	f, errOpen := os.Open(e.path.String())
@@ -207,7 +232,7 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 	// The only bad side effect may be a dangling descriptor that leaks until the process is terminated.
 	defer f.Close()
 
-	var dirs []any
+	var deferred []any
 	for {
 		names, errRead := f.Readdirnames(128)
 
@@ -215,9 +240,9 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 		if errRead != nil && errRead != io.EOF {
 			next := fn(e.path, e.path, nil, errRead)
 			if next != Skip && next != Cancel {
-				return dirs, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`reading dir failed; expecting "Skip" or "Cancel", but got %q`, stepName(next)))
+				return deferred, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`reading dir failed; expecting "Skip" or "Cancel", but got %q`, stepName(next)))
 			}
-			return dirs, next, nil
+			return deferred, next, nil
 		}
 
 		for _, name := range names {
@@ -227,28 +252,33 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 			// Pre-access.
 			dirElem, next, errVisit := visit(elem{path: p}, exclude, fn)
 			if next == Cancel {
-				return dirs, Cancel, errVisit
+				return deferred, Cancel, errVisit
 			}
 			if next == Skip {
 				continue
 			}
-			// If it's a directory, schedule processing and post-access.
+			if next == Defer {
+				deferred = append(deferred, elem{path: p})
+				continue
+			}
 			if dirElem != nil {
-				dirs = append(dirs, *dirElem)
+				deferred = append(deferred, *dirElem)
 				continue
 			}
 		}
 
 		if errRead == io.EOF {
-			return dirs, Continue, nil
+			return deferred, Continue, nil
 		}
 	}
 }
 
 type elem struct {
-	path          impath.Absolute
-	info          fs.FileInfo
-	deferedParent bool
+	path impath.Absolute
+	info fs.FileInfo
+	// a deferred parent is a directory that has already been pre-accessed and processed, but still
+	// pending a post-access.
+	deferredParent bool
 }
 
 func stepName(step NextStep) string {

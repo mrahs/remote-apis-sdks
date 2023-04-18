@@ -1,5 +1,7 @@
 package walker
 
+import "fmt"
+
 type stack struct {
 	stack []any
 }
@@ -8,16 +10,20 @@ func (s *stack) push(items ...any) {
 	s.stack = append(s.stack, items...)
 }
 
-func (s *stack) addLast(item any) {
-	s.stack = append([]any{item}, s.stack...)
-}
+func (s *stack) insert(item any, i int) {
+	if i < 0 || i > len(s.stack) {
+		panic(fmt.Errorf("stack index %d out of range with stack length %d", i, len(s.stack)))
+	}
 
-func (s *stack) addPenultimate(item any) {
-	if len(s.stack) == 0 {
+	if i == len(s.stack) {
 		s.stack = append(s.stack, item)
 		return
 	}
-	s.stack = append([]any{s.stack[0], item}, s.stack[1:]...)
+
+	// Duplicate item at index i and shift subsequent items right.
+	s.stack = append(s.stack[:i+1], s.stack[i:]...)
+	// Replace the duplicated item with the specified one.
+	s.stack[i] = item
 }
 
 func (s *stack) pop() any {
