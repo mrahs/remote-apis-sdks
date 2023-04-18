@@ -18,8 +18,11 @@ func TestWalker(t *testing.T) {
 	tests := []struct {
 		name               string
 		paths              []string
+		symlinks           map[string]string
+		root               string
 		filter             *walker.Filter
 		pathStep           map[string]walker.NextStep
+		symlinkSkip        map[string]bool
 		wantPathVisitCount map[string]int
 		wantErr            error
 	}{
@@ -64,12 +67,12 @@ func TestWalker(t *testing.T) {
 				"foo/bar/baz/e.z",
 			},
 			wantPathVisitCount: map[string]int{
-				"foo": 2,
-				"foo/a.z": 2,
-				"foo/b.z": 2,
-				"foo/bar": 2,
-				"foo/bar/baz": 2,
-				"foo/bar/c.z": 2,
+				"foo":             2,
+				"foo/a.z":         2,
+				"foo/b.z":         2,
+				"foo/bar":         2,
+				"foo/bar/baz":     2,
+				"foo/bar/c.z":     2,
 				"foo/bar/baz/d.z": 2,
 				"foo/bar/baz/e.z": 2,
 			},
@@ -99,7 +102,7 @@ func TestWalker(t *testing.T) {
 			wantPathVisitCount: map[string]int{"foo": 3},
 		},
 		{
-			name:               "deferred",
+			name: "deferred",
 			paths: []string{
 				"foo/a.z",
 				"foo/b.z",
@@ -107,19 +110,59 @@ func TestWalker(t *testing.T) {
 				"foo/bar/baz/d.z",
 				"foo/bar/baz/e.z",
 			},
-			pathStep:           map[string]walker.NextStep{
-				"foo/b.z": walker.Defer,
+			pathStep: map[string]walker.NextStep{
+				"foo/b.z":         walker.Defer,
 				"foo/bar/baz/e.z": walker.Defer,
 			},
 			wantPathVisitCount: map[string]int{
-				"foo": 2,
-				"foo/a.z": 2,
-				"foo/b.z": 3,
-				"foo/bar": 2,
-				"foo/bar/baz": 2,
-				"foo/bar/c.z": 2,
+				"foo":             2,
+				"foo/a.z":         2,
+				"foo/b.z":         3,
+				"foo/bar":         2,
+				"foo/bar/baz":     2,
+				"foo/bar/c.z":     2,
 				"foo/bar/baz/d.z": 2,
 				"foo/bar/baz/e.z": 3,
+			},
+		},
+		{
+			name:     "file_symlink",
+			symlinks: map[string]string{"foo.c": "bar.c"},
+			wantPathVisitCount: map[string]int{
+				"foo.c": 2,
+				"bar.c": 2,
+			},
+		},
+		{
+			name:     "dir_symlink",
+			paths:    []string{"foo/bar.c"},
+			symlinks: map[string]string{"foo.c": "foo/"},
+			root:     "foo.c",
+			wantPathVisitCount: map[string]int{
+				"foo.c":     2,
+				"foo/bar.c": 2,
+				"foo":       2,
+			},
+		},
+		{
+			name:     "nested_symlink",
+			paths:    []string{"foo/bar.c"},
+			symlinks: map[string]string{"foo/baz.c": "a.z"},
+			root:     "foo", // Otherwise it's nondeterministic which top-level path is selected.
+			wantPathVisitCount: map[string]int{
+				"foo":       2,
+				"foo/bar.c": 2,
+				"foo/baz.c": 2,
+				"a.z":       2,
+			},
+		},
+		{
+			name:        "skip_symlink",
+			paths:       []string{"foo/bar.c"},
+			symlinks:    map[string]string{"foo.c": "foo/"},
+			symlinkSkip: map[string]bool{"foo.c": true},
+			wantPathVisitCount: map[string]int{
+				"foo.c": 2,
 			},
 		},
 	}
@@ -127,11 +170,15 @@ func TestWalker(t *testing.T) {
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			tmp, root, pathLayout := makeFs(t, test.paths)
+			tmp, root, pathLayout := makeFs(t, test.paths, test.symlinks)
+			if test.root != "" {
+				root = filepath.Join(tmp, test.root)
+			}
 			var seq []string
 			err := walker.DepthFirst(impath.MustAbs(root), test.filter, 1, func(path, virtualPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep {
 				if err != nil {
 					t.Errorf("unexpected error: %v", err)
+					return walker.Cancel
 				}
 				p, _ := filepath.Rel(tmp, path.String())
 				seq = append(seq, p)
@@ -139,6 +186,9 @@ func TestWalker(t *testing.T) {
 				// Defer once to avoid infinite loops.
 				if next == walker.Defer {
 					test.pathStep[p] = walker.Continue
+				}
+				if info != nil && info.Mode()&fs.ModeSymlink == fs.ModeSymlink && test.symlinkSkip[p] {
+					return walker.Skip
 				}
 				return next
 			})
@@ -153,11 +203,11 @@ func TestWalker(t *testing.T) {
 	}
 }
 
-func makeFs(t *testing.T, paths []string) (string, string, map[string][]string) {
+func makeFs(t *testing.T, paths []string, symlinks map[string]string) (string, string, map[string][]string) {
 	t.Helper()
 
-	if len(paths) == 0 {
-		t.Fatalf("paths cannot be empty")
+	if len(paths) == 0 && len(symlinks) == 0 {
+		t.Fatalf("paths and symlinks cannot be both empty")
 	}
 
 	// Map each dir to its children.
@@ -165,6 +215,12 @@ func makeFs(t *testing.T, paths []string) (string, string, map[string][]string) 
 	for _, p := range paths {
 		parent := filepath.Dir(p)
 		pathLayout[parent] = append(pathLayout[parent], p)
+	}
+	for p, trg := range symlinks {
+		parent := filepath.Dir(p)
+		pathLayout[parent] = append(pathLayout[parent], p)
+		parent = filepath.Dir(trg)
+		pathLayout[parent] = append(pathLayout[parent], trg)
 	}
 	// Recursively parse out parents from other parents.
 	// E.g. if the map has the keys foo/bar and bar/baz, it should also include
@@ -193,23 +249,35 @@ func makeFs(t *testing.T, paths []string) (string, string, map[string][]string) 
 
 	tmp := t.TempDir()
 	for _, p := range paths {
-		p := filepath.Join(tmp, p)
-		d := p
-		if !strings.HasSuffix(p, "/") {
-			d = filepath.Dir(p)
-		}
-		if err := os.MkdirAll(d, 0766); err != nil {
-			t.Fatalf("io error: %v", err)
-		}
-		if p == d {
-			continue
-		}
-		if err := os.WriteFile(p, nil, 0666); err != nil {
-			t.Fatalf("io error: %v", err)
+		createFile(t, tmp, p)
+	}
+
+	for p, trg := range symlinks {
+		createFile(t, tmp, trg)
+		err := os.Symlink(filepath.Join(tmp, trg), filepath.Join(tmp, p))
+		if err != nil {
+			t.Errorf("io error: %v", err)
 		}
 	}
 
 	return tmp, filepath.Join(tmp, root), pathLayout
+}
+
+func createFile(t *testing.T, parent, p string) {
+	// Check for suffix before joining since filepath.Join removes trailing slashes.
+	d := p
+	if !strings.HasSuffix(p, "/") {
+		d = filepath.Dir(p)
+	}
+	if err := os.MkdirAll(filepath.Join(parent, d), 0766); err != nil {
+		t.Fatalf("io error: %v", err)
+	}
+	if p == d {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(parent, p), nil, 0666); err != nil {
+		t.Fatalf("io error: %v", err)
+	}
 }
 
 // validateSequence checks that every path is visited after its children.

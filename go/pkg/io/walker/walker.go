@@ -126,7 +126,7 @@ func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn 
 
 		// For new paths, pre-access.
 		// For pre-accessed paths (including processed directories), post-access.
-		dirElem, next, errVisit := visit(e, exclude, fn)
+		deferredElem, next, errVisit := visit(e, exclude, fn)
 		if next == Cancel {
 			return errVisit
 		}
@@ -138,9 +138,9 @@ func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn 
 			pending.insert(e, pi+1)
 			continue
 		}
-		// If it's a pre-accessed directory, schedule processing and post-access.
-		if dirElem != nil {
-			pending.push(*dirElem)
+		// If it's a pre-accessed directory or a followed symlink, schedule processing and post-access.
+		if deferredElem != nil {
+			pending.push(*deferredElem)
 			continue
 		}
 	}
@@ -151,7 +151,7 @@ func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn 
 // visit performs pre-access, stat, and/or post-access depending on the state of the element.
 // Return values:
 //
-//	*elem is nil unless the path is a directory that was not post-accessed.
+//	*elem is nil unless the visit has a deferred path, which is either a directory that was not post-accessed or a symlink target.
 //	NextStep is one of Defer, Continue, Skip, or Cancel.
 //	error is either ErrBadNextStep or nil.
 func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
@@ -198,9 +198,22 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 	if next == Cancel || next == Skip {
 		return nil, next, nil
 	}
-	if next == Replace && e.info.Mode()&fs.ModeSymlink == fs.ModeSymlink {
-		// TODO
-		return nil, Continue, nil
+	if e.info.Mode()&fs.ModeSymlink == fs.ModeSymlink {
+		if next == Continue {
+			target, errTarget := os.Readlink(e.path.String())
+			if errTarget != nil {
+				next = fn(e.path, e.path, nil, errTarget)
+				if next != Skip && next != Cancel {
+					return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`readlink failed and expecting "Skip" or "Cancel", but got %q`, stepName(next)))
+				}
+				return nil, next, nil
+			}
+			return &elem{path: impath.MustAbs(target)}, Continue, nil
+		}
+		if next == Replace {
+			// TODO
+			return nil, Continue, nil
+		}
 	}
 	if next != Continue {
 		return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`in post-access and expecting "Continue", but got %q`, stepName(next)))
@@ -215,7 +228,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 // All the directories will be pre-accessed and stat'ed, but not post-accessed.
 // Return values:
 //
-//	[]any is nil unless the directory had defered-children.
+//	[]any is nil unless the directory had deferred-children.
 //	NextStep is one of Continue, Skip, or Cancel.
 //	error is one of ErrBadNextStep or nil.
 func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
@@ -250,7 +263,7 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 			p := impath.MustAbs(e.path.String(), name)
 
 			// Pre-access.
-			dirElem, next, errVisit := visit(elem{path: p}, exclude, fn)
+			deferredElem, next, errVisit := visit(elem{path: p}, exclude, fn)
 			if next == Cancel {
 				return deferred, Cancel, errVisit
 			}
@@ -261,8 +274,8 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 				deferred = append(deferred, elem{path: p})
 				continue
 			}
-			if dirElem != nil {
-				deferred = append(deferred, *dirElem)
+			if deferredElem != nil {
+				deferred = append(deferred, *deferredElem)
 				continue
 			}
 		}
