@@ -407,7 +407,7 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root impath.Absolu
 		defer u.walkSem.Release(1)
 
 		stats := Stats{}
-		err := walker.DepthFirst(root, filter, u.ioCfg.ConcurrentWalkerVisits, func(path impath.Absolute, virtualPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep {
+		err := walker.DepthFirst(root, filter, u.ioCfg.ConcurrentWalkerVisits, func(path impath.Absolute, targetPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep {
 			select {
 			case <-ctx.Done():
 				return walker.Cancel
@@ -418,8 +418,8 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root impath.Absolu
 				return walker.Cancel
 			}
 
-			key := virtualPath.String() + filter.String()
-			parentKey := virtualPath.Dir().String() + filter.String()
+			key := targetPath.String() + filter.String()
+			parentKey := targetPath.Dir().String() + filter.String()
 
 			// Pre-access.
 			if info == nil {

@@ -14,32 +14,39 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
+type (
+	symlinks  = map[string]string
+	istep     = map[int]walker.NextStep
+	pathstep  = map[string]istep
+	pathcount = map[string]int
+)
+
 func TestWalker(t *testing.T) {
 	tests := []struct {
-		name               string
-		paths              []string
-		symlinks           map[string]string
-		root               string
-		filter             *walker.Filter
-		pathStep           map[string]walker.NextStep
-		symlinkSkip        map[string]bool
-		wantPathVisitCount map[string]int
-		wantErr            error
+		name             string
+		paths            []string
+		symlinks         symlinks
+		root             string
+		filter           *walker.Filter
+		pathstep         pathstep
+		wantRealCount    pathcount
+		wantDesiredCount pathcount
+		wantErr          error
 	}{
 		{
-			name:               "single_file",
-			paths:              []string{"foo.c"},
-			wantPathVisitCount: map[string]int{"foo.c": 2},
+			name:          "single_file",
+			paths:         []string{"foo.c"},
+			wantRealCount: pathcount{"foo.c": 2},
 		},
 		{
-			name:               "empty_dir",
-			paths:              []string{"foo"},
-			wantPathVisitCount: map[string]int{"foo": 2},
+			name:          "empty_dir",
+			paths:         []string{"foo"},
+			wantRealCount: pathcount{"foo": 2},
 		},
 		{
-			name:               "dir_single_file",
-			paths:              []string{"foo/bar.c"},
-			wantPathVisitCount: map[string]int{"foo": 2, "foo/bar.c": 2},
+			name:          "dir_single_file",
+			paths:         []string{"foo/bar.c"},
+			wantRealCount: pathcount{"foo": 2, "foo/bar.c": 2},
 		},
 		{
 			name: "single_level",
@@ -47,7 +54,7 @@ func TestWalker(t *testing.T) {
 				"foo/bar.c",
 				"foo/baz.c",
 			},
-			wantPathVisitCount: map[string]int{"foo": 2, "foo/bar.c": 2, "foo/baz.c": 2},
+			wantRealCount: pathcount{"foo": 2, "foo/bar.c": 2, "foo/baz.c": 2},
 		},
 		{
 			name: "two_levels_simple",
@@ -55,7 +62,7 @@ func TestWalker(t *testing.T) {
 				"foo/a.z",
 				"foo/bar/b.z",
 			},
-			wantPathVisitCount: map[string]int{"foo": 2, "foo/a.z": 2, "foo/bar": 2, "foo/bar/b.z": 2},
+			wantRealCount: pathcount{"foo": 2, "foo/a.z": 2, "foo/bar": 2, "foo/bar/b.z": 2},
 		},
 		{
 			name: "two_levels",
@@ -66,7 +73,7 @@ func TestWalker(t *testing.T) {
 				"foo/bar/baz/d.z",
 				"foo/bar/baz/e.z",
 			},
-			wantPathVisitCount: map[string]int{
+			wantRealCount: pathcount{
 				"foo":             2,
 				"foo/a.z":         2,
 				"foo/b.z":         2,
@@ -78,28 +85,28 @@ func TestWalker(t *testing.T) {
 			},
 		},
 		{
-			name:               "skip_file_by_path",
-			paths:              []string{"foo.c"},
-			filter:             &walker.Filter{Regexp: regexp.MustCompile("foo.c")},
-			wantPathVisitCount: map[string]int{},
+			name:          "skip_file_by_path",
+			paths:         []string{"foo.c"},
+			filter:        &walker.Filter{Regexp: regexp.MustCompile("foo.c")},
+			wantRealCount: pathcount{},
 		},
 		{
-			name:               "path_cancel",
-			paths:              []string{"foo.c"},
-			pathStep:           map[string]walker.NextStep{"foo.c": walker.Cancel},
-			wantPathVisitCount: map[string]int{"foo.c": 1},
+			name:          "path_cancel",
+			paths:         []string{"foo.c"},
+			pathstep:      pathstep{"foo.c": istep{1: walker.Cancel}},
+			wantRealCount: pathcount{"foo.c": 1},
 		},
 		{
-			name:               "single_file_deferred",
-			paths:              []string{"foo.c"},
-			pathStep:           map[string]walker.NextStep{"foo.c": walker.Defer},
-			wantPathVisitCount: map[string]int{"foo.c": 3},
+			name:          "single_file_deferred",
+			paths:         []string{"foo.c"},
+			pathstep:      pathstep{"foo.c": istep{1: walker.Defer}},
+			wantRealCount: pathcount{"foo.c": 3},
 		},
 		{
-			name:               "single_dir_deferred",
-			paths:              []string{"foo/"},
-			pathStep:           map[string]walker.NextStep{"foo": walker.Defer},
-			wantPathVisitCount: map[string]int{"foo": 3},
+			name:          "single_dir_deferred",
+			paths:         []string{"foo/"},
+			pathstep:      pathstep{"foo": istep{1: walker.Defer}},
+			wantRealCount: pathcount{"foo": 3},
 		},
 		{
 			name: "deferred",
@@ -110,11 +117,11 @@ func TestWalker(t *testing.T) {
 				"foo/bar/baz/d.z",
 				"foo/bar/baz/e.z",
 			},
-			pathStep: map[string]walker.NextStep{
-				"foo/b.z":         walker.Defer,
-				"foo/bar/baz/e.z": walker.Defer,
+			pathstep: pathstep{
+				"foo/b.z":         istep{1: walker.Defer},
+				"foo/bar/baz/e.z": istep{1: walker.Defer},
 			},
-			wantPathVisitCount: map[string]int{
+			wantRealCount: pathcount{
 				"foo":             2,
 				"foo/a.z":         2,
 				"foo/b.z":         3,
@@ -127,8 +134,8 @@ func TestWalker(t *testing.T) {
 		},
 		{
 			name:     "file_symlink",
-			symlinks: map[string]string{"foo.c": "bar.c"},
-			wantPathVisitCount: map[string]int{
+			symlinks: symlinks{"foo.c": "bar.c"},
+			wantRealCount: pathcount{
 				"foo.c": 2,
 				"bar.c": 2,
 			},
@@ -136,9 +143,9 @@ func TestWalker(t *testing.T) {
 		{
 			name:     "dir_symlink",
 			paths:    []string{"foo/bar.c"},
-			symlinks: map[string]string{"foo.c": "foo/"},
+			symlinks: symlinks{"foo.c": "foo/"},
 			root:     "foo.c",
-			wantPathVisitCount: map[string]int{
+			wantRealCount: pathcount{
 				"foo.c":     2,
 				"foo/bar.c": 2,
 				"foo":       2,
@@ -147,9 +154,9 @@ func TestWalker(t *testing.T) {
 		{
 			name:     "nested_symlink",
 			paths:    []string{"foo/bar.c"},
-			symlinks: map[string]string{"foo/baz.c": "a.z"},
-			root:     "foo", // Otherwise it's nondeterministic which top-level path is selected.
-			wantPathVisitCount: map[string]int{
+			symlinks: symlinks{"foo/baz.c": "a.z"},
+			root:     "foo", // Otherwise which top-level path is selected is nondeterministic.
+			wantRealCount: pathcount{
 				"foo":       2,
 				"foo/bar.c": 2,
 				"foo/baz.c": 2,
@@ -157,12 +164,60 @@ func TestWalker(t *testing.T) {
 			},
 		},
 		{
-			name:        "skip_symlink",
-			paths:       []string{"foo/bar.c"},
-			symlinks:    map[string]string{"foo.c": "foo/"},
-			symlinkSkip: map[string]bool{"foo.c": true},
-			wantPathVisitCount: map[string]int{
+			name:     "skip_symlink",
+			paths:    []string{"foo/bar.c"},
+			symlinks: symlinks{"foo.c": "foo/"},
+			pathstep: pathstep{"foo.c": istep{2: walker.Skip}},
+			wantRealCount: pathcount{
 				"foo.c": 2,
+			},
+		},
+		{
+			name:     "relative_symlink",
+			symlinks: symlinks{"foo/bar.c": "./baz.c"},
+			wantRealCount: pathcount{
+				"foo":       2,
+				"foo/bar.c": 2,
+				"foo/baz.c": 4, // 2 as a child of foo, and 2 as a symlink target.
+			},
+		},
+		{
+			name:     "replace_single_symlink",
+			symlinks: symlinks{"foo.c": "bar.c"},
+			root:     "foo.c",
+			pathstep: pathstep{"foo.c": istep{2: walker.Replace}},
+			wantRealCount: pathcount{
+				"foo.c": 2,
+				"bar.c": 2,
+			},
+			wantDesiredCount: pathcount{
+				"foo.c": 2,
+			},
+		},
+		{
+			name: "replace_symlink_dir",
+			paths: []string{
+				"bar/a.z",
+				"bar/b.z",
+				"bar/c/d.z",
+			},
+			symlinks: symlinks{"foo": "bar/"},
+			root:     "foo",
+			pathstep: pathstep{"foo": istep{2: walker.Replace}},
+			wantRealCount: pathcount{
+				"foo":       2,
+				"bar":       2,
+				"bar/a.z":   2,
+				"bar/b.z":   2,
+				"bar/c":   2,
+				"bar/c/d.z": 2,
+			},
+			wantDesiredCount: pathcount{
+				"foo":       2,
+				"foo/a.z":   2,
+				"foo/b.z":   2,
+				"foo/c":   2,
+				"foo/c/d.z": 2,
 			},
 		},
 	}
@@ -170,57 +225,87 @@ func TestWalker(t *testing.T) {
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			tmp, root, pathLayout := makeFs(t, test.paths, test.symlinks)
+			tmp, root, fsLayout := makeFs(t, test.paths, test.symlinks)
 			if test.root != "" {
 				root = filepath.Join(tmp, test.root)
 			}
-			var seq []string
-			err := walker.DepthFirst(impath.MustAbs(root), test.filter, 1, func(path, virtualPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep {
+			var realSeq []string
+			dpvc := pathcount{}
+			err := walker.DepthFirst(impath.MustAbs(root), test.filter, 1, func(realPath, desiredPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep {
 				if err != nil {
 					t.Errorf("unexpected error: %v", err)
 					return walker.Cancel
 				}
-				p, _ := filepath.Rel(tmp, path.String())
-				seq = append(seq, p)
-				next := test.pathStep[p]
-				// Defer once to avoid infinite loops.
-				if next == walker.Defer {
-					test.pathStep[p] = walker.Continue
+				p, _ := filepath.Rel(tmp, realPath.String())
+				realSeq = append(realSeq, p)
+				dp, _ := filepath.Rel(tmp, desiredPath.String())
+				if dp != p {
+					dpvc[dp]++
 				}
-				if info != nil && info.Mode()&fs.ModeSymlink == fs.ModeSymlink && test.symlinkSkip[p] {
-					return walker.Skip
+
+				next := test.pathstep[p][1]
+				// Only defer once to avoid infinite loops.
+				if next == walker.Defer {
+					test.pathstep[p] = istep{1: walker.Continue}
+				}
+				if info != nil {
+					next = test.pathstep[p][2]
 				}
 				return next
 			})
 			if !errors.Is(err, test.wantErr) {
 				t.Errorf("unexpected error: %v", err)
 			}
-			pathVisitCount := validateSequence(t, seq, pathLayout)
-			if diff := cmp.Diff(test.wantPathVisitCount, pathVisitCount); diff != "" {
+			pvc := validateSequence(t, realSeq, fsLayout)
+			if diff := cmp.Diff(test.wantRealCount, pvc); diff != "" {
 				t.Errorf("path visit count mismatch (-want +got):\n%s", diff)
+			}
+			if len(test.wantDesiredCount) == 0 && len(dpvc) == 0 {
+				return
+			}
+			if diff := cmp.Diff(test.wantDesiredCount, dpvc); diff != "" {
+				t.Errorf("desired path visit count mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
 }
 
-func makeFs(t *testing.T, paths []string, symlinks map[string]string) (string, string, map[string][]string) {
+func makeFs(t *testing.T, paths []string, symlinks symlinks) (string, string, map[string][]string) {
 	t.Helper()
 
 	if len(paths) == 0 && len(symlinks) == 0 {
 		t.Fatalf("paths and symlinks cannot be both empty")
 	}
 
+	tmp := t.TempDir()
+
 	// Map each dir to its children.
-	pathLayout := map[string][]string{}
+	fsLayout := map[string][]string{}
 	for _, p := range paths {
+		createFile(t, tmp, p)
 		parent := filepath.Dir(p)
-		pathLayout[parent] = append(pathLayout[parent], p)
+		fsLayout[parent] = append(fsLayout[parent], p)
 	}
-	for p, trg := range symlinks {
+	for p, content := range symlinks {
+		trg := content
+		// If the symlink content is relative to the symlink itself, append it to its parent.
+		// Otherwise, make it absolute.
+		if strings.HasPrefix(content, "./") {
+			content = content[2:]
+			trg = filepath.Join(filepath.Dir(p), content)
+		} else {
+			content = filepath.Join(tmp, content)
+		}
+		createFile(t, tmp, trg)
+		err := os.Symlink(content, filepath.Join(tmp, p))
+		if err != nil {
+			t.Errorf("io error: %v", err)
+		}
+
 		parent := filepath.Dir(p)
-		pathLayout[parent] = append(pathLayout[parent], p)
+		fsLayout[parent] = append(fsLayout[parent], p)
 		parent = filepath.Dir(trg)
-		pathLayout[parent] = append(pathLayout[parent], trg)
+		fsLayout[parent] = append(fsLayout[parent], trg)
 	}
 	// Recursively parse out parents from other parents.
 	// E.g. if the map has the keys foo/bar and bar/baz, it should also include
@@ -228,39 +313,26 @@ func makeFs(t *testing.T, paths []string, symlinks map[string]string) (string, s
 	moreParents := true
 	for moreParents {
 		moreParents = false
-		for p := range pathLayout {
+		for p := range fsLayout {
 			parent := filepath.Dir(p)
-			c := pathLayout[parent]
+			c := fsLayout[parent]
 			if len(c) > 0 {
 				continue
 			}
-			t.Logf("parent: %q", parent)
 			if parent != "." {
 				moreParents = true
 			}
-			pathLayout[parent] = append(c, p)
+			fsLayout[parent] = append(c, p)
 		}
 	}
+	t.Logf("filesystem layout: %v", fsLayout)
 	// The . must be the root of all directories.
-	if _, ok := pathLayout["."]; !ok {
-		t.Fatalf("root not present in pathChildren at . directory; is there an absolute path in the list? %v", pathLayout)
+	if _, ok := fsLayout["."]; !ok {
+		t.Fatalf("root not present in pathChildren at . directory; is there an absolute path in the list? %v", fsLayout)
 	}
-	root := pathLayout["."][0]
+	root := fsLayout["."][0]
 
-	tmp := t.TempDir()
-	for _, p := range paths {
-		createFile(t, tmp, p)
-	}
-
-	for p, trg := range symlinks {
-		createFile(t, tmp, trg)
-		err := os.Symlink(filepath.Join(tmp, trg), filepath.Join(tmp, p))
-		if err != nil {
-			t.Errorf("io error: %v", err)
-		}
-	}
-
-	return tmp, filepath.Join(tmp, root), pathLayout
+	return tmp, filepath.Join(tmp, root), fsLayout
 }
 
 func createFile(t *testing.T, parent, p string) {
@@ -281,15 +353,13 @@ func createFile(t *testing.T, parent, p string) {
 }
 
 // validateSequence checks that every path is visited after its children.
-func validateSequence(t *testing.T, seq []string, pathLayout map[string][]string) map[string]int {
+func validateSequence(t *testing.T, seq []string, fsLayout map[string][]string) pathcount {
 	t.Helper()
 
 	t.Logf("validating sequence: %v\n", seq)
-	var parent string
-	pathVisitCount := map[string]int{}
+	pathVisitCount := pathcount{}
 	pendingParent := map[string]bool{}
 	for _, p := range seq {
-		t.Logf("parent: %q, path: %q\n", parent, p)
 		pathVisitCount[p] += 1
 		parent := filepath.Dir(p)
 		// Parent should be visited after this child.
@@ -299,7 +369,11 @@ func validateSequence(t *testing.T, seq []string, pathLayout map[string][]string
 	}
 	delete(pendingParent, ".")
 	if len(pendingParent) > 0 {
-		t.Errorf("incomplete traversal: %v", pendingParent)
+		pending := make([]string, 0, len(pendingParent))
+		for p := range pendingParent {
+			pending = append(pending, p)
+		}
+		t.Errorf("some paths were not fully visited: %v", pending)
 	}
 	return pathVisitCount
 }

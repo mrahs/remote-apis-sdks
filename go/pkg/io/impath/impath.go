@@ -14,7 +14,7 @@ import (
 var (
 	ErrNotAbsolute   = errors.New("path is not absolute")
 	ErrNotRelative   = errors.New("path is not relative")
-	ErrNotDescendant = errors.New("target is not descendant of base")
+	ErrNotDescendant = errors.New("target is not a descendant of base")
 	Root             = os.Getenv("SYSTEMDRIVE") + string(os.PathSeparator)
 )
 

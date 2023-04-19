@@ -43,12 +43,20 @@ var (
 	ErrBadNextStep = errors.New("walker: invalid next step")
 )
 
-// WalkFunc defines the callback signature that clients must specify for walker implementatinos.
+// WalkFunc defines the callback signature that clients must specify for walker implementations.
+//
+// Arguments:
+//   realPath is the real path that can be used to access the file.
+//   desiredPath is always identical to realPath unless the traversal is replacing a symlink, in which case it is the desired target path.
+//   info is the result of stating realPath. It is nil for pre-access calls and when err is set.
+//   err is IO error or nil.
+//
 // More details about when this function is called and how its return value is used
 // is provided by each walker implementation in this package.
-type WalkFunc func(path impath.Absolute, virtualPath impath.Absolute, info fs.FileInfo, err error) NextStep
+type WalkFunc func(realPath impath.Absolute, desiredPath impath.Absolute, info fs.FileInfo, err error) NextStep
 
 // DepthFirst walks the filesystem tree rooted at the specified root in depth-first-search style traversal.
+// That is, every directory is visited after all its descendants have been visited.
 //
 // The concurencyLimit value must be > 0.
 //
@@ -89,7 +97,7 @@ func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn 
 		exclude = &Filter{Regexp: exclude.Regexp, Mode: exclude.Mode}
 	}
 	pending := &stack{}
-	pending.push(elem{path: root})
+	pending.push(elem{realPath: root})
 	parentIndex := &stack{}
 
 	for pending.len() > 0 {
@@ -134,7 +142,7 @@ func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn 
 			continue
 		}
 		if next == Defer {
-			// Reschedule a visit before its parent.
+			// Reschedule a visit for this path before its parent.
 			pending.insert(e, pi+1)
 			continue
 		}
@@ -149,20 +157,28 @@ func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn 
 }
 
 // visit performs pre-access, stat, and/or post-access depending on the state of the element.
+//
+// If Defer is returned, it refers to the element from the arguments, not the returned reference.
+// If the returned element reference is not nil, the returned NextStep is always Continue.
+//
 // Return values:
 //
 //	*elem is nil unless the visit has a deferred path, which is either a directory that was not post-accessed or a symlink target.
 //	NextStep is one of Defer, Continue, Skip, or Cancel.
 //	error is either ErrBadNextStep or nil.
 func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
+	if e.desiredPath == nil {
+		e.desiredPath = &e.realPath
+	}
+
 	// If the filter applies to the path only, use it here.
-	if exclude != nil && exclude.Mode == 0 && exclude.Path(e.path.String()) {
+	if exclude != nil && exclude.Mode == 0 && exclude.Path(e.desiredPath.String()) {
 		return nil, Skip, nil
 	}
 
 	if e.info == nil {
 		// Pre-access.
-		next := fn(e.path, e.path, nil, nil)
+		next := fn(e.realPath, *e.desiredPath, nil, nil)
 		if next == Cancel || next == Skip {
 			return nil, next, nil
 		}
@@ -173,9 +189,9 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`in pre-access and expecting "Continue", but got %q`, stepName(next)))
 		}
 
-		info, errStat := os.Lstat(e.path.String())
+		info, errStat := os.Lstat(e.realPath.String())
 		if errStat != nil {
-			next = fn(e.path, e.path, nil, errStat)
+			next = fn(e.realPath, *e.desiredPath, nil, errStat)
 			if next != Skip && next != Cancel {
 				return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`stat failed and expecting "Skip" or "Cancel", but got %q`, stepName(next)))
 			}
@@ -183,7 +199,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 		}
 
 		// If the filter applies to path and mode, use it here.
-		if exclude != nil && exclude.Mode != 0 && exclude.File(e.path.String(), info.Mode()) {
+		if exclude != nil && exclude.Mode != 0 && exclude.File(e.desiredPath.String(), info.Mode()) {
 			return nil, Skip, nil
 		}
 
@@ -194,32 +210,41 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 	}
 
 	// Post-access.
-	next := fn(e.path, e.path, e.info, nil)
+	next := fn(e.realPath, *e.desiredPath, e.info, nil)
 	if next == Cancel || next == Skip {
 		return nil, next, nil
 	}
-	if e.info.Mode()&fs.ModeSymlink == fs.ModeSymlink {
-		if next == Continue {
-			target, errTarget := os.Readlink(e.path.String())
-			if errTarget != nil {
-				next = fn(e.path, e.path, nil, errTarget)
-				if next != Skip && next != Cancel {
-					return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`readlink failed and expecting "Skip" or "Cancel", but got %q`, stepName(next)))
-				}
-				return nil, next, nil
-			}
-			return &elem{path: impath.MustAbs(target)}, Continue, nil
+	if e.info.Mode()&fs.ModeSymlink != fs.ModeSymlink {
+		if next != Continue {
+			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`post-access done and expecting "Continue", but got %q`, stepName(next)))
 		}
-		if next == Replace {
-			// TODO
-			return nil, Continue, nil
-		}
-	}
-	if next != Continue {
-		return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`in post-access and expecting "Continue", but got %q`, stepName(next)))
+		return nil, next, nil
 	}
 
-	return nil, next, nil
+	content, errTarget := os.Readlink(e.realPath.String())
+	if errTarget != nil {
+		next = fn(e.realPath, *e.desiredPath, nil, errTarget)
+		if next != Skip && next != Cancel {
+			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`readlink failed and expecting "Skip" or "Cancel", but got %q`, stepName(next)))
+		}
+		return nil, next, nil
+	}
+
+	// If the symlink content is a relative path, append it to the symlink's directory to make it absolute.
+	target, errIm := impath.Abs(content)
+	if errIm != nil {
+		target = e.realPath.Dir().Append(impath.MustRel(content))
+	}
+
+	if next == Continue {
+		return &elem{realPath: target}, Continue, nil
+	}
+
+	if next == Replace {
+		return &elem{realPath: target, desiredPath: &e.realPath}, Continue, nil
+	}
+
+	return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`post-access for a symlink and expecting "Continue" or "Replace", but got %q`, stepName(next)))
 }
 
 // processDir accepts a pre-accessed directory and iterates over all of its children.
@@ -228,14 +253,14 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 // All the directories will be pre-accessed and stat'ed, but not post-accessed.
 // Return values:
 //
-//	[]any is nil unless the directory had deferred-children.
+//	[]any is nil unless the directory had deferred-children, which includes directories and client-deferred paths.
 //	NextStep is one of Continue, Skip, or Cancel.
-//	error is one of ErrBadNextStep or nil.
+//	error is either ErrBadNextStep or nil.
 func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 	// If opening fails, let the client choose whether to skip or cancel.
-	f, errOpen := os.Open(e.path.String())
+	f, errOpen := os.Open(e.realPath.String())
 	if errOpen != nil {
-		next := fn(e.path, e.path, nil, errOpen)
+		next := fn(e.realPath, *e.desiredPath, nil, errOpen)
 		if next != Skip && next != Cancel {
 			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`openning dir failed; expecting "Skip" or "Cancel", but got %q`, stepName(next)))
 		}
@@ -251,7 +276,7 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 
 		// If reading fails, let the client choose whether to skip or cancel.
 		if errRead != nil && errRead != io.EOF {
-			next := fn(e.path, e.path, nil, errRead)
+			next := fn(e.realPath, *e.desiredPath, nil, errRead)
 			if next != Skip && next != Cancel {
 				return deferred, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`reading dir failed; expecting "Skip" or "Cancel", but got %q`, stepName(next)))
 			}
@@ -259,11 +284,13 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 		}
 
 		for _, name := range names {
-			// p is guaranteed to be absolute.
-			p := impath.MustAbs(e.path.String(), name)
+			// name is relative.
+			relName := impath.MustRel(name)
+			rp := e.realPath.Append(relName)
+			dp := e.desiredPath.Append(relName)
 
 			// Pre-access.
-			deferredElem, next, errVisit := visit(elem{path: p}, exclude, fn)
+			deferredElem, next, errVisit := visit(elem{realPath: rp, desiredPath: &dp}, exclude, fn)
 			if next == Cancel {
 				return deferred, Cancel, errVisit
 			}
@@ -271,7 +298,7 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 				continue
 			}
 			if next == Defer {
-				deferred = append(deferred, elem{path: p})
+				deferred = append(deferred, elem{realPath: rp})
 				continue
 			}
 			if deferredElem != nil {
@@ -287,10 +314,12 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 }
 
 type elem struct {
-	path impath.Absolute
 	info fs.FileInfo
-	// a deferred parent is a directory that has already been pre-accessed and processed, but still
-	// pending a post-access.
+	realPath impath.Absolute
+	// desiredPath is what a symlink target (or target descendant) should look like when it's replaced.
+	// Otherwise, it should be identical to the realPath field.
+	desiredPath *impath.Absolute
+	// a deferred parent is a directory that has already been pre-accessed and processed, but is still pending a post-access.
 	deferredParent bool
 }
 
