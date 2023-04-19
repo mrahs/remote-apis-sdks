@@ -231,7 +231,7 @@ func TestWalker(t *testing.T) {
 			}
 			var realSeq []string
 			dpvc := pathcount{}
-			err := walker.DepthFirst(impath.MustAbs(root), test.filter, 1, func(realPath, desiredPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep {
+			err := walker.DepthFirst(impath.MustAbs(root), test.filter, func(realPath, desiredPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep {
 				if err != nil {
 					t.Errorf("unexpected error: %v", err)
 					return walker.Cancel

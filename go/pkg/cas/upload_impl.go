@@ -3,7 +3,6 @@ package cas
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
@@ -63,11 +63,19 @@ type blob struct {
 	err    error
 }
 
-func (u *batchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error) {
+// WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
+//
+// The specified size is used to toggle compression as well as report some stats. It must be reflect the actual number of bytes the specified reader has to give.
+// The server is notified to finalize the resource name and further writes may not succeed.
+// The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
+// In case of error while the returned stats indicate that all the bytes were sent, it is still not a guarantee all the bytes
+// were received by the server since an acknlowedgement was not observed.
+func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error) {
 	return u.writeBytes(ctx, name, r, size, offset, true)
 }
 
-func (u *batchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error) {
+// WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
+func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error) {
 	return u.writeBytes(ctx, name, r, size, offset, false)
 }
 
@@ -106,7 +114,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 			// Closing the encoder is necessary to flush remaining bytes.
 			defer func() {
 				if errClose := enc.Close(); errClose != nil {
-					errCompr = fmt.Errorf("%w: %v: %v", ErrCompression, errClose, errCompr)
+					errCompr = errors.Join(ErrCompression, errClose, errCompr)
 				}
 			}()
 
@@ -119,7 +127,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 				// pr was closed first, which means the actual error is on that end.
 				return
 			case errEnc != nil:
-				errCompr = fmt.Errorf("%w: %v", ErrCompression, errEnc)
+				errCompr = errors.Join(ErrCompression, errEnc)
 				return
 			}
 		}()
@@ -130,7 +138,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 
 	stream, errStream := u.byteStream.Write(ctx)
 	if errStream != nil {
-		return nil, fmt.Errorf("%w, %v", ErrGRPC, errStream)
+		return nil, errors.Join(ErrGRPC, errStream)
 	}
 
 	buf := u.buffers.Get().([]byte)
@@ -146,7 +154,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	for {
 		n, errRead := src.Read(buf)
 		if errRead != nil && errRead != io.EOF {
-			err = fmt.Errorf("%w: %v: %v", ErrIO, errRead, err)
+			err = errors.Join(ErrIO, errRead, err)
 			break
 		}
 
@@ -163,7 +171,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 			})
 		})
 		if errStream != nil && errStream != io.EOF {
-			err = fmt.Errorf("%w: %v: %v", ErrGRPC, errStream, err)
+			err = errors.Join(ErrGRPC, errStream, err)
 			break
 		}
 
@@ -185,7 +193,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	// However, do not close the reader if it is the given argument; hence the boolean guard.
 	if srcCloser, ok := src.(io.Closer); ok && withCompression {
 		if errClose := srcCloser.Close(); errClose != nil {
-			err = fmt.Errorf("%w: %v: %v", ErrIO, errClose, err)
+			err = errors.Join(ErrIO, errClose, err)
 		}
 	}
 
@@ -194,7 +202,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	// This is necessary because the encoder's goroutine currently owns errCompr and nRawBytes.
 	encWg.Wait()
 	if errCompr != nil {
-		err = fmt.Errorf("%w: %v: %v", ErrCompression, errCompr, err)
+		err = errors.Join(ErrCompression, errCompr, err)
 	}
 
 	// Capture stats before processing errors.
@@ -225,18 +233,33 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 
 	res, errClose := stream.CloseAndRecv()
 	if errClose != nil {
-		return stats, fmt.Errorf("%w: %v: %v", ErrGRPC, errClose, err)
+		return stats, errors.Join(ErrGRPC, errClose, err)
 	}
 
 	// CommittedSize is based on the uncompressed size of the blob.
 	if !cacheHit && res.CommittedSize != size {
-		err = fmt.Errorf("%w: committed size mismatch: got %d, want %d: %v", ErrGRPC, res.CommittedSize, size, err)
+		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d", res.CommittedSize, size), err)
 	}
 
 	return stats, err
 }
 
-func (u *batchingUploader) Upload(ctx context.Context, paths []impath.Absolute, slo slo.Options, shouldSkip *walker.Filter) ([]digest.Digest, *Stats, error) {
+// Upload processes the specified blobs for upload. Blobs that already exist in the CAS are not uploaded.
+// Any path or file that matches the specified filter is excluded.
+// Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
+//
+// Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
+// The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
+// With infinite speed and limits, every blob will uploaded exactly once. On the other extreme, every blob is uploaded
+// alone and no unification takes place.
+// In the average case, blobs that make it into the same bundle will be deduplicated.
+//
+// Returns a slice of the digests of the blobs that were uploaded (excluding the ones that already exist in the CAS).
+// If the returned error is nil, any digest that is not in the returned slice was already in the CAS.
+// If the returned error is not nil, the returned slice may be incomplete (fatal error) and every digest
+// in it may or may not have been successfully uploaded (individual errors).
+// The returned error wraps a number of errors proportional to the length of the specified slice.
+func (u *BatchingUploader) Upload(ctx context.Context, paths []impath.Absolute, slo slo.Options, shouldSkip *walker.Filter) ([]digest.Digest, *Stats, error) {
 	if len(paths) < 1 {
 		return nil, nil, nil
 	}
@@ -276,7 +299,7 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []impath.Absolute, 
 			uploaded = append(uploaded, r.Digest)
 
 		default:
-			err = fmt.Errorf("%w: %v", r.Err, err)
+			err = errors.Join(r.Err, err)
 		}
 		stats.Add(r.Stats)
 	}
@@ -284,7 +307,15 @@ func (u *batchingUploader) Upload(ctx context.Context, paths []impath.Absolute, 
 	return uploaded, stats, err
 }
 
-func (u *streamingUploader) Upload(context.Context, <-chan impath.Absolute, slo.Options, *walker.Filter) <-chan UploadResponse {
+// Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
+//
+// Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
+// The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
+// With infinite speed and limits, every blob will uploaded exactly once. On the other extreme, every blob is uploaded
+// alone and no unification takes place.
+// In the average case, blobs that make it into the same bundle will be grouped by digest. Once a digest is processed, each requester of that
+// digest receives a copy of the coorresponding UploadResponse.
+func (u *StreamingUploader) Upload(context.Context, <-chan impath.Absolute, slo.Options, *walker.Filter) <-chan UploadResponse {
 	panic("not yet implemented")
 }
 
@@ -353,7 +384,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 		case b.err != nil:
 			// Digestion failed. The error should contain information about the file.
 			u.uploadCallerPubSub.pub(UploadResponse{
-				Err:    b.err,
+				Err: b.err,
 			}, b.tag)
 		case len(b.bytes) > 0:
 			d := digest.NewFromProtoUnvalidated(b.digest)
@@ -406,8 +437,19 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root impath.Absolu
 		defer u.walkWg.Done()
 		defer u.walkSem.Release(1)
 
+		errCh := make(chan error)
+		errWg := sync.WaitGroup{}
+		var err error
+		errWg.Add(1)
+		go func() {
+			defer errWg.Done()
+			for e := range errCh {
+				err = errors.Join(e, err)
+			}
+		}()
+
 		stats := Stats{}
-		err := walker.DepthFirst(root, filter, u.ioCfg.ConcurrentWalkerVisits, func(path impath.Absolute, targetPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep {
+		errWalk := walker.DepthFirst(root, filter, func(path impath.Absolute, targetPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep {
 			select {
 			case <-ctx.Done():
 				return walker.Cancel
@@ -415,6 +457,7 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root impath.Absolu
 			}
 
 			if err != nil {
+				errCh <- err
 				return walker.Cancel
 			}
 
@@ -494,6 +537,13 @@ func (u *uploaderv2) digestAndUploadTree(ctx context.Context, root impath.Absolu
 				return walker.Skip
 			}
 		})
+		// errWalk is always walker.ErrBadNextStep, which means there is a bug in the code above.
+		if errWalk != nil {
+			panic(fmt.Errorf("internal fatal error: %v", errWalk))
+		}
+		close(errCh)
+		errWg.Wait()
+		// err includes any IO errors that happened during the walk.
 		if err != nil {
 			dispatch(blob{err: err, tag: reqTag})
 		}
@@ -615,7 +665,7 @@ func (u *uploaderv2) digestFile(ctx context.Context, path impath.Absolute, info 
 		}
 		defer func() {
 			if errClose := f.Close(); errClose != nil {
-				err = fmt.Errorf("%w: %v", errClose, err)
+				err = errors.Join(errClose, err)
 			}
 		}()
 
@@ -653,7 +703,7 @@ func (u *uploaderv2) digestFile(ctx context.Context, path impath.Absolute, info 
 		if err != nil {
 			errClose := f.Close()
 			if errClose != nil {
-				err = fmt.Errorf("%w: %v", errClose, err)
+				err = errors.Join(errClose, err)
 			}
 		}
 	}()
@@ -819,7 +869,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 			dErr = err
 		}
 		if dErr != nil {
-			dErr = fmt.Errorf("%w: %v", ErrGRPC, dErr)
+			dErr = errors.Join(ErrGRPC, dErr)
 		}
 		tags := bundle[d].tags
 		s := Stats{
@@ -847,7 +897,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	}
 
 	if err != nil {
-		err = fmt.Errorf("%w: %v", ErrGRPC, err)
+		err = errors.Join(ErrGRPC, err)
 	}
 
 	// Report failed requests due to call failure.
@@ -944,11 +994,11 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 				case len(b.path) > 0:
 					f, errOpen := os.Open(b.path)
 					if errOpen != nil {
-						return Stats{BytesRequested: b.digest.SizeBytes}, fmt.Errorf("%w: %v", ErrIO, errOpen)
+						return Stats{BytesRequested: b.digest.SizeBytes}, errors.Join(ErrIO, errOpen)
 					}
 					defer func() {
 						if errClose := f.Close(); errClose != nil {
-							err = fmt.Errorf("%w: %v: %v", ErrIO, errClose, err)
+							err = errors.Join(ErrIO, errClose, err)
 						}
 					}()
 					reader = f

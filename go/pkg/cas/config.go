@@ -62,7 +62,7 @@ type GRPCConfig struct {
 
 	// BundleTimeout sets the maximum duration a call is delayed while bundling.
 	// Bundling is used to ammortize the cost of a gRPC call over time. Instead of sending
-	// many requests with few items, bunlding attempt to maximize the number of items sent in a single request.
+	// many requests with few items, bundling attempt to maximize the number of items sent in a single request.
 	// This includes waiting for a bit to see if more items are requested.
 	BundleTimeout time.Duration
 
@@ -81,10 +81,6 @@ type IOConfig struct {
 	// This affects the number of concurrent upload requests for the uploader since each one requires a walk.
 	// Must be > 0.
 	ConcurrentWalksLimit int
-
-	// ConcurrentWalkerVisits sets the upper bound of concurrent visits per walk.
-	// Must b > 0.
-	ConcurrentWalkerVisits int
 
 	// OpenFilesLimit sets the upper bound for the number of files being simultanuously processed.
 	// Must be > 0.
@@ -263,7 +259,7 @@ func validateGrpcConfig(cfg *GRPCConfig) error {
 }
 
 func validateIOConfig(cfg *IOConfig) error {
-	if cfg.ConcurrentWalksLimit < 1 || cfg.ConcurrentWalkerVisits < 1 || cfg.OpenFilesLimit < 1 || cfg.OpenLargeFilesLimit < 1 || cfg.BufferSize < 1 {
+	if cfg.ConcurrentWalksLimit < 1 || cfg.OpenFilesLimit < 1 || cfg.OpenLargeFilesLimit < 1 || cfg.BufferSize < 1 {
 		return ErrZeroOrNegativeLimit
 	}
 	if cfg.SmallFileSizeThreshold < 0 || cfg.LargeFileSizeThreshold < 0 || cfg.CompressionSizeThreshold < 0 {

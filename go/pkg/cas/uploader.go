@@ -2,17 +2,12 @@ package cas
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"time"
-	"errors"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
-	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pborman/uuid"
@@ -23,25 +18,25 @@ import (
 
 var (
 	// ErrNegativeLimit indicates an invalid value that is < 0.
-	ErrNegativeLimit = errors.New("cas: limit value must be >= 0")
+	ErrNegativeLimit = errors.New("limit value must be >= 0")
 
 	// ErrZeroOrNegativeLimit indicates an invalid value that is <= 0.
-	ErrZeroOrNegativeLimit = errors.New("cas: limit value must be > 0")
+	ErrZeroOrNegativeLimit = errors.New("limit value must be > 0")
 
 	// ErrNilClient indicates an invalid nil argument.
-	ErrNilClient = errors.New("cas: client cannot be nil")
+	ErrNilClient = errors.New("client cannot be nil")
 
 	// ErrCompression indicates an error in the compression routine.
-	ErrCompression = errors.New("cas: compression error")
+	ErrCompression = errors.New("compression error")
 
 	// ErrIO indicates an error in an IO routine.
-	ErrIO = errors.New("cas: io error")
+	ErrIO = errors.New("io error")
 
 	// ErrGRPC indicates an error in a gRPC routine.
-	ErrGRPC = errors.New("cas: grpc error")
+	ErrGRPC = errors.New("grpc error")
 
 	// ErrOversizedItem indicates an item that is too large to fit into the set byte limit for the corresponding gRPC call.
-	ErrOversizedItem = errors.New("cas: oversized item")
+	ErrOversizedItem = errors.New("oversized item")
 
 	// EOR indicates the end of a stream of responses for a particular subscriber.
 	//
@@ -61,86 +56,13 @@ func MakeCompressedWriteResourceName(instanceName, hash string, size int64) stri
 	return fmt.Sprintf("%s/uploads/%s/compressed-blobs/zstd/%s/%d", instanceName, uuid.New(), hash, size)
 }
 
-// BatchingUploader provides a simple imperative API to upload to the CAS.
-type BatchingUploader interface {
-	// MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
-	//
-	// The digests are batched based on the set gRPC limits (count and size).
-	// Errors from a batch do not affect other batches, but all digests from such bad batches will be reported as missing by this call.
-	// In other words, if an error is returned, any digest that is not in the returned slice is not missing.
-	// If no error is returned, the returned slice contains all the missing digests.
-	// The returned error wraps a number of errors proportional to the length of the specified slice.
-	MissingBlobs(context.Context, []digest.Digest) ([]digest.Digest, error)
-
-	// Upload processes the specified blobs for upload. Blobs that already exist in the CAS are not uploaded.
-	// Any path or file that matches the specified filter is excluded.
-	// Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
-	//
-	// Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
-	// The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
-	// With infinite speed and limits, every blob will uploaded exactly once. On the other extreme, every blob is uploaded
-	// alone and no unification takes place.
-	// In the average case, blobs that make it into the same bundle will be deduplicated.
-	//
-	// Returns a slice of the digests of the blobs that were uploaded (excluding the ones that already exist in the CAS).
-	// If the returned error is nil, any digest that is not in the returned slice was already in the CAS.
-	// If the returned error is not nil, the returned slice may be incomplete (fatal error) and every digest
-	// in it may or may not have been successfully uploaded (individual errors).
-	// The returned error wraps a number of errors proportional to the length of the specified slice.
-	Upload(context.Context, []impath.Absolute, slo.Options, *walker.Filter) ([]digest.Digest, *Stats, error)
-
-	// WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
-	//
-	// The specified size is used to toggle compression as well as report some stats. It must be reflect the actual number of bytes the specified reader has to give.
-	// The server is notified to finalize the resource name and further writes may not succeed.
-	// The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
-	// In case of error while the returned stats indicate that all the bytes were sent, it is still not a guarantee all the bytes
-	// were received by the server since an acknlowedgement was not observed.
-	WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error)
-
-	// WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
-	WriteBytesPartial(ctx context.Context, name string, r io.Reader, size int64, offset int64) (*Stats, error)
-
-	// Wait blocks until all resources held by the uploader are released.
-	// It must be called after at least one of the methods has been called to avoid races with wait groups.
-	Wait()
-}
-
-// StreamingUploader provides a concurrency-friendly API to upload to the CAS.
-type StreamingUploader interface {
-	// MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
-	//
-	// The caller must close the specified input channel as a termination signal.
-	// The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
-	// All received requests will have corresponding responses sent on the returned channel.
-	//
-	// The returned channel is unbuffered and will be closed after the input channel is closed and no more responses are available for this call.
-	// This could indicate completion or cancellation (in case the context was canceled).
-	// Slow consumption speed on this channel affects the consumption speed on the input channel.
-	MissingBlobs(context.Context, <-chan digest.Digest) <-chan MissingBlobsResponse
-
-	// Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
-	//
-	// Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
-	// The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
-	// With infinite speed and limits, every blob will uploaded exactly once. On the other extreme, every blob is uploaded
-	// alone and no unification takes place.
-	// In the average case, blobs that make it into the same bundle will be grouped by digest. Once a digest is processed, each requester of that
-	// digest receives a copy of the coorresponding UploadResponse.
-	Upload(context.Context, <-chan impath.Absolute, slo.Options, *walker.Filter) <-chan UploadResponse
-
-	// Wait blocks until all resources held by the uploader are released.
-	// It must be called after at least one of the methods has been called to avoid races with wait groups.
-	Wait()
-}
-
 // batchingUplodaer implements the corresponding interface.
-type batchingUploader struct {
+type BatchingUploader struct {
 	*uploaderv2
 }
 
 // streamingUploader implements the corresponding interface.
-type streamingUploader struct {
+type StreamingUploader struct {
 	*uploaderv2
 }
 
@@ -193,7 +115,12 @@ type uploaderv2 struct {
 	uploadReqPubSub *pubsub
 }
 
-func (u *uploaderv2) Wait() {
+// Wait blocks until all resources held by the uploader are released.
+//
+// ctx must be the same one used to create the uploader or one that lives longer.
+func (u *uploaderv2) Wait(ctx context.Context) {
+	<-ctx.Done()
+
 	// Wait for filesystem walks first, since they may still trigger requests.
 	u.walkWg.Wait()
 	// Wait for query subscribers to stop triggering requests and drain their responses.
@@ -307,30 +234,32 @@ func newUploaderv2(
 	return u, nil
 }
 
-// NewBatchingUploader creates a new instance of the batching uploader interface.
-// The specified configs must be compatible with the capabilities of the server
-// which the specified clients are connected to.
+// NewBatchingUploader creates a new instance of the batching uploader.
+//
+// The specified configs must be compatible with the capabilities of the server that the specified clients are connected to.
+// ctx must be cancelled to properly shutdown the uploader.
 func NewBatchingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
-) (BatchingUploader, error) {
+) (*BatchingUploader, error) {
 	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
 	}
-	return &batchingUploader{uploaderv2: uploader}, nil
+	return &BatchingUploader{uploaderv2: uploader}, nil
 }
 
-// NewStreamingUploader creates a new instance of the streaming uploader interface.
-// The specified configs must be compatible with the capabilities of the server
-// which the specified clients are connected to.
+// NewStreamingUploader creates a new instance of the streaming uploader.
+//
+// The specified configs must be compatible with the capabilities of the server which the specified clients are connected to.
+// ctx must be cancelled to properly shutdown the uploader.
 func NewStreamingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
-) (StreamingUploader, error) {
+) (*StreamingUploader, error) {
 	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
 	}
-	return &streamingUploader{uploaderv2: uploader}, nil
+	return &StreamingUploader{uploaderv2: uploader}, nil
 }

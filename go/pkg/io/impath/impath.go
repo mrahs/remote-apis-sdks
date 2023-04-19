@@ -139,6 +139,8 @@ func MustRel(elements ...string) Relative {
 // is lexically equivalent to the specified target path.
 //
 // The returned error is nil, ErrNotRelative, or ErrNotDescendant.
+// ErrNotRelative indicates that the target cannot be made relative to base.
+// ErrNotDescendant indicates the target is not a descendant of base, even though it is relative.
 func Descendant(base Absolute, target Absolute) (Relative, error) {
 	p, err := filepath.Rel(base.String(), target.String())
 	if err != nil {

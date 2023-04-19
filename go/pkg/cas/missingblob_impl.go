@@ -2,11 +2,11 @@ package cas
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"google.golang.org/protobuf/proto"
 )
@@ -39,7 +39,16 @@ type missingBlobRequestBundle = map[digest.Digest][]tag
 // See registerQueryCaller for details.
 type queryCaller = chan MissingBlobsResponse
 
-func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
+// MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
+//
+// ctx may be used to cancel the call before it completes.
+//
+// The digests are batched based on the set gRPC limits (count and size).
+// Errors from a batch do not affect other batches, but all digests from such bad batches will be reported as missing by this call.
+// In other words, if an error is returned, any digest that is not in the returned slice is not missing.
+// If no error is returned, the returned slice contains all the missing digests.
+// The returned error wraps a number of errors proportional to the length of the specified slice.
+func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
 	if len(digests) < 1 {
 		return nil, nil
 	}
@@ -77,7 +86,7 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			// Don't join the same error from a batch more than once.
 			// This may not prevent similar errors from multiple batches since errors.Is does not necessarily match by content.
 			if !errors.Is(err, r.Err) {
-				err = fmt.Errorf("%w: %v", r.Err, err)
+				err = errors.Join(r.Err, err)
 			}
 		case r.Missing:
 			missing = append(missing, r.Digest)
@@ -102,7 +111,16 @@ func (u *batchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	return missing, err
 }
 
-func (u *streamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
+// MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
+//
+// The caller must close the specified input channel as a termination signal.
+// The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
+// All received requests will have corresponding responses sent on the returned channel.
+//
+// The returned channel is unbuffered and will be closed after the input channel is closed and no more responses are available for this call.
+// This could indicate completion or cancellation (in case the context was canceled).
+// Slow consumption speed on this channel affects the consumption speed on the input channel.
+func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	return u.missingBlobsStreamer(ctx, in)
 }
 
@@ -211,7 +229,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 
 	missing := res.MissingBlobDigests
 	if err != nil {
-		err = fmt.Errorf("%w: %v", ErrGRPC, err)
+		err = errors.Join(ErrGRPC, err)
 		missing = digests
 	}
 

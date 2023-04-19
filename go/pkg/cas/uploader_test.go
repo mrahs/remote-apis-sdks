@@ -32,7 +32,6 @@ var (
 	}
 	ioCfg = cas.IOConfig{
 		ConcurrentWalksLimit:     1,
-		ConcurrentWalkerVisits:   1,
 		OpenFilesLimit:           1,
 		OpenLargeFilesLimit:      1,
 		SmallFileSizeThreshold:   1,

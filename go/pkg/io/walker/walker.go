@@ -36,11 +36,8 @@ const (
 )
 
 var (
-	// ErrInvalidArgument indicates a fatal error due to an invalid argument.
-	ErrInvalidArgument = errors.New("walker: invalid argument")
-
 	// ErrBadNextStep indicates a fatal error due to an invalid next step returned by the callback.
-	ErrBadNextStep = errors.New("walker: invalid next step")
+	ErrBadNextStep = errors.New("invalid next step")
 )
 
 // WalkFunc defines the callback signature that clients must specify for walker implementations.
@@ -57,11 +54,6 @@ type WalkFunc func(realPath impath.Absolute, desiredPath impath.Absolute, info f
 
 // DepthFirst walks the filesystem tree rooted at the specified root in depth-first-search style traversal.
 // That is, every directory is visited after all its descendants have been visited.
-//
-// The concurencyLimit value must be > 0.
-//
-// The specified function may be called concurrently based on the specified concurrencyLimit value.
-// However, each path in the tree is accessed by only one goroutine at a time.
 //
 // The callback is called twice for each path, including root. The first call is made
 // before making any IO calls, and only the path is provided to the function.
@@ -87,11 +79,7 @@ type WalkFunc func(realPath impath.Absolute, desiredPath impath.Absolute, info f
 // An unexpected NextStep value cancels the entire walk.
 //
 // The error returned by the walk is either nil or ErrBadNextStep.
-func DepthFirst(root impath.Absolute, exclude *Filter, concurrencyLimit int, fn WalkFunc) error {
-	if concurrencyLimit < 1 || fn == nil {
-		return ErrInvalidArgument
-	}
-
+func DepthFirst(root impath.Absolute, exclude *Filter, fn WalkFunc) error {
 	// Own a copy of the filter to avoid external mutations.
 	if exclude != nil {
 		exclude = &Filter{Regexp: exclude.Regexp, Mode: exclude.Mode}
@@ -186,14 +174,14 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 			return nil, Defer, nil
 		}
 		if next != Continue {
-			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`in pre-access and expecting "Continue", but got %q`, stepName(next)))
+			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`walker: in pre-access and expecting "Continue", but got %q`, stepName(next)))
 		}
 
 		info, errStat := os.Lstat(e.realPath.String())
 		if errStat != nil {
 			next = fn(e.realPath, *e.desiredPath, nil, errStat)
 			if next != Skip && next != Cancel {
-				return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`stat failed and expecting "Skip" or "Cancel", but got %q`, stepName(next)))
+				return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`walker: stat failed and expecting "Skip" or "Cancel", but got %q`, stepName(next)))
 			}
 			return nil, next, nil
 		}
@@ -216,7 +204,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 	}
 	if e.info.Mode()&fs.ModeSymlink != fs.ModeSymlink {
 		if next != Continue {
-			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`post-access done and expecting "Continue", but got %q`, stepName(next)))
+			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`walker: post-access done and expecting "Continue", but got %q`, stepName(next)))
 		}
 		return nil, next, nil
 	}
@@ -225,7 +213,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 	if errTarget != nil {
 		next = fn(e.realPath, *e.desiredPath, nil, errTarget)
 		if next != Skip && next != Cancel {
-			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`readlink failed and expecting "Skip" or "Cancel", but got %q`, stepName(next)))
+			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`walker: readlink failed and expecting "Skip" or "Cancel", but got %q`, stepName(next)))
 		}
 		return nil, next, nil
 	}
@@ -244,7 +232,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 		return &elem{realPath: target, desiredPath: &e.realPath}, Continue, nil
 	}
 
-	return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`post-access for a symlink and expecting "Continue" or "Replace", but got %q`, stepName(next)))
+	return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`walker: post-access for a symlink and expecting "Continue" or "Replace", but got %q`, stepName(next)))
 }
 
 // processDir accepts a pre-accessed directory and iterates over all of its children.
@@ -262,7 +250,7 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 	if errOpen != nil {
 		next := fn(e.realPath, *e.desiredPath, nil, errOpen)
 		if next != Skip && next != Cancel {
-			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`openning dir failed; expecting "Skip" or "Cancel", but got %q`, stepName(next)))
+			return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`walker: opening dir failed; expecting "Skip" or "Cancel", but got %q`, stepName(next)))
 		}
 		return nil, next, nil
 	}
@@ -278,7 +266,7 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 		if errRead != nil && errRead != io.EOF {
 			next := fn(e.realPath, *e.desiredPath, nil, errRead)
 			if next != Skip && next != Cancel {
-				return deferred, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`reading dir failed; expecting "Skip" or "Cancel", but got %q`, stepName(next)))
+				return deferred, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`walker: reading dir failed; expecting "Skip" or "Cancel", but got %q`, stepName(next)))
 			}
 			return deferred, next, nil
 		}

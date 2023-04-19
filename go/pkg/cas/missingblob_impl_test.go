@@ -4,13 +4,14 @@ package cas_test
 import (
 	"context"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/google/go-cmp/cmp"
-	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 )
 
@@ -66,11 +67,12 @@ func TestBatching_MissingBlobs(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			u, err := cas.NewBatchingUploader(context.Background(), test.cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
+			ctx, ctxCancel := context.WithCancel(context.Background())
+			u, err := cas.NewBatchingUploader(ctx, test.cas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
-			missing, err := u.MissingBlobs(context.Background(), test.digests)
+			missing, err := u.MissingBlobs(ctx, test.digests)
 			if test.wantErr == nil && err != nil {
 				t.Errorf("MissingBlobs failed: %v", err)
 			}
@@ -82,7 +84,8 @@ func TestBatching_MissingBlobs(t *testing.T) {
 			if diff := cmp.Diff(test.wantDigests, missing); diff != "" {
 				t.Errorf("missing mismatch, (-want +got): %s", diff)
 			}
-			u.Wait()
+			ctxCancel()
+			u.Wait(ctx)
 		})
 	}
 }
@@ -91,17 +94,18 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
-	u, err := cas.NewBatchingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	u, err := cas.NewBatchingUploader(ctx, fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
 	digests := []digest.Digest{{Hash: "a"}, {Hash: "b"}, {Hash: "c"}}
-	ctx, ctxCancel := context.WithCancel(context.Background())
-	defer ctxCancel()
+	wg := sync.WaitGroup{}
 	for i := 0; i < 100; i++ {
+		wg.Add(1)
 		go func() {
-			defer ctxCancel()
-			missing, err := u.MissingBlobs(context.Background(), digests)
+			defer wg.Done()
+			missing, err := u.MissingBlobs(ctx, digests)
 			if err != nil {
 				t.Errorf("MissingBlobs failed: %v", err)
 			}
@@ -110,25 +114,24 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 			}
 		}()
 	}
-	// This call might execute before any call to MissingBlobs which might cause races
-	// with wait groups. Blocking this goroutine allows another to wake up and use the wait groups before calling Close.
-	<-ctx.Done()
-	u.Wait()
+	wg.Wait()
+	ctxCancel()
+	u.Wait(ctx)
 }
 
 func TestBatching_MissingBlobsAbort(t *testing.T) {
 	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
-	u, err := cas.NewBatchingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	u, err := cas.NewBatchingUploader(ctx, fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	// Canceling the context before using it should get the sending goroutine to abort.
-	cancel()
+	ctx2, ctx2Cancel := context.WithCancel(ctx)
+	ctx2Cancel()
 	digests := []digest.Digest{{Hash: "a"}, {Hash: "b"}, {Hash: "c"}}
-	missing, err := u.MissingBlobs(ctx, digests)
+	missing, err := u.MissingBlobs(ctx2, digests)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error mismatch: want %v, got %v", context.Canceled, err)
 	}
@@ -136,19 +139,21 @@ func TestBatching_MissingBlobsAbort(t *testing.T) {
 	if diff := cmp.Diff(digests, missing); diff != "" {
 		t.Errorf("missing mismatch, (-want +got): %s", diff)
 	}
-	u.Wait()
+	ctxCancel()
+	u.Wait(ctx)
 }
 
 func TestStreaming_MissingBlobs(t *testing.T) {
 	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
-	u, err := cas.NewStreamingUploader(context.Background(), fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	u, err := cas.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
 	reqChan := make(chan digest.Digest)
-	ch := u.MissingBlobs(context.Background(), reqChan)
+	ch := u.MissingBlobs(ctx, reqChan)
 
 	go func() {
 		for i := 0; i < 1000; i++ {
@@ -158,8 +163,9 @@ func TestStreaming_MissingBlobs(t *testing.T) {
 	}()
 
 	// It's not necessary to receive in a separate goroutine, but this allows
-	// for testing the Close() as well, which should block until all concurrent code is properly terminated.
+	// for testing the Wait() as well, which should block until all concurrent code is properly terminated.
 	go func() {
+		defer ctxCancel()
 		for r := range ch {
 			if r.Err != nil {
 				t.Errorf("unexpected error: %v", r.Err)
@@ -169,5 +175,5 @@ func TestStreaming_MissingBlobs(t *testing.T) {
 			}
 		}
 	}()
-	u.Wait()
+	u.Wait(ctx)
 }

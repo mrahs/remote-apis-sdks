@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	"github.com/google/go-cmp/cmp"
-	"github.com/pkg/errors"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -291,4 +291,7 @@ func TestBatching_WriteBytes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBatching_Upload(t *testing.T) {
 }

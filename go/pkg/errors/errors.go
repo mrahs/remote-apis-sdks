@@ -1,4 +1,5 @@
 // Package errors provides the ability to wrap multiple errors while maintaining API compatibility with the standard package.
+// This functionality is a drop-in replacement from go1.20. Remove this package once the SDK is updated to g1.20.
 package errors
 
 import "errors"
