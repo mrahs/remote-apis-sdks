@@ -142,8 +142,8 @@ func MustRel(elements ...string) Relative {
 func Descendant(base Absolute, target Absolute) (Relative, error) {
 	p, err := filepath.Rel(base.String(), target.String())
 	if err != nil {
-		// Since the zero Absolute path is the root, this error may only happen if base and target
-		// have different roots, which is possible on Windows.
+		// On unix, this should never happen since all absolute paths share the same root.
+		// On Windows, it's possible for two absolute paths to have different roots (different drive letters).
 		return zeroRel, errors.Join(ErrNotRelative, err)
 	}
 	if strings.HasPrefix(p, "..") {
