@@ -7,6 +7,7 @@ type joinError struct {
 	errs []error
 }
 
+// Error joins the texts of the wrapped errors using newline as the delimiter.
 func (e *joinError) Error() string {
 	var b []byte
 	for i, err := range e.errs {

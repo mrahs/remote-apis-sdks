@@ -40,12 +40,12 @@ func (p Relative) Dir() Relative {
 	return Relative{path: filepath.Dir(p.path)}
 }
 
-// Dir is a convenient method that returns the last path element.
+// Base is a convenient method that returns the last path element.
 func (p Absolute) Base() Absolute {
 	return Absolute{path: filepath.Base(p.path)}
 }
 
-// Dir is a convenient method that returns the last path element.
+// Base is a convenient method that returns the last path element.
 func (p Relative) Base() Relative {
 	return Relative{path: filepath.Base(p.path)}
 }
@@ -64,23 +64,24 @@ func (p Relative) String() string {
 	return string(p.path)
 }
 
-// Append is a convenient method to join additional elements to this path.
-func (p Absolute) Append(elements ...Relative) Absolute {
+func join(base string, elements []Relative) []string {
 	paths := make([]string, len(elements)+1)
-	paths[0] = p.String()
+	paths[0] = base
 	for i, p := range elements {
 		paths[i+1] = p.String()
 	}
+	return paths
+}
+
+// Append is a convenient method to join additional elements to this path.
+func (p Absolute) Append(elements ...Relative) Absolute {
+	paths := join(p.String(), elements)
 	return Absolute{path: filepath.Join(paths...)}
 }
 
 // Append is a convenient method to join additional elements to this path.
 func (p Relative) Append(elements ...Relative) Relative {
-	paths := make([]string, len(elements)+1)
-	paths[0] = p.String()
-	for i, p := range elements {
-		paths[i+1] = p.String()
-	}
+	paths := join(p.String(), elements)
 	return Relative{path: filepath.Join(paths...)}
 }
 
