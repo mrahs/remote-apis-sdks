@@ -26,7 +26,7 @@ type Filter struct {
 //
 // The filter's mode is not used for matching in this method.
 func (p *Filter) Path(path string) bool {
-	if p.Regexp == nil {
+	if p == nil || p.Regexp == nil {
 		return false
 	}
 	return p.Regexp.MatchString(filepath.ToSlash(path))
@@ -36,7 +36,7 @@ func (p *Filter) Path(path string) bool {
 //
 // If either the regexp or the mode is not set on this filter, false is returned.
 func (p *Filter) File(path string, mode fs.FileMode) bool {
-	if p.Regexp == nil || p.Mode == 0 {
+	if p == nil || p.Regexp == nil || p.Mode == 0 {
 		return false
 	}
 	return mode == p.Mode && p.Regexp.MatchString(path)
@@ -44,7 +44,7 @@ func (p *Filter) File(path string, mode fs.FileMode) bool {
 
 // String returns a string representation of the predicate.
 //
-// If this is a zero filter, it returns the empty string.
+// If this is a zero or a nil filter, the empty string is returned.
 // A zero filter has regexp compiled from the empty string and 0 mode.
 //
 // It can be used as a stable identifier. However, keep in mind that
@@ -53,6 +53,9 @@ func (p *Filter) File(path string, mode fs.FileMode) bool {
 // traversal result.
 func (p *Filter) String() string {
 	reStr := ""
+	if p == nil {
+		return reStr
+	}
 	if p.Regexp != nil {
 		reStr = p.Regexp.String()
 	}

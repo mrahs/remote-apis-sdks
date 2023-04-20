@@ -77,6 +77,9 @@ func (ps *pubsub) pub(m any, tags ...tag) {
 // the message is returned.
 func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
 	received := ps.pubN(m, 1, tags...)
+	if len(received) == 0 {
+		return ""
+	}
 	return received[0]
 }
 

@@ -85,7 +85,7 @@ func TestBatching_MissingBlobs(t *testing.T) {
 				t.Errorf("missing mismatch, (-want +got): %s", diff)
 			}
 			ctxCancel()
-			u.Wait(ctx)
+			u.Wait()
 		})
 	}
 }
@@ -116,7 +116,7 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 	ctxCancel()
-	u.Wait(ctx)
+	u.Wait()
 }
 
 func TestBatching_MissingBlobsAbort(t *testing.T) {
@@ -140,7 +140,7 @@ func TestBatching_MissingBlobsAbort(t *testing.T) {
 		t.Errorf("missing mismatch, (-want +got): %s", diff)
 	}
 	ctxCancel()
-	u.Wait(ctx)
+	u.Wait()
 }
 
 func TestStreaming_MissingBlobs(t *testing.T) {
@@ -175,5 +175,5 @@ func TestStreaming_MissingBlobs(t *testing.T) {
 			}
 		}
 	}()
-	u.Wait(ctx)
+	u.Wait()
 }

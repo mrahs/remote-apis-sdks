@@ -86,7 +86,6 @@ type uploaderv2 struct {
 	buffers               sync.Pool
 	zstdEncoders          sync.Pool
 	walkSem               *semaphore.Weighted
-	walkWg                sync.WaitGroup
 	ioSem                 *semaphore.Weighted
 	ioLargeSem            *semaphore.Weighted
 	dirChildren           sliceCache
@@ -94,8 +93,10 @@ type uploaderv2 struct {
 	uploadRequestBaseSize int
 
 	// Concurrency controls.
-	processorWg sync.WaitGroup // Main event loops.
-	workerWg    sync.WaitGroup // Messaging goroutines downstream of event loops.
+	processorWg sync.WaitGroup // Long-lived workers.
+	senderWg    sync.WaitGroup // Long-lived wokers.
+	workerWg    sync.WaitGroup // Short-lived workers.
+	receiverWg  sync.WaitGroup // Long-lived workers.
 	// queryChan is the fan-in channel for queries.
 	// All senders must also listen on the context to avoid deadlocks.
 	queryChan chan missingBlobRequest
@@ -105,7 +106,6 @@ type uploaderv2 struct {
 	uploadBatcherChan  chan blob
 	uploadStreamerChan chan blob
 	// grpcWg is used to wait for in-flight gRPC calls upon graceful termination.
-	grpcWg sync.WaitGroup
 
 	// queryPubSub routes responses to callers.
 	queryPubSub *pubsub
@@ -116,28 +116,20 @@ type uploaderv2 struct {
 }
 
 // Wait blocks until all resources held by the uploader are released.
-//
-// ctx must be the same one used to create the uploader or one that lives longer.
-func (u *uploaderv2) Wait(ctx context.Context) {
-	<-ctx.Done()
-
-	// Wait for filesystem walks first, since they may still trigger requests.
-	u.walkWg.Wait()
-	// Wait for query subscribers to stop triggering requests and drain their responses.
+// This method must be called after all other methods have returned to avoid race conditions.
+func (u *uploaderv2) Wait() {
+	// 1st, senders must stop sending.
+	// This call must happen after all other methods have returned to ensure the wait group does not grow while waiting.
+	u.senderWg.Wait()
+	// 2nd, brokers must stop sending.
 	u.queryPubSub.wait()
-	// Wait for gRPC methods, since they may still issue responses.
-	u.grpcWg.Wait()
-	// Wait for upload requests to collect their responses.
 	u.uploadReqPubSub.wait()
-	// Wait for upload subscribers to drain their responses.
 	u.uploadCallerPubSub.wait()
-	// Wait for workers to ensure all senders are done.
+	// 3rd, receivers must drain their channels, which could involve spawning more workers.
+	u.receiverWg.Wait()
+	// 4th, ensure all workers have terminated.
 	u.workerWg.Wait()
-	// Close channels to let processors terminate.
-	close(u.queryChan)
-	close(u.uploadChan)
-	close(u.uploadBatcherChan)
-	close(u.uploadStreamerChan)
+	// 5th, ensure all proessors have terminated.
 	u.processorWg.Wait()
 }
 
@@ -229,8 +221,12 @@ func newUploaderv2(
 		uploadRequestBaseSize: proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),
 	}
 
-	u.processorWg.Add(1)
-	go u.queryProcessor(ctx)
+	// Start processors. Each one will launch a goroutine for background processing.
+	// This way allows ensuring that all waiting groups are set once this function returns.
+	u.queryProcessor(ctx)
+	u.uploadDispatcher(ctx)
+	u.uploadBatcher(ctx)
+	u.uploadStreamer(ctx)
 	return u, nil
 }
 

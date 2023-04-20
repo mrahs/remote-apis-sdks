@@ -6,12 +6,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
+	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/google/go-cmp/cmp"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/grpc"
@@ -294,4 +299,74 @@ func TestBatching_WriteBytes(t *testing.T) {
 }
 
 func TestBatching_Upload(t *testing.T) {
+	tmp := makeFs(t, []string{"foo.c"})
+
+	testRpcCfg := rpcCfg
+	testRpcCfg.RetryPolicy = retryNever
+	bsc := &fakeByteStreamClient{
+		write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
+			return &fakeByteStream_WriteClient{
+				send: func(wr *bspb.WriteRequest) error {
+					return nil
+				},
+				closeAndRecv: func() (*bspb.WriteResponse, error) {
+					return &bspb.WriteResponse{}, nil
+				},
+			}, nil
+		},
+	}
+	cc := &fakeCAS{
+		findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+			return &repb.FindMissingBlobsResponse{}, nil
+		},
+		batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
+			return &repb.BatchUpdateBlobsResponse{}, nil
+		},
+	}
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	u, err := cas.NewBatchingUploader(ctx, cc, bsc, "", testRpcCfg, testRpcCfg, testRpcCfg, ioCfg)
+	if err != nil {
+		t.Fatalf("error creating batching uploader: %v", err)
+	}
+
+	ctxUpload, ctxUploadCancel := context.WithCancel(ctx)
+	ctxUploadCancel()
+	uploaded, stats, err := u.Upload(ctxUpload, []impath.Absolute{impath.MustAbs(tmp, "foo.c")}, symlinkopts.PreserveAllowDangling(), nil)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	t.Errorf("stats: %v", stats)
+	t.Errorf("uploaded: %v", uploaded)
+	ctxCancel()
+	u.Wait()
+}
+
+func makeFs(t *testing.T, paths []string) string {
+	t.Helper()
+
+	if len(paths) == 0 {
+		t.Fatalf("paths cannot be empty")
+	}
+
+	tmp := t.TempDir()
+
+	for _, p := range paths {
+		// Check for suffix before joining since filepath.Join removes trailing slashes.
+		d := p
+		if !strings.HasSuffix(p, "/") {
+			d = filepath.Dir(p)
+		}
+		if err := os.MkdirAll(filepath.Join(tmp, d), 0766); err != nil {
+			t.Fatalf("io error: %v", err)
+		}
+		if p == d {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(tmp, p), nil, 0666); err != nil {
+			t.Fatalf("io error: %v", err)
+		}
+	}
+
+	return tmp
 }
