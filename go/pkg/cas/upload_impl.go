@@ -339,6 +339,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 	// Set up a pipe for presence checking.
 	queryChan := make(chan digest.Digest)
 	queryResChan := u.missingBlobsStreamer(ctx, queryChan)
+	// The query processor interface uses digests only.
 	digestBlobs := initSliceCache()
 
 	u.receiverWg.Add(1)
@@ -348,6 +349,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 		for queryRes := range queryResChan {
 			blobs := digestBlobs.LoadAndDelete(queryRes.Digest)
 
+			// Check the error before the missing field since the latter may be false because of an error.
 			if queryRes.Err != nil {
 				tags := make([]tag, 0, len(blobs))
 				for _, b := range blobs {
@@ -362,14 +364,14 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 			}
 
 			if queryRes.Missing {
-				// Let the upload processors handle unification.
 				for _, b := range blobs {
+					// Let the upload processors handle unification.
 					u.uploadBatcherChan <- b.(blob)
 				}
 				continue
 			}
 
-			// Notify callers of a cache hit.
+			// Notify the caller of a cache hit.
 			tags := make([]tag, 0, len(blobs))
 			for _, b := range blobs {
 				tags = append(tags, b.(blob).tag)
@@ -757,12 +759,12 @@ func (u *uploaderv2) uploadBatcher(ctx context.Context) {
 		bundleSize = u.uploadRequestBaseSize
 	}
 
-	bundleTicker := time.NewTicker(u.uploadRpcConfig.BundleTimeout)
-	defer bundleTicker.Stop()
-
 	u.processorWg.Add(1)
 	go func() {
 		defer u.processorWg.Done()
+
+		bundleTicker := time.NewTicker(u.uploadRpcConfig.BundleTimeout)
+		defer bundleTicker.Stop()
 		for {
 			select {
 			case b, ok := <-u.uploadBatcherChan:
@@ -956,15 +958,25 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 					return
 				}
 
+				isLargeFile := b.reader != nil
+
 				d := digest.NewFromProtoUnvalidated(b.digest)
 				if l := digestTags.Append(d, b.tag); l > 1 {
-					// Already in-flight.
+					// Already in-flight. Release duplicate resources if it's a large file.
+					if isLargeFile {
+						u.ioSem.Release(1)
+						u.ioLargeSem.Release(1)
+					}
 					continue
 				}
 
 				// Block the streamer if the gRPC call is being throttled.
 				if err := u.streamSem.Acquire(ctx, 1); err != nil {
 					// err is always ctx.Err()
+					if isLargeFile {
+						u.ioSem.Release(1)
+						u.ioLargeSem.Release(1)
+					}
 					return
 				}
 
@@ -975,7 +987,9 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 					name = MakeWriteResourceName(u.instanceName, b.digest.Hash, b.digest.SizeBytes)
 				}
 
+				u.workerWg.Add(1)
 				go func() (stats Stats, err error) {
+					defer u.workerWg.Done()
 					defer u.streamSem.Release(1)
 					defer func() {
 						tagsRaw := digestTags.LoadAndDelete(d)
@@ -1004,12 +1018,22 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 					// Large file.
 					case b.reader != nil:
 						reader = b.reader
+						defer func() {
+							if errClose := b.reader.Close(); err != nil {
+								err = errors.Join(ErrIO, errClose, err)
+							}
+						}()
 						// IO holds were acquired during digestion for large files and are expected to be released here.
 						defer u.ioSem.Release(1)
 						defer u.ioLargeSem.Release(1)
 
 					// Medium file.
 					case len(b.path) > 0:
+						if errSem := u.ioSem.Acquire(ctx, 1); errSem != nil {
+							return
+						}
+						defer u.ioSem.Release(1)
+
 						f, errOpen := os.Open(b.path)
 						if errOpen != nil {
 							return Stats{BytesRequested: b.digest.SizeBytes}, errors.Join(ErrIO, errOpen)
@@ -1031,6 +1055,7 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context) {
 				}()
 
 			case <-ctx.Done():
+				return
 			}
 		}
 	}()

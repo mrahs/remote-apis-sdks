@@ -19,6 +19,7 @@ import (
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/google/go-cmp/cmp"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
+	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -299,7 +300,9 @@ func TestBatching_WriteBytes(t *testing.T) {
 }
 
 func TestBatching_Upload(t *testing.T) {
-	tmp := makeFs(t, []string{"foo.c"})
+	tmp := makeFs(t, map[string][]byte{
+		"foo.c": []byte("int c;"),
+	})
 
 	testRpcCfg := rpcCfg
 	testRpcCfg.RetryPolicy = retryNever
@@ -317,10 +320,14 @@ func TestBatching_Upload(t *testing.T) {
 	}
 	cc := &fakeCAS{
 		findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
-			return &repb.FindMissingBlobsResponse{}, nil
+			return &repb.FindMissingBlobsResponse{
+				// MissingBlobDigests: in.BlobDigests,
+			}, nil
 		},
 		batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
-			return &repb.BatchUpdateBlobsResponse{}, nil
+			return &repb.BatchUpdateBlobsResponse{
+				Responses: []*repb.BatchUpdateBlobsResponse_Response{{Digest: in.Requests[0].Digest, Status: &rpcstatus.Status{}}},
+			}, nil
 		},
 	}
 
@@ -342,7 +349,7 @@ func TestBatching_Upload(t *testing.T) {
 	u.Wait()
 }
 
-func makeFs(t *testing.T, paths []string) string {
+func makeFs(t *testing.T, paths map[string][]byte) string {
 	t.Helper()
 
 	if len(paths) == 0 {
@@ -351,7 +358,7 @@ func makeFs(t *testing.T, paths []string) string {
 
 	tmp := t.TempDir()
 
-	for _, p := range paths {
+	for p, b := range paths {
 		// Check for suffix before joining since filepath.Join removes trailing slashes.
 		d := p
 		if !strings.HasSuffix(p, "/") {
@@ -363,7 +370,7 @@ func makeFs(t *testing.T, paths []string) string {
 		if p == d {
 			continue
 		}
-		if err := os.WriteFile(filepath.Join(tmp, p), nil, 0666); err != nil {
+		if err := os.WriteFile(filepath.Join(tmp, p), b, 0666); err != nil {
 			t.Fatalf("io error: %v", err)
 		}
 	}

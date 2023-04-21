@@ -281,12 +281,12 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 		bundleSize = u.queryRequestBaseSize
 	}
 
-	bundleTicker := time.NewTicker(u.queryRpcConfig.BundleTimeout)
-	defer bundleTicker.Stop()
-
 	u.processorWg.Add(1)
 	go func() {
 		defer u.processorWg.Done()
+
+		bundleTicker := time.NewTicker(u.queryRpcConfig.BundleTimeout)
+		defer bundleTicker.Stop()
 		for {
 			select {
 			case req, ok := <-u.queryChan:

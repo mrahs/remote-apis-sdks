@@ -93,10 +93,10 @@ type uploaderv2 struct {
 	uploadRequestBaseSize int
 
 	// Concurrency controls.
-	processorWg sync.WaitGroup // Long-lived workers.
-	senderWg    sync.WaitGroup // Long-lived wokers.
+	senderWg    sync.WaitGroup // Long-lived top-level producers.
+	processorWg sync.WaitGroup // Long-lived brokers.
+	receiverWg  sync.WaitGroup // Long-lived consumers.
 	workerWg    sync.WaitGroup // Short-lived workers.
-	receiverWg  sync.WaitGroup // Long-lived workers.
 	// queryChan is the fan-in channel for queries.
 	// All senders must also listen on the context to avoid deadlocks.
 	queryChan chan missingBlobRequest
@@ -119,18 +119,18 @@ type uploaderv2 struct {
 // This method must be called after all other methods have returned to avoid race conditions.
 func (u *uploaderv2) Wait() {
 	// 1st, senders must stop sending.
-	// This call must happen after all other methods have returned to ensure the wait group does not grow while waiting.
+	// This call must happen after all other query/upload methods have returned to ensure the wait group does not grow while waiting.
 	u.senderWg.Wait()
 	// 2nd, brokers must stop sending.
+	u.processorWg.Wait()
+	// 3rd, intermediate brokers must stop sending.
 	u.queryPubSub.wait()
 	u.uploadReqPubSub.wait()
 	u.uploadCallerPubSub.wait()
-	// 3rd, receivers must drain their channels, which could involve spawning more workers.
+	// 4th, receivers must drain their channels, which could involve spawning more workers.
 	u.receiverWg.Wait()
-	// 4th, ensure all workers have terminated.
+	// 5th, ensure all workers have terminated.
 	u.workerWg.Wait()
-	// 5th, ensure all proessors have terminated.
-	u.processorWg.Wait()
 }
 
 func (u *uploaderv2) withRetry(ctx context.Context, retryPolicy retry.BackoffPolicy, fn func() error) error {
