@@ -24,7 +24,7 @@ type (
 func TestWalker(t *testing.T) {
 	tests := []struct {
 		name             string
-		paths            []string
+		paths            []string // Use a trailing slash to mark directories.
 		symlinks         symlinks
 		root             string
 		filter           *walker.Filter

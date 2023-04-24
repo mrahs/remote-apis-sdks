@@ -13,30 +13,29 @@ import (
 type NextStep int
 
 const (
-	// Continue continues traversing and follows symlinks.
+	// Continue indicates that the walker should continue traversing and following symlinks.
 	// Since it's the first constant in the list, it is designated as the default (zero) step.
 	Continue NextStep = iota
 
-	// Skip skips the file, the entire directory tree, or following the symlink.
+	// Skip indicates that the walker should skip the file, the entire directory tree, or following the symlink.
 	Skip
 
-	// Defer reschedules the path for another visit and continues traversing.
-	// The exact behavior is implementation dependent.
+	// Defer indicates that the walker should reschedule the path for another visit and continue traversing.
 	Defer
 
-	// Replace follows the target of a symlink, but reports every path from that sub-traversal as a descendant
-	// path of the symlink's path.
-	// For example, if the target is a file, its path would be that of the symlink. If it is a directory, every descendent
-	// of that directory will be reported as a child of the directory and the directory will have the path of the symlink.
+	// Replace indicates that the walker should follow the target of a symlink, but reports every path from that sub-traversal
+	// as a descendant path of the symlink's path.
+	//
+	// For example: if /foo/bar was a symlink to /a/b, the walker would report the path of b as /foo/bar, and the path of a/b/c.d as /foo/bar/c.d.
 	// This behavior is equivalent to copying the entire tree of the target in place of the symlink.
 	Replace
 
-	// Cancel cancels the entire walk gracefully.
+	// Cancel indicates that the walker should cancel the entire walk.
 	Cancel
 )
 
 var (
-	// ErrBadNextStep indicates a fatal error due to an invalid next step returned by the callback.
+	// ErrBadNextStep indicates a fatal error due to an invalid next step returned by the client.
 	ErrBadNextStep = errors.New("invalid next step")
 )
 
@@ -47,9 +46,6 @@ var (
 //   desiredPath is always identical to realPath unless the traversal is replacing a symlink, in which case it is the desired target path.
 //   info is the result of stating realPath. It is nil for pre-access calls and when err is set.
 //   err is IO error or nil.
-//
-// More details about when this function is called and how its return value is used
-// is provided by each walker implementation in this package.
 type WalkFunc func(realPath impath.Absolute, desiredPath impath.Absolute, info fs.FileInfo, err error) NextStep
 
 // DepthFirst walks the filesystem tree rooted at the specified root in depth-first-search style traversal.
@@ -70,13 +66,14 @@ type WalkFunc func(realPath impath.Absolute, desiredPath impath.Absolute, info f
 //
 // If the second call returns Skip and the path is a directory, the walker will skip the directory's tree.
 //
-// At any point, the client may return Cancel to cancel the entire walk.
+// Defer is not a valid next step in any second call because the path has already been processed.
+// Replace is only valid for symlinks.
+// An unexpected NextStep value cancels the entire walk.
 //
 // If a symlink is encountered, the callback must return Skip to avoid triggering a recursive walk on the symlink target.
 // Alternatively, returning Replace will instruct the walker to traverse the target as if its path is that of the symlink itself.
-// Defer is not a valid next step in any second call because the path has already been processed.
 //
-// An unexpected NextStep value cancels the entire walk.
+// At any point, the client may return Cancel to cancel the entire walk.
 //
 // The error returned by the walk is either nil or ErrBadNextStep.
 func DepthFirst(root impath.Absolute, exclude *Filter, fn WalkFunc) error {
@@ -86,36 +83,40 @@ func DepthFirst(root impath.Absolute, exclude *Filter, fn WalkFunc) error {
 	}
 	pending := &stack{}
 	pending.push(elem{realPath: root})
+	// parentIndex helps keep track of the last directory node so deferred children can scheduled
+	// to be visited before it.
 	parentIndex := &stack{}
 
 	for pending.len() > 0 {
 		e := pending.pop().(elem)
-		pi := -1
+		pi := -1 // If root is deferred, it would be inserted at index 0.
 		if parentIndex.len() > 0 {
 			pi = parentIndex.peek().(int)
 		}
 
-		// If all children directories of this one are done, remove it from the chain.
+		// If we're back to processing the directory node, remove it from the parenthood chain.
 		if pending.len() == pi {
 			parentIndex.pop()
 		}
 
 		// If it's a previously pre-accessed directory, process its children.
 		if !e.deferredParent && e.info != nil && e.info.IsDir() {
-			dirs, next, errDir := processDir(e, exclude, fn)
+			deferred, next, errDir := processDir(e, exclude, fn)
 			if next == Cancel {
 				return errDir
 			}
 			if next == Skip {
 				continue
 			}
-			// If there are deferred children, queue them after their parent.
-			if len(dirs) > 0 {
+			// If there are deferred children, queue them to be visited before their parent.
+			if len(deferred) > 0 {
 				e.deferredParent = true
 				// Remember the parent index to insert deferred children after it in the stack.
 				parentIndex.push(pending.len())
+				// Reschdule the parent to visited after its children.
 				pending.push(e)
-				pending.push(dirs...)
+				// Schedule the children to be visited before their parent.
+				pending.push(deferred...)
 				continue
 			}
 		}
@@ -155,6 +156,7 @@ func DepthFirst(root impath.Absolute, exclude *Filter, fn WalkFunc) error {
 //	NextStep is one of Defer, Continue, Skip, or Cancel.
 //	error is either ErrBadNextStep or nil.
 func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
+	// Ensure desiredPath matches realPath by default.
 	if e.desiredPath == nil {
 		e.desiredPath = &e.realPath
 	}
@@ -164,8 +166,8 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 		return nil, Skip, nil
 	}
 
+	// Pre-access.
 	if e.info == nil {
-		// Pre-access.
 		next := fn(e.realPath, *e.desiredPath, nil, nil)
 		if next == Cancel || next == Skip {
 			return nil, next, nil
@@ -192,6 +194,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 		}
 
 		e.info = info
+		// If it's a directory, defer it to process its children before post-accessing it.
 		if info.IsDir() {
 			return &e, Continue, nil
 		}
@@ -235,7 +238,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 	return nil, Cancel, errors.Join(ErrBadNextStep, fmt.Errorf(`walker: post-access for a symlink and expecting "Continue" or "Replace", but got %q`, stepName(next)))
 }
 
-// processDir accepts a pre-accessed directory and iterates over all of its children.
+// processDir accepts a pre-accessed directory and visits all of its children.
 //
 // All the files (non-directories) will be completely visited within this call.
 // All the directories will be pre-accessed and stat'ed, but not post-accessed.
@@ -245,7 +248,6 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 //	NextStep is one of Continue, Skip, or Cancel.
 //	error is either ErrBadNextStep or nil.
 func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
-	// If opening fails, let the client choose whether to skip or cancel.
 	f, errOpen := os.Open(e.realPath.String())
 	if errOpen != nil {
 		next := fn(e.realPath, *e.desiredPath, nil, errOpen)
@@ -254,7 +256,7 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 		}
 		return nil, next, nil
 	}
-	// Ignoring the error here is acceptable because it was not modified in any way.
+	// Ignoring the error here is acceptable because the file was not modified in any way.
 	// The only bad side effect may be a dangling descriptor that leaks until the process is terminated.
 	defer f.Close()
 
@@ -271,6 +273,7 @@ func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
 			return deferred, next, nil
 		}
 
+		// Iterate before checking for EOF to avoid missing the last batch.
 		for _, name := range names {
 			// name is relative.
 			relName := impath.MustRel(name)
