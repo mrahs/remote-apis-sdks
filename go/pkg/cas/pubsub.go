@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang/glog"
 	"github.com/pborman/uuid"
 )
 
@@ -14,7 +15,7 @@ type tag string
 // pubsub provides a simple pubsub implementation to route messages and wait for them.
 type pubsub struct {
 	subs map[tag]chan any
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	wg   sync.WaitGroup
 }
 
@@ -30,6 +31,7 @@ type pubsub struct {
 // A slow subscriber affects all other subscribers that share the same message.
 func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 	t := tag(uuid.New())
+	glog.V(3).Infof("pubsub.sub: tag=%s", t)
 
 	// Serialize this block to avoid concurrent map-read-write errors.
 	ps.mu.Lock()
@@ -51,6 +53,7 @@ func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 		ps.mu.Unlock()
 
 		close(subscriber)
+		glog.V(3).Infof("pubsub.unsub: tag=%s", t)
 	}()
 
 	return t, subscriber
@@ -73,6 +76,13 @@ func (ps *pubsub) pub(m any, tags ...tag) {
 	_ = ps.pubN(m, len(tags), tags...)
 }
 
+// mpub (multi-publish) delivers the "once" message to a single consumer then delivers the "rest" message to the rest of the consumers.
+// It's useful for cases where the message holds shared information that should not be duplicated among consumers, such as stats.
+func (ps *pubsub) mpub(once any, rest any, tags ...tag) {
+	t := ps.pubOnce(once, tags...)
+	_ = ps.pubN(rest, len(tags)-1, excludeTag(tags, t)...)
+}
+
 // pubOnce is like pub, but delivers the message only once. The tag of the receiver that got
 // the message is returned.
 func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
@@ -83,12 +93,15 @@ func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
 	return received[0]
 }
 
-// pubN is for internal use only.
+// pubN is like pub, but delivers the message to exactly n consumers. The list of tags that
+// got the message is returned.
 func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
-	// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
+	glog.V(3).Infof("pubsub.pub: tags=%v", tags)
 
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	glog.V(3).Infof("pubsub.pub: tags=%v, subs=%v", tags, ps.subs)
 	var toRetry []tag
 	var received []tag
 	ticker := time.NewTicker(10 * time.Millisecond)

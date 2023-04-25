@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
@@ -300,53 +301,73 @@ func TestBatching_WriteBytes(t *testing.T) {
 }
 
 func TestBatching_Upload(t *testing.T) {
-	tmp := makeFs(t, map[string][]byte{
-		"foo.c": []byte("int c;"),
-	})
-
-	testRpcCfg := rpcCfg
-	testRpcCfg.RetryPolicy = retryNever
-	bsc := &fakeByteStreamClient{
-		write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
-			return &fakeByteStream_WriteClient{
-				send: func(wr *bspb.WriteRequest) error {
-					return nil
+	tests := []struct {
+		name string
+		bsc  *fakeByteStreamClient
+		cc   *fakeCAS
+		fs   map[string][]byte
+		wantStats cas.Stats
+		wantUploaded []digest.Digest
+	}{
+		{
+			name: "cache_hit",
+			bsc: &fakeByteStreamClient{
+				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
+					return &fakeByteStream_WriteClient{
+						send: func(wr *bspb.WriteRequest) error {
+							return nil
+						},
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{}, nil
+						},
+					}, nil
 				},
-				closeAndRecv: func() (*bspb.WriteResponse, error) {
-					return &bspb.WriteResponse{}, nil
+			},
+			cc: &fakeCAS{
+				findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+					return &repb.FindMissingBlobsResponse{
+						// MissingBlobDigests: in.BlobDigests,
+					}, nil
 				},
-			}, nil
-		},
-	}
-	cc := &fakeCAS{
-		findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
-			return &repb.FindMissingBlobsResponse{
-				// MissingBlobDigests: in.BlobDigests,
-			}, nil
-		},
-		batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
-			return &repb.BatchUpdateBlobsResponse{
-				Responses: []*repb.BatchUpdateBlobsResponse_Response{{Digest: in.Requests[0].Digest, Status: &rpcstatus.Status{}}},
-			}, nil
+				batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
+					return &repb.BatchUpdateBlobsResponse{
+						Responses: []*repb.BatchUpdateBlobsResponse_Response{{Digest: in.Requests[0].Digest, Status: &rpcstatus.Status{}}},
+					}, nil
+				},
+			},
+			fs: map[string][]byte{
+				"foo.c": []byte("int c;"),
+			},
+			wantStats: cas.Stats{},
+			wantUploaded: []digest.Digest{},
 		},
 	}
 
-	ctx, ctxCancel := context.WithCancel(context.Background())
-	u, err := cas.NewBatchingUploader(ctx, cc, bsc, "", testRpcCfg, testRpcCfg, testRpcCfg, ioCfg)
-	if err != nil {
-		t.Fatalf("error creating batching uploader: %v", err)
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			tmp := makeFs(t, test.fs)
+			testRpcCfg := rpcCfg
+			testRpcCfg.RetryPolicy = retryNever
+			ctx, ctxCancel := context.WithCancel(context.Background())
+			u, err := cas.NewBatchingUploader(ctx, test.cc, test.bsc, "", testRpcCfg, testRpcCfg, testRpcCfg, ioCfg)
+			if err != nil {
+				t.Fatalf("error creating batching uploader: %v", err)
+			}
+			uploaded, stats, err := u.Upload(ctx, []impath.Absolute{impath.MustAbs(tmp, "foo.c")}, symlinkopts.PreserveAllowDangling(), nil)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(test.wantStats, stats); diff != "" {
+				t.Errorf("stats mismatch, (-want +got): %s", diff)
+			}
+			if diff := cmp.Diff(test.wantUploaded, uploaded); diff != "" {
+				t.Errorf("uploaded mismatch, (-want +got): %s", diff)
+			}
+			ctxCancel()
+			u.Wait()
+		})
 	}
-
-	ctxUpload, ctxUploadCancel := context.WithCancel(ctx)
-	ctxUploadCancel()
-	uploaded, stats, err := u.Upload(ctxUpload, []impath.Absolute{impath.MustAbs(tmp, "foo.c")}, symlinkopts.PreserveAllowDangling(), nil)
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	t.Errorf("stats: %v", stats)
-	t.Errorf("uploaded: %v", uploaded)
-	ctxCancel()
-	u.Wait()
 }
 
 func makeFs(t *testing.T, paths map[string][]byte) string {

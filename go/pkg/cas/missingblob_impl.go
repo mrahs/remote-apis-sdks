@@ -2,7 +2,6 @@ package cas
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
@@ -55,33 +54,25 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 		return nil, nil
 	}
 
-	// This implementation converts the underlying nonblocking implementation into a blocking one.
-	// A separate goroutine is used to push the requests into the processor.
-	// The receiving code blocks the goroutine of the call until all responses are received or the context is canceled.
-
-	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(ctx)
-	defer ctxQueryCallerCancel()
-
-	tag, resChan := u.queryPubSub.sub(ctxQueryCaller)
-
+	ch := make(chan digest.Digest)
 	u.senderWg.Add(1)
 	go func() {
+		defer close(ch) // ensure the streamer closes its response channel
 		defer u.senderWg.Done()
 		for _, d := range digests {
 			select {
+			case ch <- d:
+				continue
 			case <-ctx.Done():
 				return
-			case u.queryChan <- missingBlobRequest{digest: d, tag: tag}:
 			}
 		}
 	}()
 
 	var missing []digest.Digest
 	var err error
-	total := len(digests)
-	i := 0
-	for rawR := range resChan {
-		r := rawR.(MissingBlobsResponse)
+	resCh := u.missingBlobsStreamer(ctx, ch)
+	for r := range resCh {
 		switch {
 		case r.Err != nil:
 			missing = append(missing, r.Digest)
@@ -93,21 +84,11 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 		case r.Missing:
 			missing = append(missing, r.Digest)
 		}
-		i += 1
-		if i >= total {
-			ctxQueryCallerCancel()
-			// It's tempting to break here, but the channel must be drained until the processor closes it.
-		}
 	}
 
 	// Request aborted, possibly midflight. Reporting a hit as a miss is safer than otherwise.
 	if ctx.Err() != nil {
 		return digests, ctx.Err()
-	}
-
-	// Ideally, this should never be true at this point. Otherwise, it's a fatal error.
-	if i < total {
-		panic(fmt.Sprintf("channel closed unexpectedly: got %d msgs, want %d", i, total))
 	}
 
 	return missing, err
