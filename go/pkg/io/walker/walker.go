@@ -76,11 +76,7 @@ type WalkFunc func(realPath impath.Absolute, desiredPath impath.Absolute, info f
 // At any point, the client may return Cancel to cancel the entire walk.
 //
 // The error returned by the walk is either nil or ErrBadNextStep.
-func DepthFirst(root impath.Absolute, exclude *Filter, fn WalkFunc) error {
-	// Own a copy of the filter to avoid external mutations.
-	if exclude != nil {
-		exclude = &Filter{Regexp: exclude.Regexp, Mode: exclude.Mode}
-	}
+func DepthFirst(root impath.Absolute, exclude Filter, fn WalkFunc) error {
 	pending := &stack{}
 	pending.push(elem{realPath: root})
 	// parentIndex helps keep track of the last directory node so deferred children can scheduled
@@ -155,14 +151,14 @@ func DepthFirst(root impath.Absolute, exclude *Filter, fn WalkFunc) error {
 //	*elem is nil unless the visit has a deferred path, which is either a directory that was not post-accessed or a symlink target.
 //	NextStep is one of Defer, Continue, Skip, or Cancel.
 //	error is either ErrBadNextStep or nil.
-func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
+func visit(e elem, exclude Filter, fn WalkFunc) (*elem, NextStep, error) {
 	// Ensure desiredPath matches realPath by default.
 	if e.desiredPath == nil {
 		e.desiredPath = &e.realPath
 	}
 
 	// If the filter applies to the path only, use it here.
-	if exclude != nil && exclude.Mode == 0 && exclude.Path(e.desiredPath.String()) {
+	if exclude.Mode == 0 && exclude.Path(e.desiredPath.String()) {
 		return nil, Skip, nil
 	}
 
@@ -189,7 +185,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 		}
 
 		// If the filter applies to path and mode, use it here.
-		if exclude != nil && exclude.Mode != 0 && exclude.File(e.desiredPath.String(), info.Mode()) {
+		if exclude.Mode != 0 && exclude.File(e.desiredPath.String(), info.Mode()) {
 			return nil, Skip, nil
 		}
 
@@ -247,7 +243,7 @@ func visit(e elem, exclude *Filter, fn WalkFunc) (*elem, NextStep, error) {
 //	[]any is nil unless the directory had deferred-children, which includes directories and client-deferred paths.
 //	NextStep is one of Continue, Skip, or Cancel.
 //	error is either ErrBadNextStep or nil.
-func processDir(e elem, exclude *Filter, fn WalkFunc) ([]any, NextStep, error) {
+func processDir(e elem, exclude Filter, fn WalkFunc) ([]any, NextStep, error) {
 	f, errOpen := os.Open(e.realPath.String())
 	if errOpen != nil {
 		next := fn(e.realPath, *e.desiredPath, nil, errOpen)

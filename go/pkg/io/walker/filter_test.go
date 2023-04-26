@@ -83,7 +83,7 @@ func TestFilterString(t *testing.T) {
 		{
 			name:   "regexp_only",
 			filter: walker.Filter{Regexp: regexp.MustCompile("/bar/.*")},
-			want:   "/bar/.*;0",
+			want:   "/bar/.*",
 		},
 		{
 			name:   "regexp_and_mode",

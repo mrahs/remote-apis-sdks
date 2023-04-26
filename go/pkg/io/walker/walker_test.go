@@ -27,7 +27,7 @@ func TestWalker(t *testing.T) {
 		paths            []string // Use a trailing slash to mark directories.
 		symlinks         symlinks
 		root             string
-		filter           *walker.Filter
+		filter           walker.Filter
 		pathstep         pathstep
 		wantRealCount    pathcount
 		wantDesiredCount pathcount
@@ -87,7 +87,7 @@ func TestWalker(t *testing.T) {
 		{
 			name:          "skip_file_by_path",
 			paths:         []string{"foo.c"},
-			filter:        &walker.Filter{Regexp: regexp.MustCompile("foo.c")},
+			filter:        walker.Filter{Regexp: regexp.MustCompile("foo.c")},
 			wantRealCount: pathcount{},
 		},
 		{

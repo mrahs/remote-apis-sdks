@@ -32,7 +32,7 @@ import (
 type UploadRequest struct {
 	Path           impath.Absolute
 	SymlinkOptions slo.Options
-	Exclude        *walker.Filter
+	Exclude        walker.Filter
 	// tag is used internally to identify the client of the request.
 	tag tag
 	// done is used to signal to the processor that the client will not be sending any further requests.
@@ -751,7 +751,7 @@ func (u *uploaderv2) uploadBatchProcessor(ctx context.Context) {
 
 				r := &repb.BatchUpdateBlobsRequest_Request{
 					Digest: b.digest.ToProto(),
-					Data:   b.bytes,
+					Data:   b.bytes, // TODO: add compression support
 				}
 				rSize := proto.Size(r)
 
