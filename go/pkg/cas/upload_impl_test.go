@@ -302,11 +302,11 @@ func TestBatching_WriteBytes(t *testing.T) {
 
 func TestBatching_Upload(t *testing.T) {
 	tests := []struct {
-		name string
-		bsc  *fakeByteStreamClient
-		cc   *fakeCAS
-		fs   map[string][]byte
-		wantStats cas.Stats
+		name         string
+		bsc          *fakeByteStreamClient
+		cc           *fakeCAS
+		fs           map[string][]byte
+		wantStats    *cas.Stats
 		wantUploaded []digest.Digest
 	}{
 		{
@@ -315,7 +315,7 @@ func TestBatching_Upload(t *testing.T) {
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					return &fakeByteStream_WriteClient{
 						send: func(wr *bspb.WriteRequest) error {
-							return nil
+							return io.EOF
 						},
 						closeAndRecv: func() (*bspb.WriteResponse, error) {
 							return &bspb.WriteResponse{}, nil
@@ -326,7 +326,7 @@ func TestBatching_Upload(t *testing.T) {
 			cc: &fakeCAS{
 				findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 					return &repb.FindMissingBlobsResponse{
-						// MissingBlobDigests: in.BlobDigests,
+						MissingBlobDigests: in.BlobDigests,
 					}, nil
 				},
 				batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
@@ -338,8 +338,17 @@ func TestBatching_Upload(t *testing.T) {
 			fs: map[string][]byte{
 				"foo.c": []byte("int c;"),
 			},
-			wantStats: cas.Stats{},
-			wantUploaded: []digest.Digest{},
+			wantStats: &cas.Stats{
+				BytesRequested:       6,
+				LogicalBytesMoved:    2, // matches a single buffer size
+				TotalBytesMoved:      2,
+				EffectiveBytesMoved:  2,
+				LogicalBytesCached:   6,
+				LogicalBytesStreamed: 2,
+				CacheHitCount:        1,
+				StreamedCount:        1,
+			},
+			wantUploaded: nil,
 		},
 	}
 
@@ -354,7 +363,7 @@ func TestBatching_Upload(t *testing.T) {
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
-			uploaded, stats, err := u.Upload(ctx, []impath.Absolute{impath.MustAbs(tmp, "foo.c")}, symlinkopts.PreserveAllowDangling(), nil)
+			uploaded, stats, err := u.Upload(ctx, cas.UploadRequest{Path: impath.MustAbs(tmp, "foo.c"), SymlinkOptions: symlinkopts.PreserveAllowDangling()})
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}

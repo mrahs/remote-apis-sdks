@@ -83,7 +83,7 @@ func (ps *pubsub) mpub(once any, rest any, tags ...tag) {
 	_ = ps.pubN(rest, len(tags)-1, excludeTag(tags, t)...)
 }
 
-// pubOnce is like pub, but delivers the message only once. The tag of the receiver that got
+// pubOnce is like pub, but delivers the message only once. The tag of the subscriber that got
 // the message is returned.
 func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
 	received := ps.pubN(m, 1, tags...)
@@ -93,11 +93,12 @@ func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
 	return received[0]
 }
 
-// pubN is like pub, but delivers the message to exactly n consumers. The list of tags that
-// got the message is returned.
+// pubN is like pub, but delivers the message to exactly n consumers. The tags of the subscribers that
+// got the message are returned.
 func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
-	glog.V(3).Infof("pubsub.pub: tags=%v", tags)
-
+	if len(tags) == 0 {
+		glog.Warningf("pubsub.pub: called without tags; msg=%v subs=%v", m, ps.subs)
+	}
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 

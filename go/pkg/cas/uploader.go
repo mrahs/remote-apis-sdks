@@ -38,12 +38,8 @@ var (
 	// ErrOversizedItem indicates an item that is too large to fit into the set byte limit for the corresponding gRPC call.
 	ErrOversizedItem = errors.New("oversized item")
 
-	// EOR indicates the end of a stream of responses for a particular subscriber.
-	//
-	// It is used to signal to the subscriber that no further responses are to be expected for the request in context.
-	// This is useful for upload requests that generate multiple responses for each single request so the subscriber can tell
-	// when to unsubscribe.
-	EOR = errors.New("end of response")
+	// ErrBadCacheValueType indicates an unexpected type for a cache value.
+	ErrBadCacheValueType = errors.New("cache value type not expected")
 )
 
 // MakeWriteResourceName returns a valid resource name for writing an uncompressed blob.
@@ -97,22 +93,26 @@ type uploaderv2 struct {
 	processorWg sync.WaitGroup // Long-lived brokers.
 	receiverWg  sync.WaitGroup // Long-lived consumers.
 	workerWg    sync.WaitGroup // Short-lived workers.
-	// queryChan is the fan-in channel for queries.
-	// All senders must also listen on the context to avoid deadlocks.
-	queryChan chan missingBlobRequest
-	// uploadChan is the fan-in channel for uploads.
-	// All senders must also listen on the context to avoid deadlocks.
-	uploadChan         chan UploadRequest
-	uploadBatcherChan  chan blob
-	uploadStreamerChan chan blob
-	// grpcWg is used to wait for in-flight gRPC calls upon graceful termination.
+	// queryCh is the fan-in channel for query requests.
+	queryCh chan missingBlobRequest
+	// uploadCh is the fan-in channel for upload requests.
+	uploadCh chan UploadRequest
+	// uploadDispatchCh is the fan-in channel for dispatched blobs.
+	uploadDispatchCh chan blob
+	// uploadQueryCh is the pipe channel for presence checking before uploading.
+	// The dispatcher goroutine is the only sender.
+	uploadQueryCh chan blob
+	// uploadResCh is the fan-in channel for responses.
+	uploadResCh    chan UploadResponse
+	// uploadBatchCh is the fan-in channel for unified requests to the batching API.
+	uploadBatchCh  chan blob
+	// uploadStreamCh is the fan-in channel for unified requests to the byte streaming API.
+	uploadStreamCh chan blob
 
-	// queryPubSub routes responses to callers.
+	// queryPubSub routes responses to query callers.
 	queryPubSub *pubsub
-	// uploadCallerPubSub routes responses to callers.
-	uploadCallerPubSub *pubsub
-	// uploadReqPubSub routes responses internally.
-	uploadReqPubSub *pubsub
+	// uploadPubSub routes responses upload callers.
+	uploadPubSub *pubsub
 }
 
 // Wait blocks until all resources held by the uploader are released.
@@ -125,8 +125,7 @@ func (u *uploaderv2) Wait() {
 	u.processorWg.Wait()
 	// 3rd, intermediate brokers must stop sending.
 	u.queryPubSub.wait()
-	u.uploadReqPubSub.wait()
-	u.uploadCallerPubSub.wait()
+	u.uploadPubSub.wait()
 	// 4th, receivers must drain their channels, which could involve spawning more workers.
 	u.receiverWg.Wait()
 	// 5th, ensure all workers have terminated.
@@ -209,13 +208,15 @@ func newUploaderv2(
 		ioLargeSem:  semaphore.NewWeighted(int64(ioCfg.OpenLargeFilesLimit)),
 		dirChildren: initSliceCache(),
 
-		queryChan:          make(chan missingBlobRequest),
-		queryPubSub:        newPubSub(),
-		uploadChan:         make(chan UploadRequest),
-		uploadBatcherChan:  make(chan blob),
-		uploadStreamerChan: make(chan blob),
-		uploadCallerPubSub: newPubSub(),
-		uploadReqPubSub:    newPubSub(),
+		queryCh:          make(chan missingBlobRequest),
+		queryPubSub:      newPubSub(),
+		uploadCh:         make(chan UploadRequest),
+		uploadDispatchCh: make(chan blob),
+		uploadQueryCh:    make(chan blob),
+		uploadResCh:      make(chan UploadResponse),
+		uploadBatchCh:    make(chan blob),
+		uploadStreamCh:   make(chan blob),
+		uploadPubSub:     newPubSub(),
 
 		queryRequestBaseSize:  proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),
 		uploadRequestBaseSize: proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),
@@ -224,9 +225,11 @@ func newUploaderv2(
 	// Start processors. Each one will launch a goroutine for background processing.
 	// This way allows ensuring that all waiting groups are set once this function returns.
 	u.queryProcessor(ctx)
+	u.uploadProcessor(ctx)
 	u.uploadDispatcher(ctx)
-	u.uploadBatcher(ctx)
-	u.uploadStreamer(ctx)
+	u.uploadQueryPipe(ctx)
+	u.uploadBatchProcessor(ctx)
+	u.uploadStreamProcessor(ctx)
 	return u, nil
 }
 

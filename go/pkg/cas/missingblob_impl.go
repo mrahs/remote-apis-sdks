@@ -7,6 +7,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
+	"github.com/golang/glog"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -110,7 +111,6 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 }
 
 // missingBlobsStreamer is defined on the underlying uploader to be accessible by the upload code.
-// For user documentation, see the public method streamingUploader.MissingBlobs.
 func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	// The implementation here acts like a pipe with a count-based coordinator.
 	// Closing the input channel should not close the pipe until all the requests are piped through to the responses channel.
@@ -123,12 +123,13 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 	tag, resChan := u.queryPubSub.sub(ctxQueryCaller)
 
 	// Counter.
-	pending := 0
 	pendingChan := make(chan int)
 	u.receiverWg.Add(1)
 	go func() {
 		defer u.receiverWg.Done()
 		defer ctxQueryCallerCancel()
+
+		pending := 0
 		done := false
 		for {
 			select {
@@ -172,7 +173,7 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 					pendingChan <- 0
 					return
 				}
-				u.queryChan <- missingBlobRequest{digest: d, tag: tag}
+				u.queryCh <- missingBlobRequest{digest: d, tag: tag}
 				pendingChan <- 1
 			}
 		}
@@ -242,6 +243,8 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
 func (u *uploaderv2) queryProcessor(ctx context.Context) {
+	glog.V(3).Info("query.processor")
+
 	bundle := make(missingBlobRequestBundle)
 	bundleSize := u.queryRequestBaseSize
 
@@ -270,7 +273,7 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 		defer bundleTicker.Stop()
 		for {
 			select {
-			case req, ok := <-u.queryChan:
+			case req, ok := <-u.queryCh:
 				if !ok {
 					return
 				}

@@ -36,7 +36,7 @@ func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) 
 		return nil, walker.Cancel, err
 	}
 
-	// Cannot access the target since it might be relative to the symlink directory, not the cwd of the process.
+	// Cannot use the target name for syscalls since it might be relative to the symlink directory, not the cwd of the process.
 	var targetRelative string
 	if filepath.IsAbs(target) {
 		targetRelative, err = filepath.Rel(path.Dir().String(), target)
@@ -56,24 +56,26 @@ func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) 
 	}
 
 	var node *repb.SymlinkNode
+	nextStep := walker.Skip
+
+	// If the symlink itself is wanted, capture it.
 	if slo.Preserve() {
-		if err != nil {
-			return nil, walker.Cancel, err
-		}
 		node = &repb.SymlinkNode{
 			Name:   path.Base().String(),
 			Target: targetRelative,
 		}
 	}
 
+	// If the target is wanted, tell the walker to follow it.
 	if slo.IncludeTarget() {
-		return node, walker.Continue, nil
+		nextStep = walker.Continue
 	}
-	return node, walker.Skip, nil
+
+	return node, nextStep, nil
 }
 
 // digestDirectory constructs a hash-deterministic directory node and returns it along with the corresponding bytes of the directory proto.
-func digestDirectory(path impath.Absolute, children []any) (*repb.DirectoryNode, []byte, walker.NextStep, error) {
+func digestDirectory(path impath.Absolute, children []any) (*repb.DirectoryNode, []byte, error) {
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
 		Name: path.Base().String(),
@@ -100,27 +102,32 @@ func digestDirectory(path impath.Absolute, children []any) (*repb.DirectoryNode,
 	})
 	b, err := proto.Marshal(dir)
 	if err != nil {
-		return nil, nil, walker.Cancel, err
+		return nil, nil, err
 	}
 	d := digest.NewFromBlob(b)
 	node.Digest = d.ToProto()
-	return node, b, walker.Continue, nil
+	return node, b, nil
 }
 
 // digestFile constructs a file node and returns it along with the blob to be dispatched.
-// If the file size exceeds the large threshold, both IO and large IO holds are retained upon returning and it's
-// the responsibility of the streamer to release them.
-// This allows the walker to collect the digest and proceed without having to wait for the streamer.
-func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioSem, ioLargeSem *semaphore.Weighted, smallFileSizeThreshold, largeFileSizeThreshold int64) (node *repb.FileNode, blb *blob, nextStep walker.NextStep, err error) {
+//
+// One token of ioSem is acquired upon calling this function.
+// If the file size <= smallFileSizeThreshold, the token is released before returning.
+// Otherwise, the caller must assume ownership of the token and release it.
+//
+// If the file size >= largeFileSizeThreshold, one token of ioLargeSem is acquired.
+// The caller must assume ownership of that token and release it.
+//
+// If the returned err is not nil, both tokens are released before returning.
+func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioSem, ioLargeSem *semaphore.Weighted, smallFileSizeThreshold, largeFileSizeThreshold int64) (node *repb.FileNode, blb blob, err error) {
 	if err := ioSem.Acquire(ctx, 1); err != nil {
-		return nil, nil, walker.Cancel, nil
+		return nil, blb, ctx.Err()
 	}
 	defer func() {
-		// Keep the IO hold if the streamer is going to assume ownership of it.
-		if blb.reader != nil {
-			return
+		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
+		if blb.reader == nil {
+			ioSem.Release(1)
 		}
-		ioSem.Release(1)
 	}()
 
 	node = &repb.FileNode{
@@ -131,7 +138,7 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioS
 		glog.V(3).Infof("upload.digest.file.small: path=%s, size=%d", path, info.Size())
 		f, err := os.Open(path.String())
 		if err != nil {
-			return nil, nil, walker.Cancel, err
+			return nil, blb, err
 		}
 		defer func() {
 			if errClose := f.Close(); errClose != nil {
@@ -141,35 +148,40 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioS
 
 		b, err := io.ReadAll(f)
 		if err != nil {
-			return nil, nil, walker.Cancel, err
+			return nil, blb, err
 		}
 		node.Digest = digest.NewFromBlob(b).ToProto()
-		return node, &blob{digest: node.Digest, bytes: b}, walker.Continue, nil
+		blb.digest = digest.NewFromProtoUnvalidated(node.Digest)
+		blb.bytes = b
+		return node, blb, nil
 	}
 
 	if info.Size() < largeFileSizeThreshold {
-		glog.V(3).Infof("upload.digest.file.large: path=%s, size=%d", path, info.Size())
+		glog.V(3).Infof("upload.digest.file.medium: path=%s, size=%d", path, info.Size())
 		d, err := digest.NewFromFile(path.String())
 		if err != nil {
-			return nil, nil, walker.Cancel, err
+			return nil, blb, err
 		}
 		node.Digest = d.ToProto()
-		return node, &blob{digest: node.Digest, path: path.String()}, walker.Continue, nil
+		blb.digest = digest.NewFromProtoUnvalidated(node.Digest)
+		blb.path = path.String()
+		return node, blb, nil
 	}
 
-	glog.V(3).Infof("upload.digest.file.medium: path=%s, size=%d", path, info.Size())
+	glog.V(3).Infof("upload.digest.file.large: path=%s, size=%d", path, info.Size())
 	if err := ioLargeSem.Acquire(ctx, 1); err != nil {
-		return nil, nil, walker.Cancel, nil
+		return nil, blb, ctx.Err()
 	}
 	defer func() {
-		if err != nil {
+		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
+		if blb.reader == nil {
 			ioLargeSem.Release(1)
 		}
 	}()
 
 	f, err := os.Open(path.String())
 	if err != nil {
-		return nil, nil, walker.Cancel, err
+		return nil, blb, err
 	}
 	defer func() {
 		if err != nil {
@@ -182,16 +194,18 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioS
 
 	d, err := digest.NewFromReader(f)
 	if err != nil {
-		return nil, nil, walker.Cancel, err
+		return nil, blb, err
 	}
 
 	// Reset the offset for the streamer.
 	_, err = f.Seek(0, io.SeekStart)
 	if err != nil {
-		return nil, nil, walker.Cancel, err
+		return nil, blb, err
 	}
 
 	node.Digest = d.ToProto()
 	// The streamer is responsible for closing the file and releasing both ioSem and ioLargeSem.
-	return node, &blob{digest: node.Digest, reader: f}, walker.Continue, nil
+	blb.digest = digest.NewFromProtoUnvalidated(node.Digest)
+	blb.reader = f
+	return node, blb, nil
 }

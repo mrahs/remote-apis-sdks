@@ -129,15 +129,17 @@ type IOConfig struct {
 	// Assuming files under the same directory are located close to each other on disk, then such files are batched together.
 	OptimizeForDiskLocality bool
 
-	// UploadCache is a read/write cache for digested files.
+	// DigestCache is a read/write cache for digested files.
 	//
 	// The key is the file path and the associated exclusion filter.
-	// The underlying value is an UploadResponse value (not a pointer). If the value (the interface, not the underlying value)
-	// is nil, the file is already being processed by another goroutine.
+	// The underlying value is a proto.Message interface value that must be one of *repb.FileNode, *repb.DirectoryNode, or *repb.SymlinkNode.
+	//
+	// If the value (the interface, not the underlying value) is nil, the file is already being digested in another goroutine.
 	// If the key does not exist, the file hasn't been seen yet.
+	//
 	// Providing a cache here allows for reusing entries between clients.
-	// UploadCache entries are never evicted which implies the assumption that the files are never modified during the lifetime of the cache entry.
-	UploadCache sync.Map
+	// Cache entries are never evicted which implies the assumption that files are never modified during the lifetime of the cache entry.
+	DigestCache sync.Map
 }
 
 // Stats represents potential metrics reported by various methods.
@@ -242,7 +244,7 @@ func (s *Stats) ToCacheHit() Stats {
 	// for trees
 	hit.CacheHitCount = hit.DigestCount
 	// for blobs
-	if hit.CacheHitCount == 0 {
+	if hit.CacheHitCount == 0 && hit.LogicalBytesCached > 0 {
 		hit.CacheHitCount = 1
 	}
 	hit.CacheMissCount = 0
