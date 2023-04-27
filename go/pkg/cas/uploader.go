@@ -9,6 +9,7 @@ import (
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
+	"github.com/golang/glog"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pborman/uuid"
 	"golang.org/x/sync/semaphore"
@@ -121,15 +122,20 @@ type uploaderv2 struct {
 func (u *uploaderv2) Wait() {
 	// 1st, senders must stop sending.
 	// This call must happen after all other query/upload methods have returned to ensure the wait group does not grow while waiting.
+	glog.V(1).Infof("uploader: waiting for senders")
 	u.senderWg.Wait()
 	// 2nd, brokers must stop sending.
+	glog.V(1).Infof("uploader: waiting for processors")
 	u.processorWg.Wait()
 	// 3rd, intermediate brokers must stop sending.
+	glog.V(1).Infof("uploader: waiting for brokers")
 	u.queryPubSub.wait()
 	u.uploadPubSub.wait()
 	// 4th, receivers must drain their channels, which could involve spawning more workers.
+	glog.V(1).Infof("uploader: waiting for receivers")
 	u.receiverWg.Wait()
 	// 5th, ensure all workers have terminated.
+	glog.V(1).Infof("uploader: waiting for workers")
 	u.workerWg.Wait()
 }
 

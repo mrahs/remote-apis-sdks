@@ -101,10 +101,11 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	}
 	defer u.streamSem.Release(1)
 
+	// Read raw bytes if compression is disabled.
 	src := r
 
 	// If compression is enabled, plug in the encoder via a pipe.
-	var errCompr error
+	var errEnc error
 	var nRawBytes int64
 	var encWg sync.WaitGroup
 	var withCompression bool
@@ -113,7 +114,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 		pr, pw := io.Pipe()
 		// Closing pr always returns a nil error, but also sends ErrClosedPipe to pw.
 		defer pr.Close()
-		src = pr
+		src = pr // Read compressed bytes instead of raw bytes.
 
 		enc := zstdEncoders.Get().(*zstd.Encoder)
 		defer zstdEncoders.Put(enc)
@@ -126,24 +127,15 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 			// Closing pw always returns a nil error, but also sends an EOF to pr.
 			defer pw.Close()
 
-			// Closing the encoder is necessary to flush remaining bytes.
-			defer func() {
-				if errClose := enc.Close(); errClose != nil {
-					errCompr = errors.Join(ErrCompression, errClose, errCompr)
-				}
-			}()
-
 			// The encoder will theoretically read continuously. However, pw will block it
 			// while pr is not reading from the other side.
 			// In other words, the chunk size of the encoder's output is controlled by the reader.
-			var errEnc error
-			switch nRawBytes, errEnc = enc.ReadFrom(r); {
-			case errEnc == io.ErrClosedPipe:
+			nRawBytes, errEnc = enc.ReadFrom(r)
+			// Closing the encoder is necessary to flush remaining bytes.
+			errEnc = errors.Join(enc.Close(), errEnc)
+			if errors.Is(errEnc, io.ErrClosedPipe) {
 				// pr was closed first, which means the actual error is on that end.
-				return
-			case errEnc != nil:
-				errCompr = errors.Join(ErrCompression, errEnc)
-				return
+				errEnc = nil
 			}
 		}()
 	}
@@ -204,8 +196,8 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 		}
 	}
 
-	// Close the reader to signal to the encoder's goroutine to terminate.
-	// However, do not close the reader if it is the given argument; hence the boolean guard.
+	// In case of a cache hit or an error, the pipe must be closed to terminate the encoder's goroutine
+	// which would have otherwise terminated after draining the reader.
 	if srcCloser, ok := src.(io.Closer); ok && withCompression {
 		if errClose := srcCloser.Close(); errClose != nil {
 			err = errors.Join(ErrIO, errClose, err)
@@ -214,10 +206,10 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 
 	// This theoretically will block until the encoder's goroutine returns.
 	// However, closing the reader eventually terminates that goroutine.
-	// This is necessary because the encoder's goroutine currently owns errCompr and nRawBytes.
+	// This is necessary because the encoder's goroutine currently owns errEnc and nRawBytes.
 	encWg.Wait()
-	if errCompr != nil {
-		err = errors.Join(ErrCompression, errCompr, err)
+	if errEnc != nil {
+		err = errors.Join(ErrCompression, errEnc, err)
 	}
 
 	// Capture stats before processing errors.
@@ -278,6 +270,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 // This method must not be called after calling Wait.
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, *Stats, error) {
 	glog.V(1).Infof("upload: %d requests", len(reqs))
+	glog.V(1).Infof("upload.done")
 	if len(reqs) == 0 {
 		return nil, nil, nil
 	}
@@ -400,7 +393,7 @@ func (u *uploaderv2) uploadProcessor(ctx context.Context) {
 						continue
 					}
 					u.workerWg.Add(1)
-					go func(){
+					go func() {
 						defer u.workerWg.Done()
 						wg.Wait()
 						u.uploadDispatchCh <- blob{tag: req.tag, done: true}
@@ -677,9 +670,10 @@ func (u *uploaderv2) uploadQueryPipe(ctx context.Context) {
 	queryCh := make(chan digest.Digest)
 	queryResCh := u.missingBlobsStreamer(ctx, queryCh)
 
-	u.workerWg.Add(1)
+	u.processorWg.Add(1)
 	go func() {
-		defer u.workerWg.Done()
+		defer u.processorWg.Done()
+		defer close(queryCh) // terminate the query streamer
 		defer glog.V(1).Info("upload.pipe: cancel")
 
 		// Keep track of the associated blob and tags since the query API accepts a digest only.
@@ -920,20 +914,23 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	if len(bundle) == 0 {
 		return
 	}
+
 	if err == nil {
-		glog.Errorf("upload.batchp.call: incomplete response; expected %d more", len(bundle))
-		return
+		err = fmt.Errorf("server did not return a response for %d requests", len(bundle))
 	}
+	err = errors.Join(ErrGRPC, err)
 
 	// Report failed requests due to call failure.
-	err = errors.Join(ErrGRPC, err)
 	for d, item := range bundle {
 		tags := item.tags
 		s := Stats{
 			BytesRequested:  d.Size,
-			TotalBytesMoved: d.Size * digestRetryCount[d],
+			TotalBytesMoved: d.Size,
 			CacheMissCount:  1,
 			BatchedCount:    1,
+		}
+		if r := digestRetryCount[d]; r > 0 {
+			s.TotalBytesMoved = d.Size * (r + 1)
 		}
 		select {
 		case u.uploadResCh <- UploadResponse{

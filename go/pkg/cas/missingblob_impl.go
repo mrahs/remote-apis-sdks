@@ -51,6 +51,8 @@ type queryCaller = chan MissingBlobsResponse
 //
 // This method must not be called after calling Wait.
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
+	glog.V(1).Infof("query: %d", len(digests))
+	glog.V(1).Infof("query.done")
 	if len(digests) < 1 {
 		return nil, nil
 	}
@@ -65,9 +67,11 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			case ch <- d:
 				continue
 			case <-ctx.Done():
+				glog.V(1).Info("query.send.cancel")
 				return
 			}
 		}
+		glog.V(1).Info("query.send.done")
 	}()
 
 	var missing []digest.Digest
@@ -134,6 +138,7 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 		for {
 			select {
 			case <-ctx.Done():
+				glog.V(1).Infof("query.streamer.count.cancel")
 				return
 			case x := <-pendingChan: // The channel is never closed so no need to capture the closing signal.
 				if x == 0 {
@@ -151,7 +156,7 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 	u.receiverWg.Add(1)
 	go func() {
 		defer u.receiverWg.Done()
-		// Continue to drain until the processor closes the channel to avoid deadlocks.
+		// Continue to drain until the processor closes the channel.
 		for r := range resChan {
 			ch <- r.(MissingBlobsResponse)
 			pendingChan <- -1
@@ -167,6 +172,7 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 			select {
 			case <-ctx.Done():
 				ctxQueryCallerCancel()
+				glog.V(1).Infof("query.streamer.send.cancel")
 				return
 			case d, ok := <-in:
 				if !ok {
@@ -268,6 +274,7 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 	u.processorWg.Add(1)
 	go func() {
 		defer u.processorWg.Done()
+		defer glog.V(1).Info("query.processor.cancel")
 
 		bundleTicker := time.NewTicker(u.queryRpcConfig.BundleTimeout)
 		defer bundleTicker.Stop()
@@ -305,9 +312,6 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 			case <-bundleTicker.C:
 				handle()
 			case <-ctx.Done():
-				// Nothing to wait for since all the senders and receivers should have terminated as well.
-				// The only things that might still be in-flight are the gRPC calls, which will eventually terminate since
-				// there are no active query callers.
 				return
 			}
 		}
