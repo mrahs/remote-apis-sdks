@@ -89,29 +89,30 @@ type uploaderv2 struct {
 	uploadRequestBaseSize int
 
 	// Concurrency controls.
-	senderWg    sync.WaitGroup // Long-lived top-level producers.
-	processorWg sync.WaitGroup // Long-lived brokers.
-	receiverWg  sync.WaitGroup // Long-lived consumers.
-	workerWg    sync.WaitGroup // Short-lived workers.
+	senderWg     sync.WaitGroup          // Long-lived top-level producers.
+	processorWg  sync.WaitGroup          // Long-lived brokers.
+	receiverWg   sync.WaitGroup          // Long-lived consumers.
+	workerWg     sync.WaitGroup          // Short-lived workers.
+	callerWalkWg map[tag]*sync.WaitGroup // Walks per caller.
 	// queryCh is the fan-in channel for query requests.
 	queryCh chan missingBlobRequest
 	// uploadCh is the fan-in channel for upload requests.
 	uploadCh chan UploadRequest
 	// uploadDispatchCh is the fan-in channel for dispatched blobs.
 	uploadDispatchCh chan blob
-	// uploadQueryCh is the pipe channel for presence checking before uploading.
+	// uploadQueryPipeCh is the pipe channel for presence checking before uploading.
 	// The dispatcher goroutine is the only sender.
-	uploadQueryCh chan blob
+	uploadQueryPipeCh chan blob
 	// uploadResCh is the fan-in channel for responses.
-	uploadResCh    chan UploadResponse
+	// All requests must have went through uploadDispatchCh first for proper counting.
+	uploadResCh chan UploadResponse
 	// uploadBatchCh is the fan-in channel for unified requests to the batching API.
-	uploadBatchCh  chan blob
+	uploadBatchCh chan blob
 	// uploadStreamCh is the fan-in channel for unified requests to the byte streaming API.
 	uploadStreamCh chan blob
-
 	// queryPubSub routes responses to query callers.
 	queryPubSub *pubsub
-	// uploadPubSub routes responses upload callers.
+	// uploadPubSub routes responses to upload callers.
 	uploadPubSub *pubsub
 }
 
@@ -208,15 +209,16 @@ func newUploaderv2(
 		ioLargeSem:  semaphore.NewWeighted(int64(ioCfg.OpenLargeFilesLimit)),
 		dirChildren: initSliceCache(),
 
-		queryCh:          make(chan missingBlobRequest),
-		queryPubSub:      newPubSub(),
-		uploadCh:         make(chan UploadRequest),
-		uploadDispatchCh: make(chan blob),
-		uploadQueryCh:    make(chan blob),
-		uploadResCh:      make(chan UploadResponse),
-		uploadBatchCh:    make(chan blob),
-		uploadStreamCh:   make(chan blob),
-		uploadPubSub:     newPubSub(),
+		callerWalkWg:      make(map[tag]*sync.WaitGroup),
+		queryCh:           make(chan missingBlobRequest),
+		queryPubSub:       newPubSub(),
+		uploadCh:          make(chan UploadRequest),
+		uploadDispatchCh:  make(chan blob),
+		uploadQueryPipeCh: make(chan blob),
+		uploadResCh:       make(chan UploadResponse),
+		uploadBatchCh:     make(chan blob),
+		uploadStreamCh:    make(chan blob),
+		uploadPubSub:      newPubSub(),
 
 		queryRequestBaseSize:  proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),
 		uploadRequestBaseSize: proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),

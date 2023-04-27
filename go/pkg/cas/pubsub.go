@@ -31,7 +31,7 @@ type pubsub struct {
 // A slow subscriber affects all other subscribers that share the same message.
 func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 	t := tag(uuid.New())
-	glog.V(3).Infof("pubsub.sub: tag=%s", t)
+	glog.V(2).Infof("pubsub.sub: tag=%s", t)
 
 	// Serialize this block to avoid concurrent map-read-write errors.
 	ps.mu.Lock()
@@ -53,7 +53,7 @@ func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 		ps.mu.Unlock()
 
 		close(subscriber)
-		glog.V(3).Infof("pubsub.unsub: tag=%s", t)
+		glog.V(2).Infof("pubsub.unsub: tag=%s", t)
 	}()
 
 	return t, subscriber
@@ -102,7 +102,7 @@ func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	glog.V(3).Infof("pubsub.pub: tags=%v, subs=%v", tags, ps.subs)
+	glog.V(3).Infof("pubsub.pub.msg: type=%[1]T, value=%[1]v", m)
 	var toRetry []tag
 	var received []tag
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -111,11 +111,13 @@ func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 		for _, t := range tags {
 			subscriber, ok := ps.subs[t]
 			if !ok {
+				glog.V(2).Infof("pubsub.pub.drop: tag=%s", t)
 				continue
 			}
 			// Send now or reschedule if the subscriber is not ready.
 			select {
 			case subscriber <- m:
+				glog.V(2).Infof("pubsub.pub.send: tag=%s", t)
 				received = append(received, t)
 				if len(received) >= n {
 					return received

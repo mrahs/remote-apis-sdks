@@ -82,6 +82,10 @@ type fakeCAS struct {
 func (c *fakeCAS) FindMissingBlobs(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 	return c.findMissingBlobs(ctx, in, opts...)
 }
+	
+func (c *fakeCAS) BatchUpdateBlobs(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
+	return c.batchUpdateBlobs(ctx, in, opts...)
+}
 
 type byHash []digest.Digest
 

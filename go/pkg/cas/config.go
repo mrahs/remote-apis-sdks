@@ -151,6 +151,8 @@ type Stats struct {
 
 	// LogicalBytesMoved is the amount of BytesRequsted that was processed.
 	// It cannot be larger than BytesRequested, but may be smaller in case of a partial response.
+	// The quantity is more granular for streaming than it is for batching. In streaming, it is an increment of the buffer size.
+	// For batching, it is a sum of the size of items that were batched.
 	LogicalBytesMoved int64
 
 	// TotalBytesMoved is the total number of bytes moved over the wire.

@@ -243,7 +243,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
 func (u *uploaderv2) queryProcessor(ctx context.Context) {
-	glog.V(3).Info("query.processor")
+	glog.V(1).Info("query.processor")
 
 	bundle := make(missingBlobRequestBundle)
 	bundleSize := u.queryRequestBaseSize
