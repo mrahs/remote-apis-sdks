@@ -309,6 +309,8 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 
 // Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
 //
+// The caller must close the specified input channel as a termination signal. Cancelling the context is not enough.
+//
 // Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
 // The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
 // With infinite speed and limits, every blob will be uploaded exactly once. On the other extreme, every blob is uploaded
@@ -325,27 +327,27 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest
 	ch := make(chan UploadResponse)
 
 	// Register a new caller with the internal processor.
-	ctxUploadCaller, ctxUploadCallerCancel := context.WithCancel(ctx)
+	// This borker should not cancel until the sender tells it to, hence, the background context.
+	ctxUploadCaller, ctxUploadCallerCancel := context.WithCancel(context.Background())
 	tag, resChan := u.uploadPubSub.sub(ctxUploadCaller)
 
 	// Forward the requests to the internal processor.
 	u.senderWg.Add(1)
 	go func() {
 		defer u.senderWg.Done()
-		for {
+		for r := range in {
+			r.tag = tag
 			select {
+			case u.uploadCh <- r:
 			case <-ctx.Done():
-				ctxUploadCallerCancel()
 				return
-			case r, ok := <-in:
-				r.tag = tag
-				// If the user closed the channel. Let the processor know that no further requests are expected.
-				r.done = !ok
-				u.uploadCh <- r
-				if !ok {
-					return
-				}
 			}
+		}
+		// Let the processor know that no further requests are expected.
+		select {
+		case u.uploadCh <- UploadRequest{tag: tag, done: true}:
+		case <-ctx.Done():
+			return
 		}
 	}()
 
@@ -356,7 +358,8 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest
 		for rawR := range resChan {
 			r := rawR.(UploadResponse)
 			if r.done {
-				return
+				ctxUploadCallerCancel() // let the broker terminate the subscription.
+				continue
 			}
 			ch <- r
 		}

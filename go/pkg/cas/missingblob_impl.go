@@ -67,11 +67,9 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			case ch <- d:
 				continue
 			case <-ctx.Done():
-				glog.V(1).Info("query.send.cancel")
 				return
 			}
 		}
-		glog.V(1).Info("query.send.done")
 	}()
 
 	var missing []digest.Digest
@@ -101,7 +99,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 
 // MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
 //
-// The caller must close the specified input channel as a termination signal.
+// The caller must close the specified input channel as a termination signal. Cancelling the context is not enough.
 // The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
 // All received requests will have corresponding responses sent on the returned channel.
 //
@@ -116,71 +114,68 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 
 // missingBlobsStreamer is defined on the underlying uploader to be accessible by the upload code.
 func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
-	// The implementation here acts like a pipe with a count-based coordinator.
-	// Closing the input channel should not close the pipe until all the requests are piped through to the responses channel.
-	// At the same time, all goroutines must abort when the context is done.
-	// To ahcieve this, a third goroutine (in addition to a sender and a receiver) is used to maintain a count of pending requests.
-	// Once the count is reduced to zero after the sender is done, the receiver is closed and the processor is notified to unregister this query caller.
-
 	ch := make(chan MissingBlobsResponse)
-	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(ctx)
-	tag, resChan := u.queryPubSub.sub(ctxQueryCaller)
+	// This borker should not cancel until the sender tells it to, hence, the background context.
+	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(context.Background())
+	tag, resCh := u.queryPubSub.sub(ctxQueryCaller)
 
-	// Counter.
-	pendingChan := make(chan int)
-	u.receiverWg.Add(1)
+	pendingCh := make(chan int)
+	u.workerWg.Add(1)
 	go func() {
-		defer u.receiverWg.Done()
-		defer ctxQueryCallerCancel()
-
+		defer u.workerWg.Done()
+		defer ctxQueryCallerCancel() // let the broker and the receiver terminate.
 		pending := 0
 		done := false
-		for {
-			select {
-			case <-ctx.Done():
-				glog.V(1).Infof("query.streamer.count.cancel")
-				return
-			case x := <-pendingChan: // The channel is never closed so no need to capture the closing signal.
+		for x := range pendingCh {
 				if x == 0 {
+					if done {
+						// Both are done.
+						return
+					}
 					done = true
+					continue
 				}
 				pending += x
+				// If the sender is done and all the requests are done, let the receiver and the broker terminate.
 				if pending == 0 && done {
 					return
 				}
-			}
 		}
-	}()
-
-	// Receiver.
-	u.receiverWg.Add(1)
-	go func() {
-		defer u.receiverWg.Done()
-		// Continue to drain until the processor closes the channel.
-		for r := range resChan {
-			ch <- r.(MissingBlobsResponse)
-			pendingChan <- -1
-		}
-		close(ch)
 	}()
 
 	// Sender.
 	u.senderWg.Add(1)
 	go func() {
 		defer u.senderWg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				ctxQueryCallerCancel()
-				glog.V(1).Infof("query.streamer.send.cancel")
-				return
-			case d, ok := <-in:
-				if !ok {
-					pendingChan <- 0
+		for d := range in {
+				select {
+				case u.queryCh <- missingBlobRequest{digest: d, tag: tag}:
+					pendingCh <- 1
+				case <-ctx.Done():
+					pendingCh <- 0
 					return
 				}
-				u.queryCh <- missingBlobRequest{digest: d, tag: tag}
-				pendingChan <- 1
+		}
+		pendingCh <- 0
+	}()
+
+	// Receiver.
+	u.receiverWg.Add(1)
+	go func() {
+		defer u.receiverWg.Done()
+		defer close(ch)
+		// Continue to drain until the broker closes the channel.
+		for {
+			select {
+			case r, ok := <- resCh:
+				if !ok {
+					return
+				}
+				ch <- r.(MissingBlobsResponse)
+				pendingCh <- -1
+			case <-ctx.Done():
+				pendingCh <- 0
+				return
 			}
 		}
 	}()
