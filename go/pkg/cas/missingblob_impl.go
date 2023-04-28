@@ -52,7 +52,8 @@ type queryCaller = chan MissingBlobsResponse
 // This method must not be called after calling Wait.
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
 	glog.V(1).Infof("query: %d", len(digests))
-	glog.V(1).Infof("query.done")
+	defer glog.V(1).Info("query.done")
+
 	if len(digests) < 1 {
 		return nil, nil
 	}
@@ -60,6 +61,8 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	ch := make(chan digest.Digest)
 	u.senderWg.Add(1)
 	go func() {
+		glog.V(1).Info("query.sender.start")
+		defer glog.V(1).Info("query.sender.stop")
 		defer close(ch) // ensure the streamer closes its response channel
 		defer u.senderWg.Done()
 		for _, d := range digests {
@@ -116,12 +119,15 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	ch := make(chan MissingBlobsResponse)
 	// This borker should not cancel until the sender tells it to, hence, the background context.
+	// TODO: replace with context.WithoutCancel once the SDK is updated to go1.21: https://pkg.go.dev/context@master#WithoutCancel
 	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(context.Background())
 	tag, resCh := u.queryPubSub.sub(ctxQueryCaller)
 
 	pendingCh := make(chan int)
 	u.workerWg.Add(1)
 	go func() {
+		glog.V(1).Info("query.streamer.counter.start")
+		defer glog.V(1).Info("query.streamer.counter.stop")
 		defer u.workerWg.Done()
 		defer ctxQueryCallerCancel() // let the broker and the receiver terminate.
 		pending := 0
@@ -146,6 +152,8 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 	// Sender.
 	u.senderWg.Add(1)
 	go func() {
+		glog.V(1).Info("query.streamer.sender.start")
+		defer glog.V(1).Info("query.streamer.sender.stop")
 		defer u.senderWg.Done()
 		for d := range in {
 				select {
@@ -162,6 +170,8 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 	// Receiver.
 	u.receiverWg.Add(1)
 	go func() {
+		glog.V(1).Info("query.streamer.receiver.start")
+		defer glog.V(1).Info("query.streamer.receiver.stop")
 		defer u.receiverWg.Done()
 		defer close(ch)
 		// Continue to drain until the broker closes the channel.
@@ -186,6 +196,8 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 // callMissingBlobs calls the gRPC endpoint and notifies query callers of the results.
 // It assumes ownership of the bundle argument.
 func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
+	glog.V(2).Infof("query.call: len=%d", len(bundle))
+
 	if len(bundle) < 1 {
 		return
 	}
@@ -219,6 +231,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 		err = errors.Join(ErrGRPC, err)
 		missing = digests
 	}
+	glog.V(2).Infof("query.call.done: missing=%d", len(missing))
 
 	// Report missing.
 	for _, dpb := range missing {
@@ -244,8 +257,6 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
 func (u *uploaderv2) queryProcessor(ctx context.Context) {
-	glog.V(1).Info("query.processor")
-
 	bundle := make(missingBlobRequestBundle)
 	bundleSize := u.queryRequestBaseSize
 
@@ -268,8 +279,9 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 
 	u.processorWg.Add(1)
 	go func() {
+		glog.V(1).Info("query.processor.start")
+		defer glog.V(1).Info("query.processor.stop")
 		defer u.processorWg.Done()
-		defer glog.V(1).Info("query.processor.cancel")
 
 		bundleTicker := time.NewTicker(u.queryRpcConfig.BundleTimeout)
 		defer bundleTicker.Stop()

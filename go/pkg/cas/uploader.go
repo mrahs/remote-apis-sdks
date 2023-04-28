@@ -74,47 +74,42 @@ type uploaderv2 struct {
 	streamRpcConfig GRPCConfig
 
 	// gRPC throttling controls.
-	querySem  *semaphore.Weighted
-	uploadSem *semaphore.Weighted
-	streamSem *semaphore.Weighted
+	querySem  *semaphore.Weighted // Controls concurrent calls to the query API.
+	uploadSem *semaphore.Weighted // Controls concurrent calls to the batch API.
+	streamSem *semaphore.Weighted // Controls concurrent calls to the byte streaming API.
 
 	// IO controls.
-	ioCfg                 IOConfig
-	buffers               sync.Pool
-	zstdEncoders          sync.Pool
-	walkSem               *semaphore.Weighted
-	ioSem                 *semaphore.Weighted
-	ioLargeSem            *semaphore.Weighted
-	dirChildren           sliceCache
+	ioCfg        IOConfig
+	buffers      sync.Pool
+	zstdEncoders sync.Pool
+	walkSem      *semaphore.Weighted // Controls concurrent file system walks.
+	ioSem        *semaphore.Weighted // Controls total number of open files.
+	ioLargeSem   *semaphore.Weighted // Controls total number of open large files.
+	// digestCache allows digesting each path only once.
+	// Concurrent walkers claim a path by storing a nil value, which allows other walkers to defer
+	// digesting that path until the first walker stores the digest once it's computed.
+	digestCache sync.Map
+	// dirChildren is shared between all callers. However, since a directory is owned by a single
+	// walker at a time, there is no concurrent read/write to this map, but there might be concurrent reads.
+	dirChildren           map[string][]proto.Message
 	queryRequestBaseSize  int
 	uploadRequestBaseSize int
 
 	// Concurrency controls.
-	senderWg     sync.WaitGroup          // Long-lived top-level producers.
-	processorWg  sync.WaitGroup          // Long-lived brokers.
-	receiverWg   sync.WaitGroup          // Long-lived consumers.
-	workerWg     sync.WaitGroup          // Short-lived workers.
-	callerWalkWg map[tag]*sync.WaitGroup // Walks per caller.
-	// queryCh is the fan-in channel for query requests.
-	queryCh chan missingBlobRequest
-	// uploadCh is the fan-in channel for upload requests.
-	uploadCh chan UploadRequest
-	// uploadDispatchCh is the fan-in channel for dispatched blobs.
-	uploadDispatchCh chan blob
-	// uploadQueryPipeCh is the pipe channel for presence checking before uploading.
-	// The dispatcher goroutine is the only sender.
-	uploadQueryPipeCh chan blob
-	// uploadResCh is the fan-in channel for responses.
-	// All requests must have went through uploadDispatchCh first for proper counting.
-	uploadResCh chan UploadResponse
-	// uploadBatchCh is the fan-in channel for unified requests to the batching API.
-	uploadBatchCh chan blob
-	// uploadStreamCh is the fan-in channel for unified requests to the byte streaming API.
-	uploadStreamCh chan blob
-	// queryPubSub routes responses to query callers.
-	queryPubSub *pubsub
-	// uploadPubSub routes responses to upload callers.
-	uploadPubSub *pubsub
+	senderWg          sync.WaitGroup          // Long-lived top-level producers.
+	processorWg       sync.WaitGroup          // Long-lived top-level brokers.
+	receiverWg        sync.WaitGroup          // Long-lived consumers.
+	workerWg          sync.WaitGroup          // Short-lived intermediate producers/consumers.
+	callerWalkWg      map[tag]*sync.WaitGroup // Tracks file system walks per caller.
+	queryCh           chan missingBlobRequest // Fan-in channel for query requests.
+	uploadCh          chan UploadRequest      // Fan-in channel for upload requests.
+	uploadDispatchCh  chan blob               // Fan-in channel for dispatched blobs.
+	uploadQueryPipeCh chan blob               // A pipe channel for presence checking before uploading.
+	uploadResCh       chan UploadResponse     // Fan-in channel for responses.
+	uploadBatchCh     chan blob               // Fan-in channel for unified requests to the batching API.
+	uploadStreamCh    chan blob               // Fan-in channel for unified requests to the byte streaming API.
+	queryPubSub       *pubsub                 // Fan-out broker for query responses.
+	uploadPubSub      *pubsub                 // Fan-out broker for upload responses.
 }
 
 // Wait blocks until all resources held by the uploader are released.
@@ -213,7 +208,7 @@ func newUploaderv2(
 		walkSem:     semaphore.NewWeighted(int64(ioCfg.ConcurrentWalksLimit)),
 		ioSem:       semaphore.NewWeighted(int64(ioCfg.OpenFilesLimit)),
 		ioLargeSem:  semaphore.NewWeighted(int64(ioCfg.OpenLargeFilesLimit)),
-		dirChildren: initSliceCache(),
+		dirChildren: make(map[string][]proto.Message),
 
 		callerWalkWg:      make(map[tag]*sync.WaitGroup),
 		queryCh:           make(chan missingBlobRequest),

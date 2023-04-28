@@ -28,7 +28,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestBatching_WriteBytes(t *testing.T) {
+func TestUpload_WriteBytes(t *testing.T) {
 	tests := []struct {
 		name        string
 		bs          *fakeByteStreamClient
@@ -302,7 +302,7 @@ func TestBatching_WriteBytes(t *testing.T) {
 	}
 }
 
-func TestBatching_Upload(t *testing.T) {
+func TestUpload(t *testing.T) {
 	tests := []struct {
 		name         string
 		fs           map[string][]byte
@@ -613,6 +613,26 @@ func TestBatching_Upload(t *testing.T) {
 		})
 	}
 	glog.Flush()
+}
+
+func TestUpload_Abort(t *testing.T) {
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	u, err := cas.NewBatchingUploader(ctx, &fakeCAS{}, &fakeByteStreamClient{}, "", rpcCfg, rpcCfg, rpcCfg, ioCfg)
+	if err != nil {
+		t.Fatalf("error creating batching uploader: %v", err)
+	}
+	ctx2, ctx2Cancel := context.WithCancel(ctx)
+	ctx2Cancel()
+	tmp := makeFs(t, map[string][]byte{"foo.c": nil})
+	uploaded, _, err := u.Upload(ctx2, cas.UploadRequest{Path: impath.MustAbs(tmp, "foo.c"), SymlinkOptions: symlinkopts.PreserveAllowDangling()})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error mismatch: want %v, got %v", context.Canceled, err)
+	}
+	if len(uploaded) > 0 {
+		t.Errorf("unexpected uploads: %v", uploaded)
+	}
+	ctxCancel()
+	u.Wait()
 }
 
 func makeFs(t *testing.T, paths map[string][]byte) string {

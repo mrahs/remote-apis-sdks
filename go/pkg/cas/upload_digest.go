@@ -75,7 +75,7 @@ func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) 
 }
 
 // digestDirectory constructs a hash-deterministic directory node and returns it along with the corresponding bytes of the directory proto.
-func digestDirectory(path impath.Absolute, children []any) (*repb.DirectoryNode, []byte, error) {
+func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.DirectoryNode, []byte, error) {
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
 		Name: path.Base().String(),

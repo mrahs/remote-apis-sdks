@@ -2,7 +2,6 @@ package cas
 
 import (
 	"math"
-	"sync"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
@@ -128,18 +127,6 @@ type IOConfig struct {
 	// OptimizeForDiskLocality enables sorting files by path before they are written to disk to optimize for disk locality.
 	// Assuming files under the same directory are located close to each other on disk, then such files are batched together.
 	OptimizeForDiskLocality bool
-
-	// DigestCache is a read/write cache for digested files.
-	//
-	// The key is the file path and the associated exclusion filter.
-	// The underlying value is a proto.Message interface value that must be one of *repb.FileNode, *repb.DirectoryNode, or *repb.SymlinkNode.
-	//
-	// If the value (the interface, not the underlying value) is nil, the file is already being digested in another goroutine.
-	// If the key does not exist, the file hasn't been seen yet.
-	//
-	// Providing a cache here allows for reusing entries between clients.
-	// Cache entries are never evicted which implies the assumption that files are never modified during the lifetime of the cache entry.
-	DigestCache sync.Map
 }
 
 // Stats represents potential metrics reported by various methods.
