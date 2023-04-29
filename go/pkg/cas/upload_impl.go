@@ -700,7 +700,7 @@ func (u *uploaderv2) uploadDispatcher() {
 
 // uploadQueryPipe pipes the digest of a blob to the internal query processor to determine if it needs uploading.
 // Cache hits and errors are piped back to the dispatcher while cache misses are piped to the uploader.
-func (u *uploaderv2) uploadQueryPipe() {
+func (u *uploaderv2) uploadQueryPipe(queryCh chan digest.Digest, queryResCh <-chan MissingBlobsResponse) {
 	glog.V(1).Info("upload.pipe.start")
 	defer glog.V(1).Info("upload.pipe.stop")
 
@@ -708,9 +708,6 @@ func (u *uploaderv2) uploadQueryPipe() {
 		// Tell the batch processor to terminate.
 		close(u.uploadBatchCh)
 	}()
-
-	queryCh := make(chan digest.Digest)
-	queryResCh := u.missingBlobsStreamer(queryCh)
 
 	// Keep track of the associated blob and tags since the query API accepts a digest only.
 	// Identical digests have identical blobs.

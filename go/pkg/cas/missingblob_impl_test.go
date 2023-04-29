@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-func TestBatching_MissingBlobs(t *testing.T) {
+func TestMissingBlobs_Batching(t *testing.T) {
 	tests := []struct {
 		name        string
 		digests     []digest.Digest
@@ -90,7 +90,7 @@ func TestBatching_MissingBlobs(t *testing.T) {
 	}
 }
 
-func TestBatching_MissingBlobsConcurrent(t *testing.T) {
+func TestMissingBlobs_Concurrent(t *testing.T) {
 	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
@@ -119,7 +119,7 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 	u.Wait()
 }
 
-func TestBatching_MissingBlobsAbort(t *testing.T) {
+func TestMissingBlobs_Abort(t *testing.T) {
 	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
@@ -141,7 +141,7 @@ func TestBatching_MissingBlobsAbort(t *testing.T) {
 	u.Wait()
 }
 
-func TestStreaming_MissingBlobs(t *testing.T) {
+func TestMissingBlobs_Streaming(t *testing.T) {
 	fCas := &fakeCAS{findMissingBlobs: func(_ context.Context, _ *repb.FindMissingBlobsRequest, _ ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}

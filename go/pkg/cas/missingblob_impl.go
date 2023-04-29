@@ -141,12 +141,7 @@ func (u *uploaderv2) missingBlobsStreamer(in <-chan digest.Digest) <-chan Missin
 		done := false
 		for x := range pendingCh {
 			if x == 0 {
-				if done {
-					// Double done: it's a cancellation signal.
-					return
-				}
 				done = true
-				continue
 			}
 			pending += x
 			// If the sender is done and all the requests are done, let the receiver and the broker terminate.

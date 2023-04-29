@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/golang/glog"
@@ -128,13 +129,13 @@ func (u *uploaderv2) Wait() {
 	glog.V(1).Infof("uploader: waiting for client senders")
 	u.clientSenderWg.Wait()
 
-	glog.V(1).Infof("uploader: waiting for query senders")
-	u.querySenderWg.Wait()
-	close(u.queryCh)
-
 	glog.V(1).Infof("uploader: waiting for upload senders")
 	u.uploadSenderWg.Wait()
 	close(u.uploadCh)
+
+	glog.V(1).Infof("uploader: waiting for query senders")
+	u.querySenderWg.Wait()
+	close(u.queryCh)
 
 	glog.V(1).Infof("uploader: waiting for processors")
 	u.processorWg.Wait()
@@ -261,9 +262,12 @@ func newUploaderv2(
 		u.processorWg.Done()
 	}()
 
+	// Initializing the query streamer here to ensure wait groups are initialized before returning from this constructor.
+	queryCh := make(chan digest.Digest)
+	queryResCh := u.missingBlobsStreamer(queryCh)
 	u.processorWg.Add(1)
 	go func() {
-		u.uploadQueryPipe()
+		u.uploadQueryPipe(queryCh, queryResCh)
 		u.processorWg.Done()
 	}()
 

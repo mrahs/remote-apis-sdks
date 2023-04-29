@@ -36,7 +36,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 		offset      int64
 		finish      bool
 		wantErr     error
-		wantStats   *cas.Stats
+		wantStats   cas.Stats
 		retryPolicy *retry.BackoffPolicy
 	}{
 		{
@@ -57,7 +57,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:       []byte("abs"),
 			wantErr: nil,
-			wantStats: &cas.Stats{
+			wantStats: cas.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  3,
 				TotalBytesMoved:      3,
@@ -83,7 +83,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:       []byte(strings.Repeat("abcdefg", 500)),
 			wantErr: nil,
-			wantStats: &cas.Stats{
+			wantStats: cas.Stats{
 				BytesRequested:       3500,
 				EffectiveBytesMoved:  29,
 				TotalBytesMoved:      29,
@@ -102,7 +102,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:         []byte("abc"),
 			wantErr:   errWrite,
-			wantStats: nil,
+			wantStats: cas.Stats{},
 		},
 		{
 			name: "cache_hit",
@@ -120,7 +120,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:       []byte("abc"),
 			wantErr: nil,
-			wantStats: &cas.Stats{
+			wantStats: cas.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  2, // matches buffer size
 				TotalBytesMoved:      2,
@@ -147,7 +147,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:       []byte("abc"),
 			wantErr: cas.ErrGRPC,
-			wantStats: &cas.Stats{
+			wantStats: cas.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  2, // matches buffer size
 				TotalBytesMoved:      2,
@@ -173,7 +173,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:       []byte("abc"),
 			wantErr: cas.ErrGRPC,
-			wantStats: &cas.Stats{
+			wantStats: cas.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  2, // matches one buffer size
 				TotalBytesMoved:      4, // matches two buffer sizes
@@ -200,7 +200,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:       []byte("abc"),
 			wantErr: cas.ErrGRPC,
-			wantStats: &cas.Stats{
+			wantStats: cas.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  3,
 				TotalBytesMoved:      3,
@@ -229,7 +229,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:      []byte("abc"),
 			offset: 5,
-			wantStats: &cas.Stats{
+			wantStats: cas.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  3,
 				TotalBytesMoved:      3,
@@ -258,7 +258,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:      []byte("abc"),
 			finish: true,
-			wantStats: &cas.Stats{
+			wantStats: cas.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  3,
 				TotalBytesMoved:      3,
@@ -302,7 +302,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 	}
 }
 
-func TestUpload(t *testing.T) {
+func TestUpload_Upload(t *testing.T) {
 	tests := []struct {
 		name         string
 		fs           map[string][]byte
