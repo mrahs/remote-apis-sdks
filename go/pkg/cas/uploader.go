@@ -41,6 +41,9 @@ var (
 
 	// ErrBadCacheValueType indicates an unexpected type for a cache value.
 	ErrBadCacheValueType = errors.New("cache value type not expected")
+
+	// ErrTerminatedUploader indicates an attempt to use a terminated uploader.
+	ErrTerminatedUploader = errors.New("cannot use a terminated uploader")
 )
 
 // MakeWriteResourceName returns a valid resource name for writing an uncompressed blob.
@@ -110,6 +113,9 @@ type uploaderv2 struct {
 	uploadStreamCh    chan blob               // Fan-in channel for unified requests to the byte streaming API.
 	queryPubSub       *pubsub                 // Fan-out broker for query responses.
 	uploadPubSub      *pubsub                 // Fan-out broker for upload responses.
+	
+	// The reference is used internally to terminate request workers or prevent them from running on a terminated uploader.
+	ctx context.Context
 }
 
 // Wait blocks until all resources held by the uploader are released.
@@ -176,6 +182,8 @@ func newUploaderv2(
 	}
 
 	u := &uploaderv2{
+		ctx: ctx,
+
 		cas:          cas,
 		byteStream:   byteStream,
 		instanceName: instanceName,
@@ -226,13 +234,13 @@ func newUploaderv2(
 	}
 
 	// Start processors. Each one will launch a goroutine for background processing.
-	// This way allows ensuring that all waiting groups are set once this function returns.
-	u.queryProcessor(ctx)
-	u.uploadProcessor(ctx)
-	u.uploadDispatcher(ctx)
-	u.uploadQueryPipe(ctx)
-	u.uploadBatchProcessor(ctx)
-	u.uploadStreamProcessor(ctx)
+	// TODO: launch the goroutines here.
+	u.queryProcessor()
+	u.uploadProcessor()
+	u.uploadDispatcher()
+	u.uploadQueryPipe()
+	u.uploadBatchProcessor()
+	u.uploadStreamProcessor()
 	return u, nil
 }
 

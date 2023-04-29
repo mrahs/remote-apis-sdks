@@ -596,7 +596,7 @@ func TestUpload(t *testing.T) {
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
-			uploaded, stats, err := u.Upload(ctx, cas.UploadRequest{Path: impath.MustAbs(tmp, test.root), SymlinkOptions: symlinkopts.PreserveAllowDangling()})
+			uploaded, stats, err := u.Upload(cas.UploadRequest{Path: impath.MustAbs(tmp, test.root), SymlinkOptions: symlinkopts.PreserveAllowDangling()})
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -621,17 +621,15 @@ func TestUpload_Abort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
-	ctx2, ctx2Cancel := context.WithCancel(ctx)
-	ctx2Cancel()
+	ctxCancel()
 	tmp := makeFs(t, map[string][]byte{"foo.c": nil})
-	uploaded, _, err := u.Upload(ctx2, cas.UploadRequest{Path: impath.MustAbs(tmp, "foo.c"), SymlinkOptions: symlinkopts.PreserveAllowDangling()})
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("error mismatch: want %v, got %v", context.Canceled, err)
+	uploaded, _, err := u.Upload(cas.UploadRequest{Path: impath.MustAbs(tmp, "foo.c"), SymlinkOptions: symlinkopts.PreserveAllowDangling()})
+	if !errors.Is(err, cas.ErrTerminatedUploader) {
+		t.Errorf("error mismatch: want %v, got %v", cas.ErrTerminatedUploader, err)
 	}
 	if len(uploaded) > 0 {
 		t.Errorf("unexpected uploads: %v", uploaded)
 	}
-	ctxCancel()
 	u.Wait()
 }
 

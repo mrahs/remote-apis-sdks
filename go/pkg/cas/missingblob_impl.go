@@ -50,7 +50,7 @@ type queryCaller = chan MissingBlobsResponse
 // The returned error wraps a number of errors proportional to the length of the specified slice.
 //
 // This method must not be called after calling Wait.
-func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
+func (u *BatchingUploader) MissingBlobs(digests []digest.Digest) ([]digest.Digest, error) {
 	glog.V(1).Infof("query: %d", len(digests))
 	defer glog.V(1).Info("query.done")
 
@@ -66,18 +66,13 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 		defer close(ch) // ensure the streamer closes its response channel
 		defer u.senderWg.Done()
 		for _, d := range digests {
-			select {
-			case ch <- d:
-				continue
-			case <-ctx.Done():
-				return
-			}
+			ch <- d
 		}
 	}()
 
 	var missing []digest.Digest
 	var err error
-	resCh := u.missingBlobsStreamer(ctx, ch)
+	resCh := u.missingBlobsStreamer(ch)
 	for r := range resCh {
 		switch {
 		case r.Err != nil:
@@ -90,11 +85,6 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 		case r.Missing:
 			missing = append(missing, r.Digest)
 		}
-	}
-
-	// Request aborted, possibly midflight. Reporting a hit as a miss is safer than otherwise.
-	if ctx.Err() != nil {
-		return digests, ctx.Err()
 	}
 
 	return missing, err
@@ -111,15 +101,31 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // Slow consumption speed on this channel affects the consumption speed on the input channel.
 //
 // This method must not be called after calling Wait.
-func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
-	return u.missingBlobsStreamer(ctx, in)
+func (u *StreamingUploader) MissingBlobs(in <-chan digest.Digest) <-chan MissingBlobsResponse {
+	return u.missingBlobsStreamer(in)
 }
 
 // missingBlobsStreamer is defined on the underlying uploader to be accessible by the upload code.
-func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
+func (u *uploaderv2) missingBlobsStreamer(in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	ch := make(chan MissingBlobsResponse)
+
+	// If this was called after the the uploader was terminated, short the circuit and return.
+	select {
+	case <-u.ctx.Done():
+		go func(){
+			defer close(ch)
+			r := MissingBlobsResponse{Err: ErrTerminatedUploader}
+			for d := range in {
+				r.Digest = d
+				ch <- r
+			}
+		}()
+		return ch
+	default:
+	}
+
 	// This borker should not cancel until the sender tells it to, hence, the background context.
-	// TODO: replace with context.WithoutCancel once the SDK is updated to go1.21: https://pkg.go.dev/context@master#WithoutCancel
+	// The broker uses the context for cancellation only. It's not propagated further.
 	ctxQueryCaller, ctxQueryCallerCancel := context.WithCancel(context.Background())
 	tag, resCh := u.queryPubSub.sub(ctxQueryCaller)
 
@@ -135,7 +141,7 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 		for x := range pendingCh {
 				if x == 0 {
 					if done {
-						// Both are done.
+						// Double done: it's a cancellation signal.
 						return
 					}
 					done = true
@@ -159,9 +165,10 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 				select {
 				case u.queryCh <- missingBlobRequest{digest: d, tag: tag}:
 					pendingCh <- 1
-				case <-ctx.Done():
+				case <-u.ctx.Done():
 					pendingCh <- 0
-					return
+					// Continue draining the channel.
+					continue
 				}
 		}
 		pendingCh <- 0
@@ -183,7 +190,8 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 				}
 				ch <- r.(MissingBlobsResponse)
 				pendingCh <- -1
-			case <-ctx.Done():
+			case <-u.ctx.Done():
+				// This is needed in case the sender has long terminated while blobs were still being dispatched.
 				pendingCh <- 0
 				return
 			}
@@ -195,7 +203,7 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 
 // callMissingBlobs calls the gRPC endpoint and notifies query callers of the results.
 // It assumes ownership of the bundle argument.
-func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
+func (u *uploaderv2) callMissingBlobs(bundle missingBlobRequestBundle) {
 	glog.V(2).Infof("query.call: len=%d", len(bundle))
 
 	if len(bundle) < 1 {
@@ -217,7 +225,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 
 	var res *repb.FindMissingBlobsResponse
 	var err error
-	ctx, ctxCancel := context.WithCancel(ctx)
+	ctx, ctxCancel := context.WithCancel(u.ctx)
 	err = u.withTimeout(u.queryRpcConfig.Timeout, ctxCancel, func() error {
 		return u.withRetry(ctx, u.queryRpcConfig.RetryPolicy, func() error {
 			res, err = u.cas.FindMissingBlobs(ctx, req)
@@ -256,7 +264,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 }
 
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
-func (u *uploaderv2) queryProcessor(ctx context.Context) {
+func (u *uploaderv2) queryProcessor() {
 	bundle := make(missingBlobRequestBundle)
 	bundleSize := u.queryRequestBaseSize
 
@@ -265,13 +273,13 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 			return
 		}
 		// Block the entire processor if the concurrency limit is reached.
-		if err := u.querySem.Acquire(ctx, 1); err != nil {
+		if err := u.querySem.Acquire(u.ctx, 1); err != nil {
 			// err is always ctx.Err(), so abort immediately.
 			return
 		}
 		defer u.querySem.Release(1)
 
-		go u.callMissingBlobs(ctx, bundle)
+		go u.callMissingBlobs(bundle)
 
 		bundle = make(missingBlobRequestBundle)
 		bundleSize = u.queryRequestBaseSize
@@ -318,7 +326,7 @@ func (u *uploaderv2) queryProcessor(ctx context.Context) {
 				}
 			case <-bundleTicker.C:
 				handle()
-			case <-ctx.Done():
+			case <-u.ctx.Done():
 				return
 			}
 		}

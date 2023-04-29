@@ -87,6 +87,9 @@ type blob struct {
 
 // WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
 //
+// The specified context is used to make the remote calls.
+// This method does not use the uploader's context which means it is safe to call after calling Wait.
+//
 // The specified size is used to toggle compression as well as report some stats. It must be reflect the actual number of bytes the specified reader has to give.
 // The server is notified to finalize the resource name and further writes may not succeed.
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
@@ -269,6 +272,9 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 // Any path or file that matches the specified filter is excluded.
 // Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
 //
+// This method does not accept a context because the requests are unified across concurrent calls of it.
+// The context that was used to initialize the uploader is used to make remote calls.
+//
 // Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
 // The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
 // With infinite speed and limits, every blob will uploaded exactly once. On the other extreme, every blob is uploaded
@@ -282,7 +288,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 // The returned error wraps a number of errors proportional to the length of the specified slice.
 //
 // This method must not be called after calling Wait.
-func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, *Stats, error) {
+func (u *BatchingUploader) Upload(reqs ...UploadRequest) ([]digest.Digest, *Stats, error) {
 	glog.V(1).Infof("upload: %d requests", len(reqs))
 	defer glog.V(1).Infof("upload.done")
 
@@ -298,19 +304,14 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		defer close(ch) // ensure the streamer closes its response channel
 		defer u.senderWg.Done()
 		for _, r := range reqs {
-			select {
-			case ch <- r:
-				continue
-			case <-ctx.Done():
-				return
-			}
+			ch <- r
 		}
 	}()
 
 	var uploaded []digest.Digest
 	var err error
 	stats := &Stats{}
-	resCh := u.uploadStreamer(ctx, ch)
+	resCh := u.uploadStreamer(ch)
 	for r := range resCh {
 		if r.Err != nil {
 			err = errors.Join(r.Err, err)
@@ -326,7 +327,9 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 
 // Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
 //
-// The caller must close the specified input channel as a termination signal. Cancelling the context is not enough.
+// The caller must close the specified input channel as a termination signal.
+// This method does not accept a context because the requests are unified across concurrent calls of it.
+// The context that was used to initialize the uploader is used to make remote calls.
 //
 // Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
 // The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
@@ -336,17 +339,32 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 // digest receives a copy of the coorresponding UploadResponse.
 //
 // This method must not be called after calling Wait.
-func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
-	return u.uploadStreamer(ctx, in)
+func (u *StreamingUploader) Upload(in <-chan UploadRequest) <-chan UploadResponse {
+	return u.uploadStreamer(in)
 }
 
-func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
+func (u *uploaderv2) uploadStreamer(in<-chan UploadRequest) <-chan UploadResponse {
 	ch := make(chan UploadResponse)
+
+	// If this was called after the the uploader was terminated, short the circuit and return.
+	select {
+	case <-u.ctx.Done():
+		go func(){
+			defer close(ch)
+			r := UploadResponse{Err: ErrTerminatedUploader}
+			for range in {
+				ch <- r
+			}
+		}()
+		return ch
+	default:
+	}
+
 	// Register a new caller with the internal processor.
-	// This borker should not cancel until the sender tells it to, hence, the background context.
-	// TODO: replace with context.WithoutCancel once the SDK is updated to go1.21: https://pkg.go.dev/context@master#WithoutCancel
-	ctxUploadCaller, ctxUploadCallerCancel := context.WithCancel(context.Background())
-	tag, resChan := u.uploadPubSub.sub(ctxUploadCaller)
+	// This borker should not remove the subscription until the sender tells it to, hence, the background context.
+	// The broker uses the context for cancellation only. It's not propagated further.
+	ctxSub, ctxSubCancel := context.WithCancel(context.Background())
+	tag, resChan := u.uploadPubSub.sub(ctxSub)
 
 	// Forward the requests to the internal processor.
 	u.senderWg.Add(1)
@@ -358,15 +376,18 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest
 			r.tag = tag
 			select {
 			case u.uploadCh <- r:
-			case <-ctx.Done():
-				// Exit the loop when the channel is closed.
+			case <-u.ctx.Done():
+				// Continue draining the channel.
 				continue
 			}
 		}
 		// Let the processor know that no further requests are expected.
 		select {
 		case u.uploadCh <- UploadRequest{tag: tag, done: true}:
-		case <-ctx.Done():
+		case <-u.ctx.Done():
+			// The uploader terminated which means the response cannot be delivered which means the receiver cannot terminate.
+			// Let the broker terminate the subscription.
+			ctxSubCancel()
 			return
 		}
 	}()
@@ -380,7 +401,7 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest
 		for rawR := range resChan {
 			r := rawR.(UploadResponse)
 			if r.done {
-				ctxUploadCallerCancel() // let the broker terminate the subscription.
+				ctxSubCancel() // let the broker terminate the subscription.
 				continue
 			}
 			ch <- r
@@ -393,7 +414,7 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest
 // uploadProcessor reveives upload requests from multiple concurrent callers.
 // For each request, a file system walk is started concurrently to digest and dispatch files for uploading.
 // The number of concurrent requests is limited to the number of concurrent file system walks.
-func (u *uploaderv2) uploadProcessor(ctx context.Context) {
+func (u *uploaderv2) uploadProcessor() {
 	// The processor forwards requests to other workers which makes it a top-level broker, but not a top-level sender.
 	u.processorWg.Add(1)
 	go func() {
@@ -435,7 +456,7 @@ func (u *uploaderv2) uploadProcessor(ctx context.Context) {
 
 				glog.V(2).Infof("upload.processor.req: path=%s, slo=%s, filter=%s, tag=%s", req.Path, req.SymlinkOptions, req.Exclude, req.tag)
 				// Wait if too many walks are in-flight.
-				if err := u.walkSem.Acquire(ctx, 1); err != nil {
+				if err := u.walkSem.Acquire(u.ctx, 1); err != nil {
 					// err is always ctx.Err()
 					return
 				}
@@ -450,10 +471,10 @@ func (u *uploaderv2) uploadProcessor(ctx context.Context) {
 					defer u.workerWg.Done()
 					defer wg.Done()
 					defer u.walkSem.Release(1)
-					u.digestAndDispatch(ctx, req)
+					u.digestAndDispatch(req)
 				}()
 
-			case <-ctx.Done():
+			case <-u.ctx.Done():
 				return
 			}
 		}
@@ -461,7 +482,7 @@ func (u *uploaderv2) uploadProcessor(ctx context.Context) {
 }
 
 // digestAndDispatch initiates a file system walk to digest files and dispatch them for uploading.
-func (u *uploaderv2) digestAndDispatch(ctx context.Context, req UploadRequest) {
+func (u *uploaderv2) digestAndDispatch(req UploadRequest) {
 	glog.V(2).Info("upload.digest.start: root=%s, tag=%s", req.Path, req.tag)
 	defer glog.V(2).Info("upload.digest.done: root=%s, tag=%s", req.Path, req.tag)
 
@@ -472,14 +493,14 @@ func (u *uploaderv2) digestAndDispatch(ctx context.Context, req UploadRequest) {
 			m.tags = []tag{req.tag}
 			select {
 			case u.uploadResCh <- m:
-			case <-ctx.Done():
+			case <-u.ctx.Done():
 			}
 		// Cache miss.
 		case blob:
 			m.tag = req.tag
 			select {
 			case u.uploadDispatchCh <- m:
-			case <-ctx.Done():
+			case <-u.ctx.Done():
 			}
 		}
 	}
@@ -489,7 +510,7 @@ func (u *uploaderv2) digestAndDispatch(ctx context.Context, req UploadRequest) {
 	errWalk := walker.DepthFirst(req.Path, req.Exclude, func(realPath impath.Absolute, desiredPath impath.Absolute, info fs.FileInfo, errVisit error) (nextStep walker.NextStep) {
 		glog.V(2).Infof("upload.digest.visit: first=%t, realPath=%s, desiredPath=%s, err=%v", info == nil, realPath, desiredPath, errVisit)
 		select {
-		case <-ctx.Done():
+		case <-u.ctx.Done():
 			glog.V(2).Info("upload.digest.cancel")
 			return walker.Cancel
 		default:
@@ -589,7 +610,7 @@ func (u *uploaderv2) digestAndDispatch(ctx context.Context, req UploadRequest) {
 
 		case info.Mode().IsRegular():
 			stats.InputFileCount += 1
-			node, blb, errDigest := digestFile(ctx, realPath, info, u.ioSem, u.ioLargeSem, u.ioCfg.SmallFileSizeThreshold, u.ioCfg.LargeFileSizeThreshold)
+			node, blb, errDigest := digestFile(u.ctx, realPath, info, u.ioSem, u.ioLargeSem, u.ioCfg.SmallFileSizeThreshold, u.ioCfg.LargeFileSizeThreshold)
 			if errDigest != nil {
 				err = errors.Join(errDigest, err)
 				return walker.Cancel
@@ -620,7 +641,7 @@ func (u *uploaderv2) digestAndDispatch(ctx context.Context, req UploadRequest) {
 
 // uploadDispatcher receives digested blobs and forwards them to the uploader or back to the caller in case of a cache hit or error.
 // The dispatcher handles counting in-flight requests per caller and notifying callers when all of their requests are completed.
-func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
+func (u *uploaderv2) uploadDispatcher() {
 	// Maintain a count of in-flight uploads per caller.
 	tagReqCount := make(map[tag]int)
 	tagDone := make(map[tag]bool)
@@ -681,7 +702,7 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 					}
 				}
 
-			case <-ctx.Done():
+			case <-u.ctx.Done():
 				return
 			}
 		}
@@ -690,9 +711,9 @@ func (u *uploaderv2) uploadDispatcher(ctx context.Context) {
 
 // uploadQueryPipe pipes the digest of a blob to the internal query processor to determine if it needs uploading.
 // Cache hits and errors are piped back to the dispatcher while cache misses are piped to the uploader.
-func (u *uploaderv2) uploadQueryPipe(ctx context.Context) {
+func (u *uploaderv2) uploadQueryPipe() {
 	queryCh := make(chan digest.Digest)
-	queryResCh := u.missingBlobsStreamer(ctx, queryCh)
+	queryResCh := u.missingBlobsStreamer(queryCh)
 
 	// The pipe forwards requests internally which makes it a top-level broker.
 	u.processorWg.Add(1)
@@ -758,7 +779,7 @@ func (u *uploaderv2) uploadQueryPipe(ctx context.Context) {
 }
 
 // uploadBatcher handles files below the small threshold which are buffered in-memory.
-func (u *uploaderv2) uploadBatchProcessor(ctx context.Context) {
+func (u *uploaderv2) uploadBatchProcessor() {
 	bundle := make(uploadRequestBundle)
 	bundleSize := u.uploadRequestBaseSize
 
@@ -767,7 +788,7 @@ func (u *uploaderv2) uploadBatchProcessor(ctx context.Context) {
 			return
 		}
 		// Block the bundler if the concurrency limit is reached.
-		if err := u.uploadSem.Acquire(ctx, 1); err != nil {
+		if err := u.uploadSem.Acquire(u.ctx, 1); err != nil {
 			// err is always ctx.Err(), so abort immediately.
 			return
 		}
@@ -776,7 +797,7 @@ func (u *uploaderv2) uploadBatchProcessor(ctx context.Context) {
 		u.workerWg.Add(1)
 		go func(b uploadRequestBundle) {
 			defer u.workerWg.Done()
-			u.callBatchUpload(ctx, b)
+			u.callBatchUpload(b)
 		}(bundle)
 
 		bundle = make(uploadRequestBundle)
@@ -836,14 +857,14 @@ func (u *uploaderv2) uploadBatchProcessor(ctx context.Context) {
 				}
 			case <-bundleTicker.C:
 				handle()
-			case <-ctx.Done():
+			case <-u.ctx.Done():
 				return
 			}
 		}
 	}()
 }
 
-func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBundle) {
+func (u *uploaderv2) callBatchUpload(bundle uploadRequestBundle) {
 	glog.V(2).Infof("upload.batch.call: len=%d", len(bundle))
 
 	req := &repb.BatchUpdateBlobsRequest{InstanceName: u.instanceName}
@@ -855,7 +876,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 	var uploaded []digest.Digest
 	failed := make(map[digest.Digest]error)
 	digestRetryCount := make(map[digest.Digest]int64)
-	ctx, ctxCancel := context.WithCancel(ctx)
+	ctx, ctxCancel := context.WithCancel(u.ctx)
 	defer ctxCancel()
 	err := u.withTimeout(u.queryRpcConfig.Timeout, ctxCancel, func() error {
 		return u.withRetry(ctx, u.uploadRpcConfig.RetryPolicy, func() error {
@@ -977,7 +998,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 // For files above the large threshold, this method assumes the io and large io holds are
 // already acquired and will release them accordingly.
 // For other files, only an io hold is acquired and released in this method.
-func (u *uploaderv2) uploadStreamProcessor(ctx context.Context) {
+func (u *uploaderv2) uploadStreamProcessor() {
 	// This does internal routing, which makes it a top-level broker.
 	u.processorWg.Add(1)
 	go func() {
@@ -1006,7 +1027,7 @@ func (u *uploaderv2) uploadStreamProcessor(ctx context.Context) {
 				}
 
 				// Block the streamer if the gRPC call is being throttled.
-				if err := u.streamSem.Acquire(ctx, 1); err != nil {
+				if err := u.streamSem.Acquire(u.ctx, 1); err != nil {
 					// err is always ctx.Err()
 					if isLargeFile {
 						u.ioSem.Release(1)
@@ -1042,7 +1063,7 @@ func (u *uploaderv2) uploadStreamProcessor(ctx context.Context) {
 							Err:    err,
 							tags:   tags,
 						}:
-						case <-ctx.Done():
+						case <-u.ctx.Done():
 						}
 					}()
 
@@ -1065,7 +1086,7 @@ func (u *uploaderv2) uploadStreamProcessor(ctx context.Context) {
 
 					// Medium file.
 					case len(b.path) > 0:
-						if errSem := u.ioSem.Acquire(ctx, 1); errSem != nil {
+						if errSem := u.ioSem.Acquire(u.ctx, 1); errSem != nil {
 							return
 						}
 						defer u.ioSem.Release(1)
@@ -1086,11 +1107,11 @@ func (u *uploaderv2) uploadStreamProcessor(ctx context.Context) {
 						reader = bytes.NewReader(b.bytes)
 					}
 
-					s, err := u.writeBytes(ctx, name, reader, b.digest.Size, 0, true)
+					s, err := u.writeBytes(u.ctx, name, reader, b.digest.Size, 0, true)
 					return *s, err
 				}()
 
-			case <-ctx.Done():
+			case <-u.ctx.Done():
 				return
 			}
 		}

@@ -72,7 +72,7 @@ func TestBatching_MissingBlobs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
-			missing, err := u.MissingBlobs(ctx, test.digests)
+			missing, err := u.MissingBlobs(test.digests)
 			if test.wantErr == nil && err != nil {
 				t.Errorf("MissingBlobs failed: %v", err)
 			}
@@ -105,7 +105,7 @@ func TestBatching_MissingBlobsConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			missing, err := u.MissingBlobs(ctx, digests)
+			missing, err := u.MissingBlobs(digests)
 			if err != nil {
 				t.Errorf("MissingBlobs failed: %v", err)
 			}
@@ -128,18 +128,16 @@ func TestBatching_MissingBlobsAbort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
-	ctx2, ctx2Cancel := context.WithCancel(ctx)
-	ctx2Cancel()
+	ctxCancel()
 	digests := []digest.Digest{{Hash: "a"}, {Hash: "b"}, {Hash: "c"}}
-	missing, err := u.MissingBlobs(ctx2, digests)
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("error mismatch: want %v, got %v", context.Canceled, err)
+	missing, err := u.MissingBlobs(digests)
+	if !errors.Is(err, cas.ErrTerminatedUploader) {
+		t.Errorf("error mismatch: want %v, got %v", cas.ErrTerminatedUploader, err)
 	}
 	// No need to sort since the input as is should be returned.
 	if diff := cmp.Diff(digests, missing); diff != "" {
 		t.Errorf("missing mismatch, (-want +got): %s", diff)
 	}
-	ctxCancel()
 	u.Wait()
 }
 
@@ -153,7 +151,7 @@ func TestStreaming_MissingBlobs(t *testing.T) {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
 	reqChan := make(chan digest.Digest)
-	ch := u.MissingBlobs(ctx, reqChan)
+	ch := u.MissingBlobs(reqChan)
 
 	go func() {
 		for i := 0; i < 1000; i++ {
