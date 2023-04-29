@@ -83,6 +83,12 @@ type blob struct {
 	done bool
 }
 
+// tagCount is a tuple used by the dispatcher to track remaining responses for terminated callers.
+type tagCount struct {
+	t tag
+	c int
+}
+
 // WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
 //
 // The specified context is used to make the remote calls.
@@ -295,6 +301,8 @@ func (u *BatchingUploader) Upload(reqs ...UploadRequest) ([]digest.Digest, *Stat
 	}
 
 	ch := make(chan UploadRequest)
+	resCh := u.uploadStreamer(ch)
+
 	u.clientSenderWg.Add(1)
 	go func() {
 		glog.V(1).Info("upload.sender.start")
@@ -309,7 +317,6 @@ func (u *BatchingUploader) Upload(reqs ...UploadRequest) ([]digest.Digest, *Stat
 	var uploaded []digest.Digest
 	var err error
 	stats := &Stats{}
-	resCh := u.uploadStreamer(ch)
 	for r := range resCh {
 		if r.Err != nil {
 			err = errors.Join(r.Err, err)
@@ -431,8 +438,8 @@ func (u *uploaderv2) uploadProcessor() {
 			u.workerWg.Add(1)
 			// Wait for the walkers to finish dispatching blobs then tell the dispatcher that no further blobs are expected.
 			go func() {
-				glog.V(2).Infof("upload.processor.walk.wait.start", req.tag)
-				defer glog.V(2).Infof("upload.processor.walk.wait.done", req.tag)
+				glog.V(2).Infof("upload.processor.walk.wait.start: tag=%s", req.tag)
+				defer glog.V(2).Infof("upload.processor.walk.wait.done: tag=%s", req.tag)
 				defer u.workerWg.Done()
 				wg.Wait()
 				u.uploadDispatchCh <- blob{tag: req.tag, done: true}
@@ -464,8 +471,8 @@ func (u *uploaderv2) uploadProcessor() {
 
 // digestAndDispatch initiates a file system walk to digest files and dispatch them for uploading.
 func (u *uploaderv2) digestAndDispatch(req UploadRequest) {
-	glog.V(2).Info("upload.digest.start: root=%s, tag=%s", req.Path, req.tag)
-	defer glog.V(2).Info("upload.digest.done: root=%s, tag=%s", req.Path, req.tag)
+	glog.V(2).Infof("upload.digest.start: root=%s, tag=%s", req.Path, req.tag)
+	defer glog.V(2).Infof("upload.digest.done: root=%s, tag=%s", req.Path, req.tag)
 
 	dispatch := func(msg any) {
 		switch m := msg.(type) {
@@ -626,36 +633,70 @@ func (u *uploaderv2) uploadDispatcher() {
 	}()
 
 	// Maintain a count of in-flight uploads per caller.
-	tagReqCount := make(map[tag]int)
-	tagDone := make(map[tag]bool)
-	done := false
-	for {
-		select {
-		case b := <-u.uploadDispatchCh:
-			// The caller will not be sending any further requests.
-			if b.done {
-				// In fact, all callers have terminated.
-				if b.tag == "" {
+	pendingCh := make(chan tagCount)
+	wg := sync.WaitGroup{}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		glog.V(1).Info("upload.dispatcher.counter.start")
+		defer glog.V(1).Info("upload.dispatcher.counter.stop")
+		defer func() { close(u.uploadResCh) }()
+
+		tagReqCount := make(map[tag]int)
+		tagDone := make(map[tag]bool)
+		done := false
+		for tc := range pendingCh {
+			// There will be no more requests for this tag.
+			if tc.c == 0 {
+				// In fact, no more requests from any tag.
+				if tc.t == "" {
 					if len(tagReqCount) == 0 {
 						return
 					}
 					done = true
-					glog.V(2).Info("upload.dispatcher.done")
 					continue
 				}
-				tagDone[b.tag] = true
-				glog.V(2).Infof("upload.dispatcher.blob.done: tag=%s", b.tag)
+				tagDone[tc.t] = true
+				glog.V(2).Infof("upload.dispatcher.blob.done: tag=%s", tc.t)
 				continue
 			}
+			tagReqCount[tc.t] += tc.c
+			glog.V(2).Infof("upload.dispatcher.res: tag=%s, count=%d", tc.t, tc.c)
+			if tagReqCount[tc.t] == 0 && tagDone[tc.t] {
+				delete(tagDone, tc.t)
+				delete(tagReqCount, tc.t)
+				// Signal to the caller that all of its requests are done.
+				glog.V(2).Infof("upload.dispatcher.done: tag=%s", tc.t)
+				u.uploadPubSub.pub(UploadResponse{done: true}, tc.t)
+			}
+			if len(tagReqCount) == 0 && done {
+				return
+			}
+		}
+	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		glog.V(1).Info("upload.dispatcher.sender.start")
+		defer glog.V(1).Info("upload.dispatcher.sender.stop")
+
+		for b := range u.uploadDispatchCh {
+			// The caller will not be sending any further requests.
+			if b.done {
+				pendingCh <- tagCount{b.tag, 0}
+				// In fact, all callers have terminated.
+				if b.tag == "" {
+					return
+				}
+				continue
+			}
 			if b.digest.Hash == "" {
 				glog.Errorf("upload.dispatcher: received a blob with an empty digest for tag=%s; ignoring", b.tag)
 				continue
 			}
-
-			tagReqCount[b.tag]++
-			glog.V(2).Infof("upload.dispatcher.blob: digest=%s, tag=%s, count=%d", b.digest, b.tag, tagReqCount[b.tag])
-
+			glog.V(2).Infof("upload.dispatcher.blob: digest=%s, tag=%s", b.digest, b.tag)
 			switch {
 			// Forward in-memory blobs to the query pipe which might forward them to the upload batcher or return a cache hit or error to the dispatcher.
 			case len(b.bytes) > 0:
@@ -665,8 +706,17 @@ func (u *uploaderv2) uploadDispatcher() {
 			default:
 				u.uploadStreamCh <- b
 			}
+			pendingCh <- tagCount{b.tag, 1}
+		}
+	}()
 
-		case r := <-u.uploadResCh:
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		glog.V(1).Info("upload.dispatcher.receiver.start")
+		defer glog.V(1).Info("upload.dispatcher.receiver.stop")
+
+		for r := range u.uploadResCh {
 			glog.V(2).Infof("upload.dispatcher.res: digest=%s, err=%v", r.Digest, r.Err)
 			// If multiple callers are interested in this response, ensure stats are not double-counted.
 			if len(r.tags) == 1 {
@@ -680,22 +730,13 @@ func (u *uploaderv2) uploadDispatcher() {
 			for _, tag := range r.tags {
 				// Special case: do not decrement if the response was from a digestion error or from an early cancellation.
 				if r.Digest.Hash != "" {
-					tagReqCount[tag]--
+					pendingCh <- tagCount{tag, -1}
 				}
-				glog.V(2).Infof("upload.dispatcher.res: tag=%s, count=%d", tag, tagReqCount[tag])
-				if tagReqCount[tag] == 0 && tagDone[tag] {
-					delete(tagDone, tag)
-					delete(tagReqCount, tag)
-					// Signal to the caller that all of its requests are done.
-					glog.V(2).Infof("upload.dispatcher.done: digest=%s", r.Digest)
-					u.uploadPubSub.pub(UploadResponse{done: true}, tag)
-				}
-			}
-			if len(tagReqCount) == 0 && done {
-				return
 			}
 		}
-	}
+	}()
+
+	wg.Wait()
 }
 
 // uploadQueryPipe pipes the digest of a blob to the internal query processor to determine if it needs uploading.
@@ -782,7 +823,7 @@ func (u *uploaderv2) uploadBatchProcessor() {
 	glog.V(1).Info("upload.batch.start")
 	defer glog.V(1).Info("upload.batch.stop")
 
-	defer func(){
+	defer func() {
 		// Tell the stream processor to terminate once it finished all remaining requests.
 		u.uploadStreamCh <- blob{done: true}
 	}()
@@ -1004,6 +1045,7 @@ func (u *uploaderv2) uploadStreamProcessor() {
 			// The dispatcher and the batch processor are the only senders.
 			// This signal comes from the batch processor, which terminates after the dispatcher.
 			if b.done {
+				glog.V(2).Info("upload.stream.done: pendint=%d", pending)
 				if pending == 0 {
 					return
 				}
@@ -1053,11 +1095,13 @@ func (u *uploaderv2) uploadStreamProcessor() {
 				s, err := u.callStream(name, b)
 				streamResCh <- UploadResponse{Digest: b.digest, Stats: s, Err: err}
 			}()
+			glog.V(2).Infof("upload.stream.req: pending=%d", pending)
 
 		case r := <-streamResCh:
 			r.tags = digestTags[r.Digest]
 			u.uploadResCh <- r
 			pending -= 1
+			glog.V(2).Infof("upload.stream.res: pending=%d, done=%t", pending, done)
 			if pending == 0 && done {
 				return
 			}

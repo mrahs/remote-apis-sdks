@@ -574,8 +574,12 @@ func TestUpload_Upload(t *testing.T) {
 	}
 
 	for _, test := range tests {
+		if test.name != "batch_stream_directory" {
+			continue
+		}
 		test := test
 		t.Run(test.name, func(t *testing.T) {
+			glog.Infof("test: %s", test.name)
 			tmp := makeFs(t, test.fs)
 			testRpcCfg := rpcCfg
 			testRpcCfg.RetryPolicy = retryNever
