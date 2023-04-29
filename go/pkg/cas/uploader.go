@@ -99,11 +99,14 @@ type uploaderv2 struct {
 	uploadRequestBaseSize int
 
 	// Concurrency controls.
-	senderWg          sync.WaitGroup          // Long-lived top-level producers.
-	processorWg       sync.WaitGroup          // Long-lived top-level brokers.
-	receiverWg        sync.WaitGroup          // Long-lived consumers.
+	clientSenderWg    sync.WaitGroup          // First-level producers.
+	querySenderWg     sync.WaitGroup          // Second-level producers.
+	uploadSenderWg    sync.WaitGroup          // Second-level producers.
+	processorWg       sync.WaitGroup          // Itermediate routers.
+	receiverWg        sync.WaitGroup          // Consumers.
 	workerWg          sync.WaitGroup          // Short-lived intermediate producers/consumers.
 	callerWalkWg      map[tag]*sync.WaitGroup // Tracks file system walks per caller.
+	walkerWg          sync.WaitGroup          // Tracks all walkers.
 	queryCh           chan missingBlobRequest // Fan-in channel for query requests.
 	uploadCh          chan UploadRequest      // Fan-in channel for upload requests.
 	uploadDispatchCh  chan blob               // Fan-in channel for dispatched blobs.
@@ -113,7 +116,7 @@ type uploaderv2 struct {
 	uploadStreamCh    chan blob               // Fan-in channel for unified requests to the byte streaming API.
 	queryPubSub       *pubsub                 // Fan-out broker for query responses.
 	uploadPubSub      *pubsub                 // Fan-out broker for upload responses.
-	
+
 	// The reference is used internally to terminate request workers or prevent them from running on a terminated uploader.
 	ctx context.Context
 }
@@ -121,21 +124,30 @@ type uploaderv2 struct {
 // Wait blocks until all resources held by the uploader are released.
 // This method must be called after all other methods have returned to avoid race conditions.
 func (u *uploaderv2) Wait() {
-	// 1st, senders must stop sending.
-	// This call must happen after all other query/upload methods have returned to ensure the wait group does not grow while waiting.
-	glog.V(1).Infof("uploader: waiting for senders")
-	u.senderWg.Wait()
-	// 2nd, brokers must stop sending.
+	// TODO: can this simplify the initialization?
+	<-u.ctx.Done()
+
+	glog.V(1).Infof("uploader: waiting for client senders")
+	u.clientSenderWg.Wait()
+
+	glog.V(1).Infof("uploader: waiting for query senders")
+	u.querySenderWg.Wait()
+	close(u.queryCh)
+
+	glog.V(1).Infof("uploader: waiting for upload senders")
+	u.uploadSenderWg.Wait()
+	close(u.uploadCh)
+
 	glog.V(1).Infof("uploader: waiting for processors")
 	u.processorWg.Wait()
-	// 3rd, intermediate brokers must stop sending.
+
 	glog.V(1).Infof("uploader: waiting for brokers")
 	u.queryPubSub.wait()
 	u.uploadPubSub.wait()
-	// 4th, receivers must drain their channels, which could involve spawning more workers.
+
 	glog.V(1).Infof("uploader: waiting for receivers")
 	u.receiverWg.Wait()
-	// 5th, ensure all workers have terminated.
+
 	glog.V(1).Infof("uploader: waiting for workers")
 	u.workerWg.Wait()
 }
@@ -233,14 +245,42 @@ func newUploaderv2(
 		uploadRequestBaseSize: proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),
 	}
 
-	// Start processors. Each one will launch a goroutine for background processing.
-	// TODO: launch the goroutines here.
-	u.queryProcessor()
-	u.uploadProcessor()
-	u.uploadDispatcher()
-	u.uploadQueryPipe()
-	u.uploadBatchProcessor()
-	u.uploadStreamProcessor()
+	u.processorWg.Add(1)
+	go func() {
+		u.queryProcessor()
+		u.processorWg.Done()
+	}()
+
+	u.processorWg.Add(1)
+	go func() {
+		u.uploadProcessor()
+		u.processorWg.Done()
+	}()
+
+	u.processorWg.Add(1)
+	go func() {
+		u.uploadDispatcher()
+		u.processorWg.Done()
+	}()
+
+	u.processorWg.Add(1)
+	go func() {
+		u.uploadQueryPipe()
+		u.processorWg.Done()
+	}()
+
+	u.processorWg.Add(1)
+	go func() {
+		u.uploadBatchProcessor()
+		u.processorWg.Done()
+	}()
+
+	u.processorWg.Add(1)
+	go func() {
+		u.uploadStreamProcessor()
+		u.processorWg.Done()
+	}()
+
 	return u, nil
 }
 
