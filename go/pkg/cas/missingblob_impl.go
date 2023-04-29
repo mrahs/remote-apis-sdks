@@ -49,7 +49,7 @@ type queryCaller = chan MissingBlobsResponse
 // If no error is returned, the returned slice contains all the missing digests.
 // The returned error wraps a number of errors proportional to the length of the specified slice.
 //
-// This method must not be called after calling Wait.
+// This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) MissingBlobs(digests []digest.Digest) ([]digest.Digest, error) {
 	glog.V(1).Infof("query: %d", len(digests))
 	defer glog.V(1).Info("query.done")
@@ -101,7 +101,7 @@ func (u *BatchingUploader) MissingBlobs(digests []digest.Digest) ([]digest.Diges
 // This could indicate completion or cancellation (in case the context was canceled).
 // Slow consumption speed on this channel affects the consumption speed on the input channel.
 //
-// This method must not be called after calling Wait.
+// This method must not be called after cancelling the uploader's context.
 func (u *StreamingUploader) MissingBlobs(in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	return u.missingBlobsStreamer(in)
 }
@@ -163,14 +163,8 @@ func (u *uploaderv2) missingBlobsStreamer(in <-chan digest.Digest) <-chan Missin
 		defer glog.V(1).Info("query.streamer.sender.stop")
 		defer u.querySenderWg.Done()
 		for d := range in {
-			select {
-			case u.queryCh <- missingBlobRequest{digest: d, tag: tag}:
-				pendingCh <- 1
-			case <-u.ctx.Done():
-				pendingCh <- 0
-				// Continue draining the channel.
-				continue
-			}
+			u.queryCh <- missingBlobRequest{digest: d, tag: tag}
+			pendingCh <- 1
 		}
 		pendingCh <- 0
 	}()
@@ -184,18 +178,12 @@ func (u *uploaderv2) missingBlobsStreamer(in <-chan digest.Digest) <-chan Missin
 		defer close(ch)
 		// Continue to drain until the broker closes the channel.
 		for {
-			select {
-			case r, ok := <-resCh:
-				if !ok {
-					return
-				}
-				ch <- r.(MissingBlobsResponse)
-				pendingCh <- -1
-			case <-u.ctx.Done():
-				// This is needed in case the sender has long terminated while blobs were still being dispatched.
-				pendingCh <- 0
+			r, ok := <-resCh
+			if !ok {
 				return
 			}
+			ch <- r.(MissingBlobsResponse)
+			pendingCh <- -1
 		}
 	}()
 

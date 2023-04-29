@@ -86,7 +86,7 @@ type blob struct {
 // WriteBytes uploads all the bytes (until EOF) of the specified reader directly to the specified resource name starting remotely at the specified offset.
 //
 // The specified context is used to make the remote calls.
-// This method does not use the uploader's context which means it is safe to call after calling Wait.
+// This method does not use the uploader's context which means it is safe to call even after that context is cancelled.
 //
 // The specified size is used to toggle compression as well as report some stats. It must be reflect the actual number of bytes the specified reader has to give.
 // The server is notified to finalize the resource name and further writes may not succeed.
@@ -270,7 +270,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 // Any path or file that matches the specified filter is excluded.
 // Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
 //
-// This method does not accept a context because the requests are unified across concurrent calls of it.
+// This method does not accept a context because the requests are unified across concurrent calls.
 // The context that was used to initialize the uploader is used to make remote calls.
 //
 // Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
@@ -285,7 +285,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 // in it may or may not have been successfully uploaded (individual errors).
 // The returned error wraps a number of errors proportional to the length of the specified slice.
 //
-// This method must not be called after calling Wait.
+// This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) Upload(reqs ...UploadRequest) ([]digest.Digest, *Stats, error) {
 	glog.V(1).Infof("upload: %d requests", len(reqs))
 	defer glog.V(1).Infof("upload.done")
@@ -326,7 +326,7 @@ func (u *BatchingUploader) Upload(reqs ...UploadRequest) ([]digest.Digest, *Stat
 // Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
 //
 // The caller must close the specified input channel as a termination signal.
-// This method does not accept a context because the requests are unified across concurrent calls of it.
+// This method does not accept a context because the requests are unified across concurrent calls.
 // The context that was used to initialize the uploader is used to make remote calls.
 //
 // Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
@@ -336,7 +336,7 @@ func (u *BatchingUploader) Upload(reqs ...UploadRequest) ([]digest.Digest, *Stat
 // In the average case, blobs that make it into the same bundle will be grouped by digest. Once a digest is processed, each requester of that
 // digest receives a copy of the coorresponding UploadResponse.
 //
-// This method must not be called after calling Wait.
+// This method must not be called after cancelling the uploader's context.
 func (u *StreamingUploader) Upload(in <-chan UploadRequest) <-chan UploadResponse {
 	return u.uploadStreamer(in)
 }
@@ -372,24 +372,10 @@ func (u *uploaderv2) uploadStreamer(in <-chan UploadRequest) <-chan UploadRespon
 		defer u.uploadSenderWg.Done()
 		for r := range in {
 			r.tag = tag
-			// The receiver abandons the channel when the context is cancelled, as so should this sender.
-			select {
-			case u.uploadCh <- r:
-			case <-u.ctx.Done():
-				// Continue draining the channel.
-				continue
-			}
+			u.uploadCh <- r
 		}
 		// Let the processor know that no further requests are expected.
-		select {
-		case u.uploadCh <- UploadRequest{tag: tag, done: true}:
-		// The receiver abandons the channel when the context is cancelled, as so should this sender.
-		case <-u.ctx.Done():
-			// The uploader terminated which means the response cannot be delivered which means the receiver cannot terminate.
-			// Let the broker terminate the subscription.
-			ctxSubCancel()
-			return
-		}
+		u.uploadCh <- UploadRequest{tag: tag, done: true}
 	}()
 
 	u.receiverWg.Add(1)
@@ -486,19 +472,11 @@ func (u *uploaderv2) digestAndDispatch(req UploadRequest) {
 		// Cache hit or error.
 		case UploadResponse:
 			m.tags = []tag{req.tag}
-			select {
-			case u.uploadResCh <- m:
-			// The receiver abandons the channel when the context is cancelled, as so should this sender.
-			case <-u.ctx.Done():
-			}
+			u.uploadResCh <- m
 		// Cache miss.
 		case blob:
 			m.tag = req.tag
-			select {
-			case u.uploadDispatchCh <- m:
-			// The receiver abandons the channel when the context is cancelled, as so should this sender.
-			case <-u.ctx.Done():
-			}
+			u.uploadDispatchCh <- m
 		}
 	}
 
@@ -944,16 +922,10 @@ func (u *uploaderv2) callBatchUpload(bundle uploadRequestBundle) {
 		if r := digestRetryCount[d]; r > 0 {
 			s.TotalBytesMoved = d.Size * (r + 1)
 		}
-		select {
-		case u.uploadResCh <- UploadResponse{
+		u.uploadResCh <- UploadResponse{
 			Digest: d,
 			Stats:  s,
 			tags:   bundle[d].tags,
-		}:
-		// The receiver abandons the channel when the context is cancelled, as so should this sender.
-		// TODO: review this claim now that the shutdown process is properly chained.
-		case <-u.ctx.Done():
-			return
 		}
 		delete(bundle, d)
 	}
@@ -970,16 +942,11 @@ func (u *uploaderv2) callBatchUpload(bundle uploadRequestBundle) {
 		if r := digestRetryCount[d]; r > 0 {
 			s.TotalBytesMoved = d.Size * (r + 1)
 		}
-		select {
-		case u.uploadResCh <- UploadResponse{
+		u.uploadResCh <- UploadResponse{
 			Digest: d,
 			Stats:  s,
 			Err:    errors.Join(ErrGRPC, dErr),
 			tags:   bundle[d].tags,
-		}:
-		// The receiver abandons the channel when the context is cancelled, as so should this sender.
-		case <-u.ctx.Done():
-			return
 		}
 		delete(bundle, d)
 	}
@@ -1005,16 +972,11 @@ func (u *uploaderv2) callBatchUpload(bundle uploadRequestBundle) {
 		if r := digestRetryCount[d]; r > 0 {
 			s.TotalBytesMoved = d.Size * (r + 1)
 		}
-		select {
-		case u.uploadResCh <- UploadResponse{
+		u.uploadResCh <- UploadResponse{
 			Digest: d,
 			Stats:  s,
 			Err:    err,
 			tags:   tags,
-		}:
-		// The receiver abandons the channel when the context is cancelled, as so should this sender.
-		case <-u.ctx.Done():
-			return
 		}
 	}
 }
@@ -1092,20 +1054,12 @@ func (u *uploaderv2) uploadStreamProcessor() {
 				defer u.workerWg.Done()
 				defer u.streamSem.Release(1)
 				s, err := u.callStream(name, b)
-				select {
-				case streamResCh <- UploadResponse{Digest: b.digest, Stats: s, Err: err}:
-				// The receiver abandons the channel when the context is cancelled, as so should this sender.
-				case <-u.ctx.Done():
-				}
+				streamResCh <- UploadResponse{Digest: b.digest, Stats: s, Err: err}
 			}()
 
 		case r := <-streamResCh:
 			r.tags = digestTags[r.Digest]
-			select {
-			case u.uploadResCh <- r:
-			// The receiver abandons the channel when the context is cancelled, as so should this sender.
-			case <-u.ctx.Done():
-			}
+			u.uploadResCh <- r
 			pending -= 1
 			if pending == 0 && done {
 				return

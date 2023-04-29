@@ -122,9 +122,7 @@ type uploaderv2 struct {
 }
 
 // Wait blocks until all resources held by the uploader are released.
-// This method must be called after all other methods have returned to avoid race conditions.
 func (u *uploaderv2) Wait() {
-	// TODO: can this simplify the initialization?
 	<-u.ctx.Done()
 
 	glog.V(1).Infof("uploader: waiting for client senders")
