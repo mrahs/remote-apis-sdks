@@ -100,10 +100,10 @@ type uploaderv2 struct {
 	uploadRequestBaseSize int
 
 	// Concurrency controls.
-	clientSenderWg    sync.WaitGroup          // First-level producers.
-	querySenderWg     sync.WaitGroup          // Second-level producers.
-	uploadSenderWg    sync.WaitGroup          // Second-level producers.
-	processorWg       sync.WaitGroup          // Itermediate routers.
+	clientSenderWg    sync.WaitGroup          // Batching API producers.
+	querySenderWg     sync.WaitGroup          // Query streaming API producers.
+	uploadSenderWg    sync.WaitGroup          // Upload streaming API producers.
+	processorWg       sync.WaitGroup          // Internal routers.
 	receiverWg        sync.WaitGroup          // Consumers.
 	workerWg          sync.WaitGroup          // Short-lived intermediate producers/consumers.
 	callerWalkWg      map[tag]*sync.WaitGroup // Tracks file system walks per caller.
@@ -122,31 +122,42 @@ type uploaderv2 struct {
 	ctx context.Context
 }
 
-// Wait blocks until all resources held by the uploader are released.
+// Wait blocks until the context is cancelled and all resources held by the uploader are released.
 func (u *uploaderv2) Wait() {
+	// The context must be cancelled first.
 	<-u.ctx.Done()
 
+	// 1st, batching API senders should stop producing requests.
+	// These senders are terminated by the user.
 	glog.V(1).Infof("uploader: waiting for client senders")
 	u.clientSenderWg.Wait()
 
+	// 2nd, streaming API upload senders should stop producing queries and requests.
+	// These senders are terminated by the user.
 	glog.V(1).Infof("uploader: waiting for upload senders")
 	u.uploadSenderWg.Wait()
 	close(u.uploadCh)
 
+	// 3rd, streaming API query senders should stop producing queries.
+	// This either propagates from the user or from the uploader's pipe, hence, the uploader must stop first.
 	glog.V(1).Infof("uploader: waiting for query senders")
 	u.querySenderWg.Wait()
 	close(u.queryCh)
 
+	// 4th, internal routres should flush all remaining requests.
 	glog.V(1).Infof("uploader: waiting for processors")
 	u.processorWg.Wait()
 
+	// 5th, internal brokers should flush all remaining messages.
 	glog.V(1).Infof("uploader: waiting for brokers")
 	u.queryPubSub.wait()
 	u.uploadPubSub.wait()
 
+	// 6th, receivers should have drained their channels by now.
 	glog.V(1).Infof("uploader: waiting for receivers")
 	u.receiverWg.Wait()
 
+	// 7th, workers should have terminated by now.
 	glog.V(1).Infof("uploader: waiting for workers")
 	u.workerWg.Wait()
 }
