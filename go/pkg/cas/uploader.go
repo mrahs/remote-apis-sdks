@@ -40,9 +40,6 @@ var (
 	// ErrOversizedItem indicates an item that is too large to fit into the set byte limit for the corresponding gRPC call.
 	ErrOversizedItem = errors.New("oversized item")
 
-	// ErrBadCacheValueType indicates an unexpected type for a cache value.
-	ErrBadCacheValueType = errors.New("cache value type not expected")
-
 	// ErrTerminatedUploader indicates an attempt to use a terminated uploader.
 	ErrTerminatedUploader = errors.New("cannot use a terminated uploader")
 )
@@ -162,25 +159,34 @@ func (u *uploaderv2) Wait() {
 	u.workerWg.Wait()
 }
 
-func (u *uploaderv2) withRetry(ctx context.Context, retryPolicy retry.BackoffPolicy, fn func() error) error {
-	return retry.WithPolicy(ctx, retry.TransientOnly, retryPolicy, fn)
+// NewBatchingUploader creates a new instance of the batching uploader.
+//
+// The specified configs must be compatible with the capabilities of the server that the specified clients are connected to.
+// ctx is used to make remote calls and must be cancelled to properly shutdown the uploader.
+func NewBatchingUploader(
+	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
+	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
+) (*BatchingUploader, error) {
+	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
+	if err != nil {
+		return nil, err
+	}
+	return &BatchingUploader{uploaderv2: uploader}, nil
 }
 
-func (u *uploaderv2) withTimeout(timeout time.Duration, cancelFn context.CancelFunc, fn func() error) error {
-	// Success signal.
-	done := make(chan struct{})
-	defer close(done)
-	// Timeout signal.
-	timer := time.NewTimer(timeout)
-	go func() {
-		select {
-		case <-done:
-			timer.Stop()
-		case <-timer.C:
-			cancelFn()
-		}
-	}()
-	return fn()
+// NewStreamingUploader creates a new instance of the streaming uploader.
+//
+// The specified configs must be compatible with the capabilities of the server which the specified clients are connected to.
+// ctx is used to make remote calls and must be cancelled to properly shutdown the uploader.
+func NewStreamingUploader(
+	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
+	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
+) (*StreamingUploader, error) {
+	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
+	if err != nil {
+		return nil, err
+	}
+	return &StreamingUploader{uploaderv2: uploader}, nil
 }
 
 func newUploaderv2(
@@ -221,16 +227,14 @@ func newUploaderv2(
 		ioCfg: ioCfg,
 		buffers: sync.Pool{
 			New: func() any {
-				// Since the buffers are never resized, treating the slice as a pointer-like
-				// type for this pool is safe.
+				// Since the buffers are never resized, treating the slice as a pointer-like type for this pool is safe.
 				buf := make([]byte, ioCfg.BufferSize)
 				return buf
 			},
 		},
 		zstdEncoders: sync.Pool{
 			New: func() any {
-				// Providing a nil writer implies that the encoder needs to be
-				// (re)initilaized with a writer using enc.Reset(w) before using it.
+				// Providing a nil writer implies that the encoder needs to be (re)initilaized with a writer using enc.Reset(w) before using it.
 				enc, _ := zstd.NewWriter(nil)
 				return enc
 			},
@@ -273,7 +277,7 @@ func newUploaderv2(
 		u.processorWg.Done()
 	}()
 
-	// Initializing the query streamer here to ensure wait groups are initialized before returning from this constructor.
+	// Initializing the query streamer here to ensure wait groups are initialized before returning from this constructor call.
 	queryCh := make(chan digest.Digest)
 	queryResCh := u.missingBlobsStreamer(queryCh)
 	u.processorWg.Add(1)
@@ -297,32 +301,23 @@ func newUploaderv2(
 	return u, nil
 }
 
-// NewBatchingUploader creates a new instance of the batching uploader.
-//
-// The specified configs must be compatible with the capabilities of the server that the specified clients are connected to.
-// ctx must be cancelled to properly shutdown the uploader.
-func NewBatchingUploader(
-	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
-	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
-) (*BatchingUploader, error) {
-	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
-	if err != nil {
-		return nil, err
-	}
-	return &BatchingUploader{uploaderv2: uploader}, nil
+func (u *uploaderv2) withRetry(ctx context.Context, retryPolicy retry.BackoffPolicy, fn func() error) error {
+	return retry.WithPolicy(ctx, retry.TransientOnly, retryPolicy, fn)
 }
 
-// NewStreamingUploader creates a new instance of the streaming uploader.
-//
-// The specified configs must be compatible with the capabilities of the server which the specified clients are connected to.
-// ctx must be cancelled to properly shutdown the uploader.
-func NewStreamingUploader(
-	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
-	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
-) (*StreamingUploader, error) {
-	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
-	if err != nil {
-		return nil, err
-	}
-	return &StreamingUploader{uploaderv2: uploader}, nil
+func (u *uploaderv2) withTimeout(timeout time.Duration, cancelFn context.CancelFunc, fn func() error) error {
+	// Success signal.
+	done := make(chan struct{})
+	defer close(done)
+	// Timeout signal.
+	timer := time.NewTimer(timeout)
+	go func() {
+		select {
+		case <-done:
+			timer.Stop()
+		case <-timer.C:
+			cancelFn()
+		}
+	}()
+	return fn()
 }

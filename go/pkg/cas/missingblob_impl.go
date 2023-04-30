@@ -51,7 +51,7 @@ type queryCaller = chan MissingBlobsResponse
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) MissingBlobs(digests []digest.Digest) ([]digest.Digest, error) {
-	glog.V(1).Infof("query: %d", len(digests))
+	glog.V(1).Infof("query: %d blobs", len(digests))
 	defer glog.V(1).Info("query.done")
 
 	if len(digests) < 1 {

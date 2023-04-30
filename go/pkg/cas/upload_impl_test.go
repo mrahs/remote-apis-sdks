@@ -570,6 +570,7 @@ func TestUpload_Upload(t *testing.T) {
 			},
 		},
 		// TODO: digset cache hit
+		// TODO: all digestions fail (nothing is dispatched)
 		// TODO: unified
 	}
 
@@ -623,14 +624,6 @@ func TestUpload_Abort(t *testing.T) {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
 	ctxCancel()
-	// tmp := makeFs(t, map[string][]byte{"foo.c": nil})
-	// uploaded, _, err := u.Upload(cas.UploadRequest{Path: impath.MustAbs(tmp, "foo.c"), SymlinkOptions: symlinkopts.PreserveAllowDangling()})
-	// if !errors.Is(err, cas.ErrTerminatedUploader) {
-		// t.Errorf("error mismatch: want %v, got %v", cas.ErrTerminatedUploader, err)
-	// }
-	// if len(uploaded) > 0 {
-		// t.Errorf("unexpected uploads: %v", uploaded)
-	// }
 	u.Wait()
 }
 

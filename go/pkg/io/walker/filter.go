@@ -24,9 +24,10 @@ type Filter struct {
 
 // Path matches the specified path against the regexp of this filter.
 //
-// The filter's mode is not used for matching in this method.
+// If the regexp is nil, false is returned.
+// If the filter's mode is set (not zero), false is returned regardless of the regexp value.
 func (f Filter) Path(path string) bool {
-	if f.Regexp == nil {
+	if f.Regexp == nil || f.Mode != 0 {
 		return false
 	}
 	return f.match(path, f.Mode)
@@ -34,7 +35,7 @@ func (f Filter) Path(path string) bool {
 
 // File matches the specified path and mode against the regexp and the file mode of this filter.
 //
-// If either the regexp or the mode is not set on this filter, false is returned.
+// If either of the filter's regexp or mode is not set, false is returned.
 func (f Filter) File(path string, mode fs.FileMode) bool {
 	if f.Regexp == nil || f.Mode == 0 {
 		return false

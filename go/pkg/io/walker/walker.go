@@ -158,7 +158,7 @@ func visit(e elem, exclude Filter, fn WalkFunc) (*elem, NextStep, error) {
 	}
 
 	// If the filter applies to the path only, use it here.
-	if exclude.Mode == 0 && exclude.Path(e.desiredPath.String()) {
+	if exclude.Path(e.desiredPath.String()) {
 		return nil, Skip, nil
 	}
 
@@ -185,7 +185,7 @@ func visit(e elem, exclude Filter, fn WalkFunc) (*elem, NextStep, error) {
 		}
 
 		// If the filter applies to path and mode, use it here.
-		if exclude.Mode != 0 && exclude.File(e.desiredPath.String(), info.Mode()) {
+		if exclude.File(e.desiredPath.String(), info.Mode()) {
 			return nil, Skip, nil
 		}
 

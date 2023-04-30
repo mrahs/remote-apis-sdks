@@ -10,6 +10,7 @@ import (
 )
 
 // tag identifies a pubsub channel for routing purposes.
+// Producers tag messages and consumers subscribe to tags.
 type tag string
 
 // pubsub provides a simple pubsub implementation to route messages and wait for them.
@@ -21,14 +22,20 @@ type pubsub struct {
 
 // sub returns a routing tag and a channel to the subscriber to read messages from.
 //
-// Only requests associated with the returned tag are sent on the returned channel.
+// Only messages associated with the returned tag are sent on the returned channel.
+// This allows the subscriber to send a tagged message (request) that propagates across the system and eventually
+// received related messages (responses) on the returned channel.
 //
-// The returned channel is unbufferred and is closed when the specified context is done.
+// ctx is only used to wait for a an unsubscription signal. It is not propagated with any messages.
 // The subscriber must unsubscribe by cancelling the specified context.
-// The subscriber must continue draining the returned channel until it's closed to avoid
-// send-on-closed-channel and deadlock errors.
+// The subscriber must continue draining the returned channel until it's closed.
+// The returned channel is unbufferred and only closed when the specified context is done.
 //
-// A slow subscriber affects all other subscribers that share the same message.
+// To properly terminate the subscription, the subscriber must wait until all expected responses are received
+// on the returned channel before cancelling the context.
+// Once the context is cancelled, any tagged messages for this subscription are dropped.
+//
+// A slow subscriber affects all other subscribers that are waiting for the same message.
 func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 	t := tag(uuid.New())
 	glog.V(2).Infof("pubsub.sub: tag=%s", t)
@@ -62,8 +69,8 @@ func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 // pub is a blocking call that fans-out a response to all specified (by tag) subscribers sequentially.
 //
 // Returns when all active subscribers have received their copies.
-// May deadlock if an active subscriber never reveives its copy.
-// Inactive subscribers (expired by cancelling their context) are skipped.
+// Will deadlock if an active subscriber never reveives its copy.
+// Inactive subscribers (expired by cancelling their context) are skipped (their copies are dropped).
 //
 // A busy subscriber does not block others from receiving their copies. It is instead
 // rescheduled for another attempt once all others get a chance to receive.
@@ -83,8 +90,7 @@ func (ps *pubsub) mpub(once any, rest any, tags ...tag) {
 	_ = ps.pubN(rest, len(tags)-1, excludeTag(tags, t)...)
 }
 
-// pubOnce is like pub, but delivers the message only once. The tag of the subscriber that got
-// the message is returned.
+// pubOnce is like pub, but delivers the message only once. The tag of the subscriber that got the message is returned.
 func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
 	received := ps.pubN(m, 1, tags...)
 	if len(received) == 0 {
@@ -93,11 +99,15 @@ func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
 	return received[0]
 }
 
-// pubN is like pub, but delivers the message to exactly n consumers. The tags of the subscribers that
-// got the message are returned.
+// pubN is like pub, but delivers the message to no more than n subscribers. The tags of the subscribers that got the message are returned.
 func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 	if len(tags) == 0 {
-		glog.Warningf("pubsub.pub: called without tags; msg=%v subs=%v", m, ps.subs)
+		glog.Warning("pubsub.pub: called without tags")
+		glog.V(3).Infof("pubsub.pub: called without tags: msg=%v, subs=%v", m, ps.subs)
+	}
+	if n <= 0 {
+		glog.Warningf("pubsub.pub: nothing published because n=%d", n)
+		return nil
 	}
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
