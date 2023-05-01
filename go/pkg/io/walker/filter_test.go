@@ -46,7 +46,7 @@ func TestFilterMatch(t *testing.T) {
 			filter: walker.Filter{Regexp: regexp.MustCompile("/bar/"), Mode: 4},
 			paths:  []string{"/foo", "/bar/baz"},
 			modes:  []fs.FileMode{1, 4},
-			wantsPath:  []bool{false, true},
+			wantsPath:  []bool{false, false},
 			wantsFile:  []bool{false, true},
 		},
 	}

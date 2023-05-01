@@ -471,126 +471,156 @@ func (u *uploaderv2) digestAndDispatch(req UploadRequest) {
 
 	stats := Stats{}
 	var err error
-	errWalk := walker.DepthFirst(req.Path, req.Exclude, func(realPath impath.Absolute, desiredPath impath.Absolute, info fs.FileInfo, errVisit error) (nextStep walker.NextStep) {
-		glog.V(2).Infof("upload.digest.visit: first=%t, realPath=%s, desiredPath=%s, err=%v", info == nil, realPath, desiredPath, errVisit)
-		select {
-		case <-u.ctx.Done():
-			glog.V(2).Info("upload.digest.cancel")
-			return walker.Cancel
-		default:
-		}
-
-		if errVisit != nil {
+	walker.DepthFirst(req.Path, req.Exclude, walker.Callback{
+		Err: func(path impath.Absolute, realPath impath.Absolute, errVisit error) bool {
+			glog.V(2).Infof("upload.digest.visit.err: realPath=%s, desiredPath=%s, err=%v", realPath, path, errVisit)
 			err = errors.Join(errVisit, err)
-			return walker.Cancel
-		}
+			return false
+		},
+		Pre: func(path impath.Absolute, realPath impath.Absolute) (walker.PreAction, bool) {
+			glog.V(2).Infof("upload.digest.visit.pre: realPath=%s, desiredPath=%s", realPath, path)
+			select {
+			case <-u.ctx.Done():
+				glog.V(2).Info("upload.digest.cancel")
+				return walker.SkipPath, false
+			default:
+			}
 
-		key := desiredPath.String() + req.Exclude.String()
-		parentKey := desiredPath.Dir().String() + req.Exclude.String()
+			key := path.String() + req.Exclude.String()
 
-		// Pre-access.
-		if info == nil {
 			// A cache hit here indicates a cyclic symlink with the same caller or multiple callers attempting to upload the exact same path with an identical filter.
 			// In both cases, deferring is the right call. Once the upload is processed, all callers will revisit the path to get the digestion result.
 			// If the path was not cached before, claim it by makring it as in-flight using a nil value.
-			if m, ok := u.digestCache.LoadOrStore(key, nil); ok {
-				// Defer if in-flight.
-				if m == nil {
-					glog.V(2).Infof("upload.digest.visit.defer: realPath=%s, desiredPath=%s", realPath, desiredPath)
-					return walker.Defer
-				}
-
-				node, _ := m.(proto.Message) // Guaranteed assertion because the cache is an internal field.
-				glog.V(2).Infof("upload.digest.visit.cached: realPath=%s, desiredPath=%s", realPath, desiredPath)
-				// Dispatch it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
-				switch node := node.(type) {
-				case *repb.FileNode:
-					// Dispatching with a file path will deliver the blob to the streaming API.
-					// If the original blob is queued in the batching API, this blob could potentially get uploaded twice.
-					// However, that would mean the file is small.
-					u.uploadDispatchCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), path: realPath.String(), tag: req.tag}
-				case *repb.DirectoryNode:
-					// The blob of the directory node is its proto representation.
-					// Generate and dispatch it. If it was uploaded before, it'll be reported as a cache hit.
-					// Otherwise, it means the previous attempt to upload it failed and it is going to be retried.
-					node, b, errDigest := digestDirectory(realPath, u.dirChildren[key])
-					if errDigest != nil {
-						err = errors.Join(errDigest, err)
-						return walker.Cancel
-					}
-					u.uploadDispatchCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag}
-				case *repb.SymlinkNode:
-					// It was already appended as a child to its parent. Nothing to dispatch.
-				}
-				return walker.Skip
+			m, ok := u.digestCache.LoadOrStore(key, nil)
+			if !ok {
+				// Claimed. Access it.
+				return walker.Access, true
 			}
 
-			// Access it.
-			return walker.Continue
-		}
-
-		// If there was a digestion error, unclaim the path.
-		defer func() {
-			if nextStep == walker.Cancel {
-				u.digestCache.Delete(key)
+			// Defer if in-flight.
+			if m == nil {
+				glog.V(2).Infof("upload.digest.visit.defer: realPath=%s, desiredPath=%s", realPath, path)
+				return walker.Defer, true
 			}
-		}()
-		stats.DigestCount += 1
-		switch {
-		case info.Mode()&fs.ModeSymlink == fs.ModeSymlink:
-			glog.V(2).Infof("upload.digest.visit.symlink: realPath=%s, desiredPath=%s", realPath, desiredPath)
+
+			node, _ := m.(proto.Message) // Guaranteed assertion because the cache is an internal field.
+			glog.V(2).Infof("upload.digest.visit.cached: realPath=%s, desiredPath=%s", realPath, path)
+
+			// Dispatch it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
+			switch node := node.(type) {
+			case *repb.FileNode:
+				// Dispatching with a file path will deliver the blob to the streaming API.
+				// If the original blob is queued in the batching API, this blob could potentially get uploaded twice.
+				// However, that would mean the file is small.
+				u.uploadDispatchCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), path: realPath.String(), tag: req.tag}
+			case *repb.DirectoryNode:
+				// The blob of the directory node is its proto representation.
+				// Generate and dispatch it. If it was uploaded before, it'll be reported as a cache hit.
+				// Otherwise, it means the previous attempt to upload it failed and it is going to be retried.
+				node, b, errDigest := digestDirectory(realPath, u.dirChildren[key])
+				if errDigest != nil {
+					err = errors.Join(errDigest, err)
+					return walker.SkipPath, false
+				}
+				u.uploadDispatchCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag}
+			case *repb.SymlinkNode:
+				// It was already appended as a child to its parent. Nothing to dispatch.
+			}
+
+			return walker.SkipPath, true
+		},
+		Post: func(path impath.Absolute, realPath impath.Absolute, info fs.FileInfo) (ok bool) {
+			glog.V(2).Infof("upload.digest.visit.post: realPath=%s, desiredPath=%s", realPath, path)
+			select {
+			case <-u.ctx.Done():
+				glog.V(2).Info("upload.digest.cancel")
+				return false
+			default:
+			}
+
+			key := path.String() + req.Exclude.String()
+			parentKey := path.Dir().String() + req.Exclude.String()
+
+			// If there was a digestion error, unclaim the path.
+			defer func() {
+				if !ok {
+					u.digestCache.Delete(key)
+				}
+			}()
+
+			switch {
+			case info.Mode().IsDir():
+				stats.DigestCount += 1
+				stats.InputDirCount += 1
+				// All the descendants have already been visited (DFS).
+				node, b, errDigest := digestDirectory(realPath, u.dirChildren[key])
+				if errDigest != nil {
+					err = errors.Join(errDigest, err)
+					return false
+				}
+				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
+				u.uploadDispatchCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag}
+				u.digestCache.Store(key, digest.NewFromProtoUnvalidated(node.Digest))
+				glog.V(2).Infof("upload.digest.visit.dir: realPath=%s, desiredPath=%s, digset=%v", realPath, path, node.Digest)
+				glog.V(3).Infof("upload.digest.visit.dir: realPath=%s, desiredPath=%s, digset=%v, node=%v", realPath, path, node.Digest, node)
+				return true
+
+			case info.Mode().IsRegular():
+				stats.DigestCount += 1
+				stats.InputFileCount += 1
+				node, blb, errDigest := digestFile(u.ctx, realPath, info, u.ioSem, u.ioLargeSem, u.ioCfg.SmallFileSizeThreshold, u.ioCfg.LargeFileSizeThreshold)
+				if errDigest != nil {
+					err = errors.Join(errDigest, err)
+					return false
+				}
+				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
+				blb.tag = req.tag
+				u.uploadDispatchCh <- blb
+				u.digestCache.Store(key, digest.NewFromProtoUnvalidated(node.Digest))
+				glog.V(2).Infof("upload.digest.visit.file: realPath=%s, desiredPath=%s, digest=%v", realPath, path, node.Digest)
+				return true
+
+			default:
+				// Ignore everything else (e.g. sockets and pipes).
+				glog.V(2).Infof("upload.digest.visit.other: realPath=%s, desiredPath=%s", realPath, path)
+			}
+			return true
+		},
+		Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (action walker.SymlinkAction, ok bool) {
+			glog.V(2).Infof("upload.digest.visit.symlink: realPath=%s, desiredPath=%s", realPath, path)
+			select {
+			case <-u.ctx.Done():
+				glog.V(2).Info("upload.digest.cancel")
+				return walker.SkipSymlink, false
+			default:
+			}
+
+			key := path.String() + req.Exclude.String()
+			parentKey := path.Dir().String() + req.Exclude.String()
+
+			// If there was a digestion error, unclaim the path.
+			defer func() {
+				if !ok {
+					u.digestCache.Delete(key)
+				}
+			}()
+
+			stats.DigestCount += 1
+			glog.V(2).Infof("upload.digest.visit.symlink: realPath=%s, desiredPath=%s", realPath, path)
 			stats.InputSymlinkCount += 1
 			node, nextStep, errDigest := digestSymlink(req.Path, realPath, req.SymlinkOptions)
 			if errDigest != nil {
 				err = errors.Join(errDigest, err)
-				return walker.Cancel
+				return walker.SkipSymlink, false
 			}
 			if node != nil {
 				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
 				u.digestCache.Store(key, digest.Digest{})
 			}
-			return nextStep
-
-		case info.Mode().IsDir():
-			stats.InputDirCount += 1
-			// All the descendants have already been visited (DFS).
-			node, b, errDigest := digestDirectory(realPath, u.dirChildren[key])
-			if errDigest != nil {
-				err = errors.Join(errDigest, err)
-				return walker.Cancel
-			}
-			u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
-			u.uploadDispatchCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag}
-			u.digestCache.Store(key, digest.NewFromProtoUnvalidated(node.Digest))
-			glog.V(2).Infof("upload.digest.visit.dir: realPath=%s, desiredPath=%s, digset=%v", realPath, desiredPath, node.Digest)
-			glog.V(3).Infof("upload.digest.visit.dir: realPath=%s, desiredPath=%s, digset=%v, node=%v", realPath, desiredPath, node.Digest, node)
-			return walker.Continue
-
-		case info.Mode().IsRegular():
-			stats.InputFileCount += 1
-			node, blb, errDigest := digestFile(u.ctx, realPath, info, u.ioSem, u.ioLargeSem, u.ioCfg.SmallFileSizeThreshold, u.ioCfg.LargeFileSizeThreshold)
-			if errDigest != nil {
-				err = errors.Join(errDigest, err)
-				return walker.Cancel
-			}
-			u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
-			blb.tag = req.tag
-			u.uploadDispatchCh <- blb
-			u.digestCache.Store(key, digest.NewFromProtoUnvalidated(node.Digest))
-			glog.V(2).Infof("upload.digest.visit.file: realPath=%s, desiredPath=%s, digest=%v", realPath, desiredPath, node.Digest)
-			return walker.Continue
-
-		default:
-			// Skip everything else (e.g. sockets and pipes).
-			glog.V(2).Infof("upload.digest.visit.other: realPath=%s, desiredPath=%s", realPath, desiredPath)
-			return walker.Skip
-		}
+			return nextStep, true
+		},
 	})
 
-	// errWalk is always walker.ErrBadNextStep, which means there is a bug in the code above.
-	if errWalk != nil {
-		panic(fmt.Errorf("internal fatal error: %v", errWalk))
-	}
 	// err includes any IO errors that happened during the walk.
 	if err != nil {
 		// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
@@ -638,14 +668,14 @@ func (u *uploaderv2) uploadDispatcher() {
 				tagDone[tc.t] = true
 				// If nothing was previously dispatched for this tag, let the caller know this is the last response.
 				// This happens when all digestions failed or there was nothing to digest (everything was excluded).
-				if _, ok := tagReqCount[tc.t]; ok {
+				if _, ok := tagReqCount[tc.t]; !ok {
 					u.uploadPubSub.pub(UploadResponse{done: true}, tc.t)
 				}
 				glog.V(2).Infof("upload.dispatcher.blob.done: tag=%s", tc.t)
 				continue
 			}
 			tagReqCount[tc.t] += tc.c
-			glog.V(2).Infof("upload.dispatcher.res: tag=%s, count=%d", tc.t, tc.c)
+			glog.V(2).Infof("upload.dispatcher.count: tag=%s, count=%d", tc.t, tagReqCount[tc.t])
 			if tagReqCount[tc.t] <= 0 && tagDone[tc.t] {
 				delete(tagDone, tc.t)
 				delete(tagReqCount, tc.t)

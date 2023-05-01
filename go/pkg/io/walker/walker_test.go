@@ -8,17 +8,26 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/google/go-cmp/cmp"
 )
 
+const (
+	actionPre = iota
+	actionPost
+	actionSymlink
+)
+
 type (
 	symlinks  = map[string]string
-	istep     = map[int]walker.NextStep
-	pathstep  = map[string]istep
-	pathcount = map[string]int
+	actionVal struct {
+		action int
+		cancel bool
+	}
+	actions    = map[int]actionVal
+	pathAction = map[string]actions
+	pathCount  = map[string]int
 )
 
 func TestWalker(t *testing.T) {
@@ -28,25 +37,25 @@ func TestWalker(t *testing.T) {
 		symlinks         symlinks
 		root             string
 		filter           walker.Filter
-		pathstep         pathstep
-		wantRealCount    pathcount
-		wantDesiredCount pathcount
+		pathAction       pathAction
+		wantRealCount    pathCount
+		wantDesiredCount pathCount
 		wantErr          error
 	}{
 		{
 			name:          "single_file",
 			paths:         []string{"foo.c"},
-			wantRealCount: pathcount{"foo.c": 2},
+			wantRealCount: pathCount{"foo.c": 2},
 		},
 		{
 			name:          "empty_dir",
 			paths:         []string{"foo"},
-			wantRealCount: pathcount{"foo": 2},
+			wantRealCount: pathCount{"foo": 2},
 		},
 		{
 			name:          "dir_single_file",
 			paths:         []string{"foo/bar.c"},
-			wantRealCount: pathcount{"foo": 2, "foo/bar.c": 2},
+			wantRealCount: pathCount{"foo": 2, "foo/bar.c": 2},
 		},
 		{
 			name: "single_level",
@@ -54,7 +63,7 @@ func TestWalker(t *testing.T) {
 				"foo/bar.c",
 				"foo/baz.c",
 			},
-			wantRealCount: pathcount{"foo": 2, "foo/bar.c": 2, "foo/baz.c": 2},
+			wantRealCount: pathCount{"foo": 2, "foo/bar.c": 2, "foo/baz.c": 2},
 		},
 		{
 			name: "two_levels_simple",
@@ -62,7 +71,7 @@ func TestWalker(t *testing.T) {
 				"foo/a.z",
 				"foo/bar/b.z",
 			},
-			wantRealCount: pathcount{"foo": 2, "foo/a.z": 2, "foo/bar": 2, "foo/bar/b.z": 2},
+			wantRealCount: pathCount{"foo": 2, "foo/a.z": 2, "foo/bar": 2, "foo/bar/b.z": 2},
 		},
 		{
 			name: "two_levels",
@@ -73,7 +82,7 @@ func TestWalker(t *testing.T) {
 				"foo/bar/baz/d.z",
 				"foo/bar/baz/e.z",
 			},
-			wantRealCount: pathcount{
+			wantRealCount: pathCount{
 				"foo":             2,
 				"foo/a.z":         2,
 				"foo/b.z":         2,
@@ -88,25 +97,25 @@ func TestWalker(t *testing.T) {
 			name:          "skip_file_by_path",
 			paths:         []string{"foo.c"},
 			filter:        walker.Filter{Regexp: regexp.MustCompile("foo.c")},
-			wantRealCount: pathcount{},
+			wantRealCount: pathCount{},
 		},
 		{
 			name:          "path_cancel",
 			paths:         []string{"foo.c"},
-			pathstep:      pathstep{"foo.c": istep{1: walker.Cancel}},
-			wantRealCount: pathcount{"foo.c": 1},
+			pathAction:    pathAction{"foo.c": actions{actionPre: {cancel: true}}},
+			wantRealCount: pathCount{"foo.c": 1},
 		},
 		{
 			name:          "single_file_deferred",
 			paths:         []string{"foo.c"},
-			pathstep:      pathstep{"foo.c": istep{1: walker.Defer}},
-			wantRealCount: pathcount{"foo.c": 3},
+			pathAction:    pathAction{"foo.c": actions{actionPre: {action: int(walker.Defer)}}},
+			wantRealCount: pathCount{"foo.c": 3},
 		},
 		{
 			name:          "single_dir_deferred",
 			paths:         []string{"foo/"},
-			pathstep:      pathstep{"foo": istep{1: walker.Defer}},
-			wantRealCount: pathcount{"foo": 3},
+			pathAction:    pathAction{"foo": actions{actionPre: {action: int(walker.Defer)}}},
+			wantRealCount: pathCount{"foo": 3},
 		},
 		{
 			name: "deferred",
@@ -117,11 +126,11 @@ func TestWalker(t *testing.T) {
 				"foo/bar/baz/d.z",
 				"foo/bar/baz/e.z",
 			},
-			pathstep: pathstep{
-				"foo/b.z":         istep{1: walker.Defer},
-				"foo/bar/baz/e.z": istep{1: walker.Defer},
+			pathAction: pathAction{
+				"foo/b.z":         actions{actionPre: {action: int(walker.Defer)}},
+				"foo/bar/baz/e.z": actions{actionPre: {action: int(walker.Defer)}},
 			},
-			wantRealCount: pathcount{
+			wantRealCount: pathCount{
 				"foo":             2,
 				"foo/a.z":         2,
 				"foo/b.z":         3,
@@ -135,7 +144,7 @@ func TestWalker(t *testing.T) {
 		{
 			name:     "file_symlink",
 			symlinks: symlinks{"foo.c": "bar.c"},
-			wantRealCount: pathcount{
+			wantRealCount: pathCount{
 				"foo.c": 2,
 				"bar.c": 2,
 			},
@@ -145,7 +154,7 @@ func TestWalker(t *testing.T) {
 			paths:    []string{"foo/bar.c"},
 			symlinks: symlinks{"foo.c": "foo/"},
 			root:     "foo.c",
-			wantRealCount: pathcount{
+			wantRealCount: pathCount{
 				"foo.c":     2,
 				"foo/bar.c": 2,
 				"foo":       2,
@@ -156,7 +165,7 @@ func TestWalker(t *testing.T) {
 			paths:    []string{"foo/bar.c"},
 			symlinks: symlinks{"foo/baz.c": "a.z"},
 			root:     "foo", // Otherwise which top-level path is selected is nondeterministic.
-			wantRealCount: pathcount{
+			wantRealCount: pathCount{
 				"foo":       2,
 				"foo/bar.c": 2,
 				"foo/baz.c": 2,
@@ -164,33 +173,33 @@ func TestWalker(t *testing.T) {
 			},
 		},
 		{
-			name:     "skip_symlink",
-			paths:    []string{"foo/bar.c"},
-			symlinks: symlinks{"foo.c": "foo/"},
-			pathstep: pathstep{"foo.c": istep{2: walker.Skip}},
-			wantRealCount: pathcount{
+			name:       "skip_symlink",
+			paths:      []string{"foo/bar.c"},
+			symlinks:   symlinks{"foo.c": "foo/"},
+			pathAction: pathAction{"foo.c": actions{actionSymlink: {action: int(walker.SkipSymlink)}}},
+			wantRealCount: pathCount{
 				"foo.c": 2,
 			},
 		},
 		{
 			name:     "relative_symlink",
 			symlinks: symlinks{"foo/bar.c": "./baz.c"},
-			wantRealCount: pathcount{
+			wantRealCount: pathCount{
 				"foo":       2,
 				"foo/bar.c": 2,
 				"foo/baz.c": 4, // 2 as a child of foo, and 2 as a symlink target.
 			},
 		},
 		{
-			name:     "replace_single_symlink",
-			symlinks: symlinks{"foo.c": "bar.c"},
-			root:     "foo.c",
-			pathstep: pathstep{"foo.c": istep{2: walker.Replace}},
-			wantRealCount: pathcount{
+			name:       "replace_single_symlink",
+			symlinks:   symlinks{"foo.c": "bar.c"},
+			root:       "foo.c",
+			pathAction: pathAction{"foo.c": actions{actionSymlink: {action: int(walker.Replace)}}},
+			wantRealCount: pathCount{
 				"foo.c": 2,
 				"bar.c": 2,
 			},
-			wantDesiredCount: pathcount{
+			wantDesiredCount: pathCount{
 				"foo.c": 2,
 			},
 		},
@@ -201,22 +210,22 @@ func TestWalker(t *testing.T) {
 				"bar/b.z",
 				"bar/c/d.z",
 			},
-			symlinks: symlinks{"foo": "bar/"},
-			root:     "foo",
-			pathstep: pathstep{"foo": istep{2: walker.Replace}},
-			wantRealCount: pathcount{
+			symlinks:   symlinks{"foo": "bar/"},
+			root:       "foo",
+			pathAction: pathAction{"foo": actions{actionSymlink: {action: int(walker.Replace)}}},
+			wantRealCount: pathCount{
 				"foo":       2,
 				"bar":       2,
 				"bar/a.z":   2,
 				"bar/b.z":   2,
-				"bar/c":   2,
+				"bar/c":     2,
 				"bar/c/d.z": 2,
 			},
-			wantDesiredCount: pathcount{
+			wantDesiredCount: pathCount{
 				"foo":       2,
 				"foo/a.z":   2,
 				"foo/b.z":   2,
-				"foo/c":   2,
+				"foo/c":     2,
 				"foo/c/d.z": 2,
 			},
 		},
@@ -230,32 +239,47 @@ func TestWalker(t *testing.T) {
 				root = filepath.Join(tmp, test.root)
 			}
 			var realSeq []string
-			dpvc := pathcount{}
-			err := walker.DepthFirst(impath.MustAbs(root), test.filter, func(realPath, desiredPath impath.Absolute, info fs.FileInfo, err error) walker.NextStep {
-				if err != nil {
+			dpvc := pathCount{}
+			walker.DepthFirst(impath.MustAbs(root), test.filter, walker.Callback{
+				Err: func(_ impath.Absolute, _ impath.Absolute, err error) bool {
 					t.Errorf("unexpected error: %v", err)
-					return walker.Cancel
-				}
-				p, _ := filepath.Rel(tmp, realPath.String())
-				realSeq = append(realSeq, p)
-				dp, _ := filepath.Rel(tmp, desiredPath.String())
-				if dp != p {
-					dpvc[dp]++
-				}
+					return false
+				},
+				Pre: func(path impath.Absolute, realPath impath.Absolute) (walker.PreAction, bool) {
+					p, _ := filepath.Rel(tmp, realPath.String())
+					realSeq = append(realSeq, p)
+					dp, _ := filepath.Rel(tmp, path.String())
+					if dp != p {
+						dpvc[dp]++
+					}
 
-				next := test.pathstep[p][1]
-				// Only defer once to avoid infinite loops.
-				if next == walker.Defer {
-					test.pathstep[p] = istep{1: walker.Continue}
-				}
-				if info != nil {
-					next = test.pathstep[p][2]
-				}
-				return next
+					v := test.pathAction[p][actionPre]
+					// Only defer once to avoid infinite loops.
+					if v.action == int(walker.Defer) {
+						test.pathAction[p][actionPre] = actionVal{action: int(walker.Access), cancel: v.cancel}
+					}
+					return walker.PreAction(v.action), !v.cancel
+				},
+				Post: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) bool {
+					p, _ := filepath.Rel(tmp, realPath.String())
+					realSeq = append(realSeq, p)
+					dp, _ := filepath.Rel(tmp, path.String())
+					if dp != p {
+						dpvc[dp]++
+					}
+					return !test.pathAction[p][actionPost].cancel
+				},
+				Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (walker.SymlinkAction, bool) {
+					p, _ := filepath.Rel(tmp, realPath.String())
+					realSeq = append(realSeq, p)
+					dp, _ := filepath.Rel(tmp, path.String())
+					if dp != p {
+						dpvc[dp]++
+					}
+					v := test.pathAction[p][actionSymlink]
+					return walker.SymlinkAction(v.action), !v.cancel
+				},
 			})
-			if !errors.Is(err, test.wantErr) {
-				t.Errorf("unexpected error: %v", err)
-			}
 			pvc := validateSequence(t, realSeq, fsLayout)
 			if diff := cmp.Diff(test.wantRealCount, pvc); diff != "" {
 				t.Errorf("path visit count mismatch (-want +got):\n%s", diff)
@@ -353,11 +377,11 @@ func createFile(t *testing.T, parent, p string) {
 }
 
 // validateSequence checks that every path is visited after its children.
-func validateSequence(t *testing.T, seq []string, fsLayout map[string][]string) pathcount {
+func validateSequence(t *testing.T, seq []string, fsLayout map[string][]string) pathCount {
 	t.Helper()
 
 	t.Logf("validating sequence: %v\n", seq)
-	pathVisitCount := pathcount{}
+	pathVisitCount := pathCount{}
 	pendingParent := map[string]bool{}
 	for _, p := range seq {
 		pathVisitCount[p] += 1

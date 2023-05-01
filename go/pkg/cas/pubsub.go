@@ -29,7 +29,7 @@ type pubsub struct {
 // ctx is only used to wait for a an unsubscription signal. It is not propagated with any messages.
 // The subscriber must unsubscribe by cancelling the specified context.
 // The subscriber must continue draining the returned channel until it's closed.
-// The returned channel is unbufferred and only closed when the specified context is done.
+// The returned channel is unbuffered and only closed when the specified context is done.
 //
 // To properly terminate the subscription, the subscriber must wait until all expected responses are received
 // on the returned channel before cancelling the context.

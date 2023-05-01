@@ -20,7 +20,7 @@ import (
 )
 
 // digestSymlink follows the target and/or constructs a symlink node.
-func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) (*repb.SymlinkNode, walker.NextStep, error) {
+func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) (*repb.SymlinkNode, walker.SymlinkAction, error) {
 	// Replace symlink with target.
 	if slo.Resolve() {
 		return nil, walker.Replace, nil
@@ -33,7 +33,7 @@ func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) 
 
 	target, err := os.Readlink(path.String())
 	if err != nil {
-		return nil, walker.Cancel, err
+		return nil, walker.SkipSymlink, err
 	}
 
 	// Cannot use the target name for syscalls since it might be relative to the symlink directory, not the cwd of the process.
@@ -41,7 +41,7 @@ func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) 
 	if filepath.IsAbs(target) {
 		targetRelative, err = filepath.Rel(path.Dir().String(), target)
 		if err != nil {
-			return nil, walker.Cancel, err
+			return nil, walker.SkipSymlink, err
 		}
 	} else {
 		targetRelative = target
@@ -51,12 +51,12 @@ func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) 
 	if slo.NoDangling() {
 		_, err := os.Lstat(target)
 		if err != nil {
-			return nil, walker.Cancel, err
+			return nil, walker.SkipSymlink, err
 		}
 	}
 
 	var node *repb.SymlinkNode
-	nextStep := walker.Skip
+	nextStep := walker.SkipSymlink
 
 	// If the symlink itself is wanted, capture it.
 	if slo.Preserve() {
@@ -68,7 +68,7 @@ func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) 
 
 	// If the target is wanted, tell the walker to follow it.
 	if slo.IncludeTarget() {
-		nextStep = walker.Continue
+		nextStep = walker.Follow
 	}
 
 	return node, nextStep, nil
