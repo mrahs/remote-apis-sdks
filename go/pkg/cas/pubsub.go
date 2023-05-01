@@ -157,8 +157,11 @@ func newPubSub() *pubsub {
 
 func excludeTag(tags []tag, et tag) []tag {
 	ts := make([]tag, 0, len(tags)-1)
+	// Only exclude the tag once.
+	excluded := false
 	for _, t := range tags {
-		if t == et {
+		if !excluded && t == et {
+			excluded = true
 			continue
 		}
 		ts = append(ts, t)

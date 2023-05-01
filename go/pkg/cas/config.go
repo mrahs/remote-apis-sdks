@@ -50,7 +50,7 @@ type GRPCConfig struct {
 
 	// BytesLimit sets the upper bound for the size of each request.
 	// Comparisons against this value may not be exact due to padding and other serialization naunces.
-	// Clients should choose a value that is sufficiently lower than the max size limit for corresponding gRPC connection.
+	// Clients should choose a value that is sufficiently lower than the max size limit for the corresponding gRPC connection.
 	// Must be > 0.
 	// This is defined as int rather than int64 because gRPC uses int for its limit.
 	BytesLimit int
@@ -227,7 +227,7 @@ func (s *Stats) ToCacheHit() Stats {
 	hit.LogicalBytesMoved = 0
 	hit.TotalBytesMoved = 0
 	hit.EffectiveBytesMoved = 0
-	hit.LogicalBytesCached = hit.BytesRequested
+	hit.LogicalBytesCached = s.BytesRequested
 	hit.LogicalBytesStreamed = 0
 	hit.LogicalBytesBatched = 0
 	// for trees

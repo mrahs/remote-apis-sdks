@@ -741,7 +741,7 @@ func (u *uploaderv2) uploadDispatcher() {
 				u.uploadPubSub.pub(r, r.tags[0])
 			} else {
 				rCached := r
-				rCached.Stats = rCached.Stats.ToCacheHit()
+				rCached.Stats = r.Stats.ToCacheHit()
 				u.uploadPubSub.mpub(r, rCached, r.tags...)
 			}
 
@@ -896,6 +896,7 @@ func (u *uploaderv2) uploadBatchProcessor() {
 			if ok {
 				// Duplicate tags are allowed to ensure the caller can match the number of responses to the number of requests.
 				item.tags = append(item.tags, b.tag)
+				bundle[b.digest] = item
 				glog.V(2).Infof("upload.batch.unified: digest=%s, len=%d", b.digest, len(item.tags))
 				continue
 			}
@@ -1117,6 +1118,7 @@ func (u *uploaderv2) uploadStreamProcessor() {
 
 		case r := <-streamResCh:
 			r.tags = digestTags[r.Digest]
+			delete(digestTags, r.Digest)
 			u.uploadResCh <- r
 			pending -= 1
 			glog.V(2).Infof("upload.stream.res: pending=%d, done=%t", pending, done)

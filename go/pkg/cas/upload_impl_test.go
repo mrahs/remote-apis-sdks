@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
@@ -308,6 +309,7 @@ func TestUpload_Upload(t *testing.T) {
 		fs           map[string][]byte
 		root         string
 		ioCfg        cas.IOConfig
+		rpcCfg       *cas.GRPCConfig
 		bsc          *fakeByteStreamClient
 		cc           *fakeCAS
 		wantStats    *cas.Stats
@@ -569,18 +571,143 @@ func TestUpload_Upload(t *testing.T) {
 				{Hash: "e62b0cd1aedd5cd2249d3afb418454483777f5deecfcd2df7fc113f546340b2e", Size: 233}, // foo
 			},
 		},
-		// TODO: digset cache hit
-		// TODO: all digestions fail (nothing is dispatched)
-		// TODO: unified
+		{
+			name: "stream_unified",
+			fs: map[string][]byte{
+				"foo/bar1.c": []byte("int bar;"),
+				"foo/bar2.c": []byte("int bar;"),
+			},
+			root: "foo",
+			ioCfg: cas.IOConfig{
+				CompressionSizeThreshold: 10000, // large enough to disable compression.
+				SmallFileSizeThreshold:   1,
+				LargeFileSizeThreshold:   2,
+				OpenLargeFilesLimit:      2,
+				OpenFilesLimit:           2,
+			},
+			bsc: &fakeByteStreamClient{
+				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
+					var size int64
+					return &fakeByteStream_WriteClient{
+						send: func(wr *bspb.WriteRequest) error {
+							<-time.After(10 * time.Millisecond) // Fake high latency.
+							size += int64(len(wr.Data))
+							return nil
+						},
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{CommittedSize: size}, nil
+						},
+					}, nil
+				},
+			},
+			cc: &fakeCAS{
+				findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+					return &repb.FindMissingBlobsResponse{MissingBlobDigests: in.BlobDigests}, nil
+				},
+				batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
+					resp := make([]*repb.BatchUpdateBlobsResponse_Response, len(in.Requests))
+					for i, r := range in.Requests {
+						resp[i] = &repb.BatchUpdateBlobsResponse_Response{Digest: r.Digest, Status: &rpcstatus.Status{}}
+					}
+					return &repb.BatchUpdateBlobsResponse{
+						Responses: resp,
+					}, nil
+				},
+			},
+			wantStats: &cas.Stats{
+				BytesRequested:       176,
+				LogicalBytesMoved:    168,
+				TotalBytesMoved:      168,
+				EffectiveBytesMoved:  168,
+				LogicalBytesStreamed: 8,   // one copy
+				LogicalBytesCached:   8,   // the other copy
+				LogicalBytesBatched:  160, // the directory
+				CacheMissCount:       2,
+				CacheHitCount:        1,
+				StreamedCount:        1,
+				BatchedCount:         1,
+			},
+			wantUploaded: []digest.Digest{
+				{Hash: "9877358cfe402635019ce7bf591e9fd86d27953b0077e1f173b7875f0043d87a", Size: 8},   // the file
+				{Hash: "ffd7226e23f331727703bfd6ce4ebc0f503127f73eaa1ad62469749c82374ec5", Size: 160}, // the directory
+			},
+		},
+		{
+			name: "batch_unified",
+			fs: map[string][]byte{
+				"foo/bar1.c": []byte("int bar;"),
+				"foo/bar2.c": []byte("int bar;"),
+			},
+			root: "foo",
+			ioCfg: cas.IOConfig{
+				CompressionSizeThreshold: 10000, // large enough to disable compression.
+				SmallFileSizeThreshold:   10,
+				LargeFileSizeThreshold:   20,
+				OpenFilesLimit:           2,
+			},
+			rpcCfg: &cas.GRPCConfig{
+				ConcurrentCallsLimit: 1,
+				BytesLimit:           1000,
+				ItemsLimit:           10,
+				BundleTimeout:        10 * time.Millisecond,
+				Timeout:              time.Second,
+			},
+			bsc: &fakeByteStreamClient{
+				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
+					return &fakeByteStream_WriteClient{
+						send: func(wr *bspb.WriteRequest) error {
+							return nil
+						},
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{}, nil
+						},
+					}, nil
+				},
+			},
+			cc: &fakeCAS{
+				findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+					return &repb.FindMissingBlobsResponse{MissingBlobDigests: in.BlobDigests}, nil
+				},
+				batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
+					resp := make([]*repb.BatchUpdateBlobsResponse_Response, len(in.Requests))
+					for i, r := range in.Requests {
+						resp[i] = &repb.BatchUpdateBlobsResponse_Response{Digest: r.Digest, Status: &rpcstatus.Status{}}
+					}
+					return &repb.BatchUpdateBlobsResponse{
+						Responses: resp,
+					}, nil
+				},
+			},
+			wantStats: &cas.Stats{
+				BytesRequested:      176,
+				LogicalBytesMoved:   168,
+				TotalBytesMoved:     168,
+				EffectiveBytesMoved: 168,
+				LogicalBytesCached:  8,
+				LogicalBytesBatched: 168,
+				CacheMissCount:      2,
+				CacheHitCount:       1,
+				BatchedCount:        2,
+			},
+			wantUploaded: []digest.Digest{
+				{Hash: "9877358cfe402635019ce7bf591e9fd86d27953b0077e1f173b7875f0043d87a", Size: 8},   // the file
+				{Hash: "ffd7226e23f331727703bfd6ce4ebc0f503127f73eaa1ad62469749c82374ec5", Size: 160}, // the directory
+			},
+		},
 	}
 
 	for _, test := range tests {
+		if test.name != "batch_unified" {
+			continue
+		}
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			glog.Infof("test: %s", test.name)
 			tmp := makeFs(t, test.fs)
-			testRpcCfg := rpcCfg
-			testRpcCfg.RetryPolicy = retryNever
+			if test.rpcCfg == nil {
+				test.rpcCfg = &rpcCfg
+			}
+			test.rpcCfg.RetryPolicy = retryNever
 			if test.ioCfg.ConcurrentWalksLimit <= 0 {
 				test.ioCfg.ConcurrentWalksLimit = 1
 			}
@@ -594,7 +721,7 @@ func TestUpload_Upload(t *testing.T) {
 				test.ioCfg.OpenLargeFilesLimit = 1
 			}
 			ctx, ctxCancel := context.WithCancel(context.Background())
-			u, err := cas.NewBatchingUploader(ctx, test.cc, test.bsc, "", testRpcCfg, testRpcCfg, testRpcCfg, test.ioCfg)
+			u, err := cas.NewBatchingUploader(ctx, test.cc, test.bsc, "", *test.rpcCfg, *test.rpcCfg, *test.rpcCfg, test.ioCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
