@@ -1,9 +1,3 @@
-// This file includes the implementation for uploading blobs to the CAS.
-// A note about logging:
-//
-//	Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
-//	Level 2 is used for internal functions that may be called per request.
-//	Level 3 is used for messages that contain large objects.
 package cas
 
 import (
