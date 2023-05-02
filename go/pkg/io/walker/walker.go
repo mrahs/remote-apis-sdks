@@ -50,8 +50,10 @@ const (
 )
 
 // Callback defines the implementations that the client should provide for the walker.
-// This design allows validating client provided actions at compile time at the cost of verbosity.
 // Returning false from any callback cancels the entire walk.
+//
+// Defining a set of callbacks instead of a single shared one allows ensuring valid actions are returned at compile time.
+// This is more robust than using implicit default actions or propagating errors at runtime.
 type Callback struct {
 	// Pre is called before accessing the path. Returning false cancels the entire walk.
 	Pre func(path impath.Absolute, realPath impath.Absolute) (PreAction, bool)
