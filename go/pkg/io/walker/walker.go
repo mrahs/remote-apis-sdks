@@ -8,7 +8,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 )
 
-// Internal primitive steps.
+// Internal shared actions.
 const (
 	aRead = iota
 	aSkip
@@ -20,6 +20,7 @@ const (
 type (
 	// PreAction is an enum that defines the valid actions for the pre-access callback.
 	PreAction int
+
 	// SymlinkAction is an enum that defines the valid actions for a the symlink callback.
 	SymlinkAction int
 )
@@ -28,7 +29,7 @@ const (
 	// Access indicates that the walker should stat the path.
 	Access PreAction = aRead
 
-	// SkipPath indicates that the walker should skip the path and continue treversing.
+	// SkipPath indicates that the walker should skip the path and continue traversing.
 	SkipPath PreAction = aSkip
 
 	// Defer indicates that the walker should reschedule the path for another visit and continue traversing.
@@ -50,6 +51,7 @@ const (
 
 // Callback defines the implementations that the client should provide for the walker.
 // This design allows validating client provided actions at compile time at the cost of verbosity.
+// Returning false from any callback cancels the entire walk.
 type Callback struct {
 	// Pre is called before accessing the path. Returning false cancels the entire walk.
 	Pre func(path impath.Absolute, realPath impath.Absolute) (PreAction, bool)
@@ -99,7 +101,7 @@ type elem struct {
 func DepthFirst(root impath.Absolute, exclude Filter, cb Callback) {
 	pending := &stack{}
 	pending.push(elem{realPath: root, path: root})
-	// parentIndex keeps track of the last directory node so deferred children can be scheduled to be visited before it.
+	// parentIndex keeps track of the last directory so deferred children can be scheduled to be visited before it.
 	parentIndex := &stack{}
 
 	for pending.len() > 0 {
@@ -109,7 +111,7 @@ func DepthFirst(root impath.Absolute, exclude Filter, cb Callback) {
 			pi = parentIndex.peek().(int)
 		}
 
-		// If we're back to processing the directory node, remove it from the parenthood chain.
+		// If we're back to processing the directory, remove it from the parenthood chain.
 		if pending.len() == pi {
 			parentIndex.pop()
 		}
@@ -128,7 +130,7 @@ func DepthFirst(root impath.Absolute, exclude Filter, cb Callback) {
 				e.deferredParent = true
 				// Remember the parent index to insert deferred children after it in the stack.
 				parentIndex.push(pending.len())
-				// Reschdule the parent to visited after its children.
+				// Reschdule the parent to be visited after its children.
 				pending.push(e)
 				// Schedule the children to be visited before their parent.
 				pending.push(deferred...)
@@ -160,7 +162,7 @@ func DepthFirst(root impath.Absolute, exclude Filter, cb Callback) {
 
 // visit performs pre-access, stat, and/or post-access depending on the state of the element.
 //
-// If Defer is returned, it refers to the element from the arguments, not the returned reference.
+// If aDefer is returned, it refers to the element from the arguments, not the returned reference.
 // If the returned element reference is not nil, the returned int (action) is always aRead.
 //
 // Return values:
@@ -242,7 +244,7 @@ func visit(e elem, exclude Filter, cb Callback) (*elem, int) {
 // processDir accepts a pre-accessed directory and visits all of its children.
 //
 // All the files (non-directories) will be completely visited within this call.
-// All the directories will be pre-accessed and stat'ed, but not post-accessed.
+// All the directories will be pre-accessed, but not post-accessed.
 // Return values:
 //
 //	[]any is nil unless the directory had deferred-children, which includes directories and client-deferred paths.
@@ -264,7 +266,6 @@ func processDir(dirElem elem, exclude Filter, cb Callback) ([]any, int) {
 	for {
 		names, errRead := f.Readdirnames(128)
 
-		// If reading fails, let the client choose whether to skip or cancel.
 		if errRead != nil && errRead != io.EOF {
 			if ok := cb.Err(dirElem.path, dirElem.realPath, errOpen); !ok {
 				return deferred, aCancel

@@ -26,7 +26,7 @@ type (
 		cancel bool
 	}
 	actions    = map[int]actionVal
-	pathAction = map[string]actions
+	pathActions = map[string]actions
 	pathCount  = map[string]int
 )
 
@@ -37,7 +37,7 @@ func TestWalker(t *testing.T) {
 		symlinks         symlinks
 		root             string
 		filter           walker.Filter
-		pathAction       pathAction
+		pathActions       pathActions
 		wantRealCount    pathCount
 		wantDesiredCount pathCount
 		wantErr          error
@@ -102,19 +102,19 @@ func TestWalker(t *testing.T) {
 		{
 			name:          "path_cancel",
 			paths:         []string{"foo.c"},
-			pathAction:    pathAction{"foo.c": actions{actionPre: {cancel: true}}},
+			pathActions:    pathActions{"foo.c": actions{actionPre: {cancel: true}}},
 			wantRealCount: pathCount{"foo.c": 1},
 		},
 		{
 			name:          "single_file_deferred",
 			paths:         []string{"foo.c"},
-			pathAction:    pathAction{"foo.c": actions{actionPre: {action: int(walker.Defer)}}},
+			pathActions:    pathActions{"foo.c": actions{actionPre: {action: int(walker.Defer)}}},
 			wantRealCount: pathCount{"foo.c": 3},
 		},
 		{
 			name:          "single_dir_deferred",
 			paths:         []string{"foo/"},
-			pathAction:    pathAction{"foo": actions{actionPre: {action: int(walker.Defer)}}},
+			pathActions:    pathActions{"foo": actions{actionPre: {action: int(walker.Defer)}}},
 			wantRealCount: pathCount{"foo": 3},
 		},
 		{
@@ -126,7 +126,7 @@ func TestWalker(t *testing.T) {
 				"foo/bar/baz/d.z",
 				"foo/bar/baz/e.z",
 			},
-			pathAction: pathAction{
+			pathActions: pathActions{
 				"foo/b.z":         actions{actionPre: {action: int(walker.Defer)}},
 				"foo/bar/baz/e.z": actions{actionPre: {action: int(walker.Defer)}},
 			},
@@ -164,7 +164,7 @@ func TestWalker(t *testing.T) {
 			name:     "nested_symlink",
 			paths:    []string{"foo/bar.c"},
 			symlinks: symlinks{"foo/baz.c": "a.z"},
-			root:     "foo", // Otherwise which top-level path is selected is nondeterministic.
+			root:     "foo", // Otherwise it is nondeterministic which top-level path is selected.
 			wantRealCount: pathCount{
 				"foo":       2,
 				"foo/bar.c": 2,
@@ -176,7 +176,7 @@ func TestWalker(t *testing.T) {
 			name:       "skip_symlink",
 			paths:      []string{"foo/bar.c"},
 			symlinks:   symlinks{"foo.c": "foo/"},
-			pathAction: pathAction{"foo.c": actions{actionSymlink: {action: int(walker.SkipSymlink)}}},
+			pathActions: pathActions{"foo.c": actions{actionSymlink: {action: int(walker.SkipSymlink)}}},
 			wantRealCount: pathCount{
 				"foo.c": 2,
 			},
@@ -194,7 +194,7 @@ func TestWalker(t *testing.T) {
 			name:       "replace_single_symlink",
 			symlinks:   symlinks{"foo.c": "bar.c"},
 			root:       "foo.c",
-			pathAction: pathAction{"foo.c": actions{actionSymlink: {action: int(walker.Replace)}}},
+			pathActions: pathActions{"foo.c": actions{actionSymlink: {action: int(walker.Replace)}}},
 			wantRealCount: pathCount{
 				"foo.c": 2,
 				"bar.c": 2,
@@ -212,7 +212,7 @@ func TestWalker(t *testing.T) {
 			},
 			symlinks:   symlinks{"foo": "bar/"},
 			root:       "foo",
-			pathAction: pathAction{"foo": actions{actionSymlink: {action: int(walker.Replace)}}},
+			pathActions: pathActions{"foo": actions{actionSymlink: {action: int(walker.Replace)}}},
 			wantRealCount: pathCount{
 				"foo":       2,
 				"bar":       2,
@@ -239,7 +239,7 @@ func TestWalker(t *testing.T) {
 				root = filepath.Join(tmp, test.root)
 			}
 			var realSeq []string
-			dpvc := pathCount{}
+			dpvc := pathCount{} // desired path visit count
 			walker.DepthFirst(impath.MustAbs(root), test.filter, walker.Callback{
 				Err: func(_ impath.Absolute, _ impath.Absolute, err error) bool {
 					t.Errorf("unexpected error: %v", err)
@@ -253,10 +253,10 @@ func TestWalker(t *testing.T) {
 						dpvc[dp]++
 					}
 
-					v := test.pathAction[p][actionPre]
+					v := test.pathActions[p][actionPre]
 					// Only defer once to avoid infinite loops.
 					if v.action == int(walker.Defer) {
-						test.pathAction[p][actionPre] = actionVal{action: int(walker.Access), cancel: v.cancel}
+						test.pathActions[p][actionPre] = actionVal{action: int(walker.Access), cancel: v.cancel}
 					}
 					return walker.PreAction(v.action), !v.cancel
 				},
@@ -267,7 +267,7 @@ func TestWalker(t *testing.T) {
 					if dp != p {
 						dpvc[dp]++
 					}
-					return !test.pathAction[p][actionPost].cancel
+					return !test.pathActions[p][actionPost].cancel
 				},
 				Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (walker.SymlinkAction, bool) {
 					p, _ := filepath.Rel(tmp, realPath.String())
@@ -276,7 +276,7 @@ func TestWalker(t *testing.T) {
 					if dp != p {
 						dpvc[dp]++
 					}
-					v := test.pathAction[p][actionSymlink]
+					v := test.pathActions[p][actionSymlink]
 					return walker.SymlinkAction(v.action), !v.cancel
 				},
 			})
