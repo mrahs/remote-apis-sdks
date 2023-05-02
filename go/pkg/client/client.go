@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/user"
@@ -793,20 +794,42 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 	if client.casConcurrency < 1 {
 		return nil, fmt.Errorf("CASConcurrency should be at least 1")
 	}
-	// TODO
 	if client.casImpl == CASv2 {
 		queryCfg := cas.GRPCConfig{
-			ConcurrentCallsLimit: 0,
-			BytesLimit:           0,
-			ItemsLimit:           0,
-			BundleTimeout:        0,
+			ConcurrentCallsLimit: int(client.casConcurrency),
+			BytesLimit:           int(client.MaxBatchSize),
+			ItemsLimit:           int(client.MaxQueryBatchDigests),
+			BundleTimeout:        10*time.Millisecond, // Low value to fast track queries.
 			Timeout:              DefaultRPCTimeouts["FindMissingBlobs"],
-			RetryPolicy:          retry.ExponentialBackoff(225*time.Millisecond, 2*time.Second, retry.Attempts(6)), // Same as RetryTransient()
+			RetryPolicy:          client.Retrier.Backoff,
+			RetryPredicate:       client.Retrier.ShouldRetry,
 		}
-		batchCfg := cas.GRPCConfig{}
-		streamCfg := cas.GRPCConfig{}
+		batchCfg := cas.GRPCConfig{
+			ConcurrentCallsLimit: int(client.casConcurrency),
+			BytesLimit:           int(client.MaxBatchSize),
+			ItemsLimit:           int(client.UnifiedUploadBufferSize),
+			BundleTimeout:        time.Duration(client.UnifiedUploadTickDuration), // Low value to fast track queries.
+			Timeout:              DefaultRPCTimeouts["BatchUpdateBlobs"],
+			RetryPolicy:          client.Retrier.Backoff,
+			RetryPredicate:       client.Retrier.ShouldRetry,
+		}
+		streamCfg := cas.GRPCConfig{
+			ConcurrentCallsLimit: int(client.casConcurrency),
+			Timeout:              DefaultRPCTimeouts["default"],
+			RetryPolicy:          client.Retrier.Backoff,
+			RetryPredicate:       client.Retrier.ShouldRetry,
+		}
 		ioCfg := cas.IOConfig{
+			ConcurrentWalksLimit: int(client.casConcurrency),
+			OpenFilesLimit: cas.DefaultOpenFilesLimit,
+			OpenLargeFilesLimit: cas.DefaultOpenLargeFilesLimit,
+			SmallFileSizeThreshold: cas.DefaultSmallFileSizeThreshold,
+			LargeFileSizeThreshold: cas.DefaultLargeFileSizeThreshold,
 			CompressionSizeThreshold: int64(client.CompressedBytestreamThreshold),
+			BufferSize: int(client.ChunkMaxSize),
+		}
+		if client.CompressedBytestreamThreshold < 0 {
+			ioCfg.CompressionSizeThreshold = math.MaxInt64
 		}
 		var err error
 		client.casUploaderv2, err = cas.NewBatchingUploader(ctx, client.cas, client.byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)

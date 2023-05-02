@@ -7,8 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/chunker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
@@ -621,6 +623,20 @@ func updateAndNotify(st *uploadState, bytesMoved int64, err error, missing bool)
 }
 
 func (c *Client) uploadv2(ctx context.Context, entries []*uploadinfo.Entry) ([]digest.Digest, int64, error) {
-	// TODO
-	return nil, 0, nil
+	reqs := make([]cas.UploadRequest, len(entries))
+	for i, entry := range entries {
+		r := cas.UploadRequest{}
+		// TODO: accept bytes.
+		abs, err := impath.Abs(entry.Path)
+		if err != nil {
+			return nil, 0, err
+		}
+		r.Path = abs
+		reqs[i] = r
+	}
+	uploaded, stats, err := c.casUploaderv2.Upload(reqs...)
+	if err != nil {
+		return nil, stats.TotalBytesMoved, err
+	}
+	return uploaded, stats.TotalBytesMoved, nil
 }

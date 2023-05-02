@@ -8,21 +8,21 @@ import (
 )
 
 const (
-	// MegaByte is 1_048_576 bytes.
-	MegaByte = 1024 * 1024
+	// megaByte is 1_048_576 bytes.
+	megaByte = 1024 * 1024
 
-	// DefaultGRPCConcurrentCallsLimit is set arbitrarily to a power of 2.
+	// DefaultGRPCConcurrentCallsLimit is set arbitrarily to 256 as a power of 2.
 	DefaultGRPCConcurrentCallsLimit = 256
 
-	// DefaultGRPCBytesLimit is the same as the default gRPC request size limit.
-	// See: https://pkg.go.dev/google.golang.org/grpc#MaxCallRecvMsgSize
-	DefaultGRPCBytesLimit = 4 * MegaByte
+	// DefaultGRPCBytesLimit is the same as the default gRPC request size limit of 4MiB.
+	// See: https://pkg.go.dev/google.golang.org/grpc#MaxCallRecvMsgSize and https://github.com/grpc/grpc-go/blob/2997e84fd8d18ddb000ac6736129b48b3c9773ec/clientconn.go#L96
+	DefaultGRPCBytesLimit = 4 * megaByte
 
 	// DefaultGRPCItemsLimit is a 10th of the max.
 	DefaultGRPCItemsLimit = 1000
 
-	// MaxGRPCItems is heuristcally (with Google's RBE) set to 10k.
-	MaxGRPCItems = 10_000
+	// DefaultMaxGRPCItems is heuristcally (with Google's RBE) set to 10k.
+	DefaultMaxGRPCItems = 10_000
 
 	// DefaultRPCTimeout is arbitrarily set to what is reasonable for a large action.
 	DefaultRPCTimeout = time.Minute
@@ -37,9 +37,15 @@ const (
 	// DefaultCompressionSizeThreshold is disabled by default.
 	DefaultCompressionSizeThreshold = math.MaxInt64
 
-	// BufferSize is based on GCS recommendations.
+	// DefaultBufferSize is based on GCS recommendations.
 	// See: https://cloud.google.com/compute/docs/disks/optimizing-pd-performance#io-size
-	BufferSize = 4 * MegaByte
+	DefaultBufferSize = 4 * megaByte
+
+	// DefaultSmallFileSizeThreshold is set to 1MiB.
+	DefaultSmallFileSizeThreshold = megaByte
+
+	// DefaultLargeFileSizeThreshold is set to 256MiB.
+	DefaultLargeFileSizeThreshold = 256 * megaByte
 )
 
 // GRPCConfig specifies the configuration for a gRPC endpoint.
