@@ -25,9 +25,9 @@ type (
 		action int
 		cancel bool
 	}
-	actions    = map[int]actionVal
+	actions     = map[int]actionVal
 	pathActions = map[string]actions
-	pathCount  = map[string]int
+	pathCount   = map[string]int
 )
 
 func TestWalker(t *testing.T) {
@@ -37,7 +37,7 @@ func TestWalker(t *testing.T) {
 		symlinks         symlinks
 		root             string
 		filter           walker.Filter
-		pathActions       pathActions
+		pathActions      pathActions
 		wantRealCount    pathCount
 		wantDesiredCount pathCount
 		wantErr          error
@@ -102,19 +102,19 @@ func TestWalker(t *testing.T) {
 		{
 			name:          "path_cancel",
 			paths:         []string{"foo.c"},
-			pathActions:    pathActions{"foo.c": actions{actionPre: {cancel: true}}},
+			pathActions:   pathActions{"foo.c": actions{actionPre: {cancel: true}}},
 			wantRealCount: pathCount{"foo.c": 1},
 		},
 		{
 			name:          "single_file_deferred",
 			paths:         []string{"foo.c"},
-			pathActions:    pathActions{"foo.c": actions{actionPre: {action: int(walker.Defer)}}},
+			pathActions:   pathActions{"foo.c": actions{actionPre: {action: int(walker.Defer)}}},
 			wantRealCount: pathCount{"foo.c": 3},
 		},
 		{
 			name:          "single_dir_deferred",
 			paths:         []string{"foo/"},
-			pathActions:    pathActions{"foo": actions{actionPre: {action: int(walker.Defer)}}},
+			pathActions:   pathActions{"foo": actions{actionPre: {action: int(walker.Defer)}}},
 			wantRealCount: pathCount{"foo": 3},
 		},
 		{
@@ -173,9 +173,9 @@ func TestWalker(t *testing.T) {
 			},
 		},
 		{
-			name:       "skip_symlink",
-			paths:      []string{"foo/bar.c"},
-			symlinks:   symlinks{"foo.c": "foo/"},
+			name:        "skip_symlink",
+			paths:       []string{"foo/bar.c"},
+			symlinks:    symlinks{"foo.c": "foo/"},
 			pathActions: pathActions{"foo.c": actions{actionSymlink: {action: int(walker.SkipSymlink)}}},
 			wantRealCount: pathCount{
 				"foo.c": 2,
@@ -191,9 +191,9 @@ func TestWalker(t *testing.T) {
 			},
 		},
 		{
-			name:       "replace_single_symlink",
-			symlinks:   symlinks{"foo.c": "bar.c"},
-			root:       "foo.c",
+			name:        "replace_single_symlink",
+			symlinks:    symlinks{"foo.c": "bar.c"},
+			root:        "foo.c",
 			pathActions: pathActions{"foo.c": actions{actionSymlink: {action: int(walker.Replace)}}},
 			wantRealCount: pathCount{
 				"foo.c": 2,
@@ -210,8 +210,8 @@ func TestWalker(t *testing.T) {
 				"bar/b.z",
 				"bar/c/d.z",
 			},
-			symlinks:   symlinks{"foo": "bar/"},
-			root:       "foo",
+			symlinks:    symlinks{"foo": "bar/"},
+			root:        "foo",
 			pathActions: pathActions{"foo": actions{actionSymlink: {action: int(walker.Replace)}}},
 			wantRealCount: pathCount{
 				"foo":       2,

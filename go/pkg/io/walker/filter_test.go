@@ -10,44 +10,44 @@ import (
 
 func TestFilterMatch(t *testing.T) {
 	tests := []struct {
-		name   string
-		filter walker.Filter
-		paths  []string
-		modes  []fs.FileMode
-		wantsPath  []bool
-		wantsFile  []bool
+		name      string
+		filter    walker.Filter
+		paths     []string
+		modes     []fs.FileMode
+		wantsPath []bool
+		wantsFile []bool
 	}{
 		{
-			name:   "zero",
-			filter: walker.Filter{},
-			paths:  []string{"/foo", "bar/baz"},
-			modes:  []fs.FileMode{1, 2},
-			wantsPath:  []bool{false, false},
-			wantsFile:  []bool{false, false},
+			name:      "zero",
+			filter:    walker.Filter{},
+			paths:     []string{"/foo", "bar/baz"},
+			modes:     []fs.FileMode{1, 2},
+			wantsPath: []bool{false, false},
+			wantsFile: []bool{false, false},
 		},
 		{
-			name:   "regexp_only",
-			filter: walker.Filter{Regexp: regexp.MustCompile("/bar/")},
-			paths:  []string{"/foo", "/bar/baz"},
-			modes:  []fs.FileMode{1, 2},
-			wantsPath:  []bool{false, true},
-			wantsFile:  []bool{false, false},
+			name:      "regexp_only",
+			filter:    walker.Filter{Regexp: regexp.MustCompile("/bar/")},
+			paths:     []string{"/foo", "/bar/baz"},
+			modes:     []fs.FileMode{1, 2},
+			wantsPath: []bool{false, true},
+			wantsFile: []bool{false, false},
 		},
 		{
-			name:   "mode_only",
-			filter: walker.Filter{Mode: 4},
-			paths:  []string{"/foo", "/bar/baz"},
-			modes:  []fs.FileMode{1, 4},
-			wantsPath:  []bool{false, false},
-			wantsFile:  []bool{false, false},
+			name:      "mode_only",
+			filter:    walker.Filter{Mode: 4},
+			paths:     []string{"/foo", "/bar/baz"},
+			modes:     []fs.FileMode{1, 4},
+			wantsPath: []bool{false, false},
+			wantsFile: []bool{false, false},
 		},
 		{
-			name:   "regexp_and_mode",
-			filter: walker.Filter{Regexp: regexp.MustCompile("/bar/"), Mode: 4},
-			paths:  []string{"/foo", "/bar/baz"},
-			modes:  []fs.FileMode{1, 4},
-			wantsPath:  []bool{false, false},
-			wantsFile:  []bool{false, true},
+			name:      "regexp_and_mode",
+			filter:    walker.Filter{Regexp: regexp.MustCompile("/bar/"), Mode: 4},
+			paths:     []string{"/foo", "/bar/baz"},
+			modes:     []fs.FileMode{1, 4},
+			wantsPath: []bool{false, false},
+			wantsFile: []bool{false, true},
 		},
 	}
 

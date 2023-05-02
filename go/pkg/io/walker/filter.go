@@ -49,7 +49,7 @@ func (f Filter) match(path string, mode fs.FileMode) bool {
 	return mode == f.Mode && f.Regexp.MatchString(filepath.ToSlash(path))
 }
 
-// String returns a string representation of the predicate.
+// String returns a string representation of the filter.
 //
 // If this is a zero or a nil filter, the empty string is returned.
 // A zero filter has regexp compiled from the empty string and 0 mode.
