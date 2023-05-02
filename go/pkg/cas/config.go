@@ -72,6 +72,9 @@ type GRPCConfig struct {
 
 	// RetryPolicy sets the retry policy for calls using this config.
 	RetryPolicy retry.BackoffPolicy
+
+	// RetryPredicate is called to determine if the error is retryable. If not set, nothing is retried.
+	RetryPredicate func(error) bool
 }
 
 // IOConfig specifies the configuration for IO operations.

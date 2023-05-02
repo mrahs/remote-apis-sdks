@@ -51,6 +51,7 @@ type queryCaller = chan MissingBlobsResponse
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) MissingBlobs(digests []digest.Digest) ([]digest.Digest, error) {
+	// TODO: this call should be optimized for fast responses.
 	glog.V(1).Infof("query: %d blobs", len(digests))
 	defer glog.V(1).Info("query.done")
 
@@ -279,7 +280,7 @@ func (u *uploaderv2) callMissingBlobs(bundle missingBlobRequestBundle) {
 	var err error
 	ctx, ctxCancel := context.WithCancel(u.ctx)
 	err = u.withTimeout(u.queryRpcConfig.Timeout, ctxCancel, func() error {
-		return u.withRetry(ctx, u.queryRpcConfig.RetryPolicy, func() error {
+		return u.withRetry(ctx, u.queryRpcConfig.RetryPredicate, u.queryRpcConfig.RetryPolicy, func() error {
 			res, err = u.cas.FindMissingBlobs(ctx, req)
 			return err
 		})

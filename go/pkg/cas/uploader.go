@@ -215,9 +215,9 @@ func (u *uploaderv2) Wait() {
 // ctx is used to make remote calls and must be cancelled to properly shutdown the uploader.
 func NewBatchingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
-	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
+	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
 ) (*BatchingUploader, error) {
-	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
+	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -230,9 +230,9 @@ func NewBatchingUploader(
 // ctx is used to make remote calls and must be cancelled to properly shutdown the uploader.
 func NewStreamingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
-	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
+	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
 ) (*StreamingUploader, error) {
-	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, uploadCfg, streamCfg, ioCfg)
+	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -351,8 +351,8 @@ func newUploaderv2(
 	return u, nil
 }
 
-func (u *uploaderv2) withRetry(ctx context.Context, retryPolicy retry.BackoffPolicy, fn func() error) error {
-	return retry.WithPolicy(ctx, retry.TransientOnly, retryPolicy, fn)
+func (u *uploaderv2) withRetry(ctx context.Context, predicate retry.ShouldRetry, policy retry.BackoffPolicy, fn func() error) error {
+	return retry.WithPolicy(ctx, predicate, policy, fn)
 }
 
 func (u *uploaderv2) withTimeout(timeout time.Duration, cancelFn context.CancelFunc, fn func() error) error {

@@ -29,6 +29,7 @@ var (
 		Timeout:              time.Second,
 		BundleTimeout:        time.Millisecond,
 		RetryPolicy:          retryNever,
+		RetryPredicate:       func(error) bool { return true },
 	}
 	ioCfg = cas.IOConfig{
 		ConcurrentWalksLimit:     1,
@@ -82,7 +83,7 @@ type fakeCAS struct {
 func (c *fakeCAS) FindMissingBlobs(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 	return c.findMissingBlobs(ctx, in, opts...)
 }
-	
+
 func (c *fakeCAS) BatchUpdateBlobs(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
 	return c.batchUpdateBlobs(ctx, in, opts...)
 }

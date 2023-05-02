@@ -72,10 +72,13 @@ func (c *Client) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]d
 // Returns a slice of missing digests that were written and the sum of total bytes moved, which
 // may be different from logical bytes moved (i.e. sum of digest sizes) due to compression.
 func (c *Client) UploadIfMissing(ctx context.Context, entries ...*uploadinfo.Entry) ([]digest.Digest, int64, error) {
-	if !c.UnifiedUploads {
-		return c.uploadNonUnified(ctx, entries...)
+	if c.casImpl == CASv2 {
+		return c.uploadv2(ctx, entries)
 	}
-	return c.uploadUnified(ctx, entries...)
+	if c.UnifiedUploads {
+		return c.uploadUnified(ctx, entries...)
+	}
+	return c.uploadNonUnified(ctx, entries...)
 }
 
 // WriteBlobs is a proxy method for UploadIfMissing that facilitates specifing a map of
@@ -615,4 +618,9 @@ func updateAndNotify(st *uploadState, bytesMoved int64, err error, missing bool)
 	}
 	st.clients = nil
 	st.ue = nil
+}
+
+func (c *Client) uploadv2(ctx context.Context, entries []*uploadinfo.Entry) ([]digest.Digest, int64, error) {
+	// TODO
+	return nil, 0, nil
 }

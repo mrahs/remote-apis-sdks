@@ -20,6 +20,7 @@ go_library(
         "//go/pkg/actas",
         "//go/pkg/balancer",
         "//go/pkg/balancer/proto",
+        "//go/pkg/cas",
         "//go/pkg/chunker",
         "//go/pkg/command",
         "//go/pkg/digest",

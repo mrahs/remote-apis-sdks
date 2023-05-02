@@ -14,6 +14,7 @@ import (
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/actas"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/balancer"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/chunker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
@@ -110,12 +111,14 @@ func (ce *InitError) Error() string {
 type Client struct {
 	// InstanceName is the instance name for the targeted remote execution instance; e.g. for Google
 	// RBE: "projects/<foo>/instances/default_instance".
-	InstanceName string
-	actionCache  regrpc.ActionCacheClient
-	byteStream   bsgrpc.ByteStreamClient
-	cas          regrpc.ContentAddressableStorageClient
-	execution    regrpc.ExecutionClient
-	operations   opgrpc.OperationsClient
+	InstanceName  string
+	actionCache   regrpc.ActionCacheClient
+	byteStream    bsgrpc.ByteStreamClient
+	cas           regrpc.ContentAddressableStorageClient
+	casImpl       CASImpl
+	casUploaderv2 *cas.BatchingUploader
+	execution     regrpc.ExecutionClient
+	operations    opgrpc.OperationsClient
 	// Retrier is the Retrier that is used for RPCs made by this client.
 	//
 	// These fields are logically "protected" and are intended for use by extensions of Client.
@@ -462,6 +465,19 @@ func (p *PerRPCCreds) Apply(c *Client) {
 	c.creds = p.Creds
 }
 
+type CASImpl int
+
+const (
+	// CASv1 is the original implementation under the client package.
+	CASv1 CASImpl = iota
+	// CASv2 is the new canonical implementation currently in beta stage.
+	CASv2
+)
+
+func (impl CASImpl) Apply(c *Client) {
+	c.casImpl = impl
+}
+
 func getImpersonatedRPCCreds(ctx context.Context, actAs string, cred credentials.PerRPCCredentials) credentials.PerRPCCredentials {
 	// Wrap in a ReuseTokenSource to cache valid tokens in memory (i.e., non-nil, with a non-expired
 	// access token).
@@ -562,7 +578,7 @@ func createGRPCInterceptor(p DialParams) *balancer.GCPInterceptor {
 			MaxConcurrentStreamsLowWatermark: p.MaxConcurrentStreams,
 		},
 		Method: []*configpb.MethodConfig{
-			&configpb.MethodConfig{
+			{
 				Name: []string{".*"},
 				Affinity: &configpb.AffinityConfig{
 					Command:     configpb.AffinityConfig_BIND,
@@ -776,6 +792,27 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 	}
 	if client.casConcurrency < 1 {
 		return nil, fmt.Errorf("CASConcurrency should be at least 1")
+	}
+	// TODO
+	if client.casImpl == CASv2 {
+		queryCfg := cas.GRPCConfig{
+			ConcurrentCallsLimit: 0,
+			BytesLimit:           0,
+			ItemsLimit:           0,
+			BundleTimeout:        0,
+			Timeout:              DefaultRPCTimeouts["FindMissingBlobs"],
+			RetryPolicy:          retry.ExponentialBackoff(225*time.Millisecond, 2*time.Second, retry.Attempts(6)), // Same as RetryTransient()
+		}
+		batchCfg := cas.GRPCConfig{}
+		streamCfg := cas.GRPCConfig{}
+		ioCfg := cas.IOConfig{
+			CompressionSizeThreshold: int64(client.CompressedBytestreamThreshold),
+		}
+		var err error
+		client.casUploaderv2, err = cas.NewBatchingUploader(ctx, client.cas, client.byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
+		if err != nil {
+			return nil, fmt.Errorf("error initializing CASv2: %w", err)
+		}
 	}
 	return client, nil
 }
