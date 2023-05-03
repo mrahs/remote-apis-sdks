@@ -212,7 +212,7 @@ func (u *uploaderv2) Wait() {
 // NewBatchingUploader creates a new instance of the batching uploader.
 //
 // The specified configs must be compatible with the capabilities of the server that the specified clients are connected to.
-// ctx is used to make remote calls and must be cancelled to properly shutdown the uploader.
+// ctx must be cancelled to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
 func NewBatchingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
@@ -227,7 +227,7 @@ func NewBatchingUploader(
 // NewStreamingUploader creates a new instance of the streaming uploader.
 //
 // The specified configs must be compatible with the capabilities of the server which the specified clients are connected to.
-// ctx is used to make remote calls and must be cancelled to properly shutdown the uploader.
+// ctx must be cancelled to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
 func NewStreamingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,

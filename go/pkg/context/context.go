@@ -1,6 +1,6 @@
-package client
+// Package context allows attaching metadata to the context of RPC calls.
+package context
 
-// This file attaches metadata to the context of RPC calls.
 
 import (
 	"context"
@@ -19,8 +19,8 @@ const (
 	remoteHeadersKey = "build.bazel.remote.execution.v2.requestmetadata-bin"
 )
 
-// ContextMetadata is optionally attached to RPC requests.
-type ContextMetadata struct {
+// Metadata is optionally attached to RPC requests.
+type Metadata struct {
 	// ActionID is an optional id to use to identify an action.
 	ActionID string
 	// InvocationID is an optional id to use to identify an invocation spanning multiple commands.
@@ -33,11 +33,11 @@ type ContextMetadata struct {
 	ToolVersion string
 }
 
-// LogContextInfof is equivalent to log.V(x).Infof(...) except it
+// Infof is equivalent to log.V(x).Infof(...) except it
 // also logs context metadata, if available.
-func LogContextInfof(ctx context.Context, v log.Level, format string, args ...interface{}) {
+func Infof(ctx context.Context, v log.Level, format string, args ...interface{}) {
 	if log.V(v) {
-		m, err := GetContextMetadata(ctx)
+		m, err := ExtractMetadata(ctx)
 		if err != nil && m.ActionID != "" {
 			format = "%s: " + format
 			args = append([]interface{}{m.ActionID}, args...)
@@ -46,23 +46,23 @@ func LogContextInfof(ctx context.Context, v log.Level, format string, args ...in
 	}
 }
 
-// GetContextMetadata parses the metadata from the given context, if it exists.
+// ExtractMetadata parses the metadata from the given context, if it exists.
 // If metadata does not exist, empty values are returned.
-func GetContextMetadata(ctx context.Context) (m *ContextMetadata, err error) {
+func ExtractMetadata(ctx context.Context) (m *Metadata, err error) {
 	md, ok := metadata.FromOutgoingContext(ctx)
 	if !ok {
-		return &ContextMetadata{}, nil
+		return &Metadata{}, nil
 	}
 	vs := md.Get(remoteHeadersKey)
 	if len(vs) == 0 {
-		return &ContextMetadata{}, nil
+		return &Metadata{}, nil
 	}
 	buf := []byte(vs[0])
 	meta := &repb.RequestMetadata{}
 	if err := proto.Unmarshal(buf, meta); err != nil {
 		return nil, err
 	}
-	return &ContextMetadata{
+	return &Metadata{
 		ToolName:               meta.ToolDetails.GetToolName(),
 		ToolVersion:            meta.ToolDetails.GetToolVersion(),
 		ActionID:               meta.ActionId,
@@ -71,10 +71,10 @@ func GetContextMetadata(ctx context.Context) (m *ContextMetadata, err error) {
 	}, nil
 }
 
-// ContextWithMetadata attaches metadata to the passed-in context, returning a new
+// WithMetadata attaches metadata to the passed-in context, returning a new
 // context. This function should be called in every test method after a context is created. It uses
 // the already created context to generate a new one containing the metadata header.
-func ContextWithMetadata(ctx context.Context, m *ContextMetadata) (context.Context, error) {
+func WithMetadata(ctx context.Context, m *Metadata) (context.Context, error) {
 	actionID := m.ActionID
 	if actionID == "" {
 		actionID = uuid.New()

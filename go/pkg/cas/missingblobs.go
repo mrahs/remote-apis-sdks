@@ -25,6 +25,7 @@ type MissingBlobsResponse struct {
 type missingBlobRequest struct {
 	digest digest.Digest
 	tag    tag
+	ctx context.Context
 }
 
 // missingBlobRequestBundle is a set of digests, each is associated with multiple tags (query callers).
@@ -41,7 +42,7 @@ type queryCaller = chan MissingBlobsResponse
 
 // MissingBlobs queries the CAS for the specified digests and returns a slice of the missing ones.
 //
-// ctx may be used to cancel the call before it completes.
+// ctx is used for metadata. Cancelling it has no effect.
 //
 // The digests are batched based on the set gRPC limits (count and size).
 // Errors from a batch do not affect other batches, but all digests from such bad batches will be reported as missing by this call.
@@ -50,7 +51,7 @@ type queryCaller = chan MissingBlobsResponse
 // The returned error wraps a number of errors proportional to the length of the specified slice.
 //
 // This method must not be called after cancelling the uploader's context.
-func (u *BatchingUploader) MissingBlobs(digests []digest.Digest) ([]digest.Digest, error) {
+func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
 	// TODO: this call should be optimized for fast responses.
 	glog.V(1).Infof("query: %d blobs", len(digests))
 	defer glog.V(1).Info("query.done")
@@ -60,7 +61,7 @@ func (u *BatchingUploader) MissingBlobs(digests []digest.Digest) ([]digest.Diges
 	}
 
 	ch := make(chan digest.Digest)
-	resCh := u.missingBlobsStreamer(ch)
+	resCh := u.missingBlobsStreamer(ctx, ch)
 
 	u.clientSenderWg.Add(1)
 	go func() {
@@ -103,12 +104,12 @@ func (u *BatchingUploader) MissingBlobs(digests []digest.Digest) ([]digest.Diges
 // Slow consumption speed on this channel affects the consumption speed on the input channel.
 //
 // This method must not be called after cancelling the uploader's context.
-func (u *StreamingUploader) MissingBlobs(in <-chan digest.Digest) <-chan MissingBlobsResponse {
-	return u.missingBlobsStreamer(in)
+func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
+	return u.missingBlobsStreamer(ctx, in)
 }
 
 // missingBlobsStreamer is defined on the underlying uploader to be accessible by the upload code.
-func (u *uploaderv2) missingBlobsStreamer(in <-chan digest.Digest) <-chan MissingBlobsResponse {
+func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	ch := make(chan MissingBlobsResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
@@ -159,7 +160,7 @@ func (u *uploaderv2) missingBlobsStreamer(in <-chan digest.Digest) <-chan Missin
 		defer glog.V(1).Info("query.streamer.sender.stop")
 		defer u.querySenderWg.Done()
 		for d := range in {
-			u.queryCh <- missingBlobRequest{digest: d, tag: tag}
+			u.queryCh <- missingBlobRequest{digest: d, tag: tag, ctx: ctx}
 			pendingCh <- 1
 		}
 		pendingCh <- 0

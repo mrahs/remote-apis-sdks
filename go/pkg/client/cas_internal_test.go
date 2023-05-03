@@ -2,25 +2,26 @@ package client
 
 import (
 	"testing"
+	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 )
 
 func TestCapToLimit(t *testing.T) {
 	type testCase struct {
 		name  string
 		limit int
-		input *ContextMetadata
-		want  *ContextMetadata
+		input *cctx.Metadata
+		want  *cctx.Metadata
 	}
 	tests := []testCase{
 		{
 			name:  "under limit",
 			limit: 24,
-			input: &ContextMetadata{
+			input: &cctx.Metadata{
 				ToolName:     "toolName",
 				ActionID:     "actionID",
 				InvocationID: "invocID*",
 			},
-			want: &ContextMetadata{
+			want: &cctx.Metadata{
 				ToolName:     "toolName",
 				ActionID:     "actionID",
 				InvocationID: "invocID*",
@@ -29,12 +30,12 @@ func TestCapToLimit(t *testing.T) {
 		{
 			name:  "actionID over limit",
 			limit: 24,
-			input: &ContextMetadata{
+			input: &cctx.Metadata{
 				ToolName:     "toolName",
 				ActionID:     "actionID-12345678",
 				InvocationID: "invocID*",
 			},
-			want: &ContextMetadata{
+			want: &cctx.Metadata{
 				ToolName:     "toolName",
 				ActionID:     "actionID",
 				InvocationID: "invocID*",
@@ -43,13 +44,13 @@ func TestCapToLimit(t *testing.T) {
 		{
 			name:  "invocationID over limit",
 			limit: 29,
-			input: &ContextMetadata{
+			input: &cctx.Metadata{
 				ToolName:     "toolName",
 				ToolVersion:  "1.2.3",
 				ActionID:     "actionID",
 				InvocationID: "invocID*-12345678",
 			},
-			want: &ContextMetadata{
+			want: &cctx.Metadata{
 				ToolName:     "toolName",
 				ToolVersion:  "1.2.3",
 				ActionID:     "actionID",
@@ -59,12 +60,12 @@ func TestCapToLimit(t *testing.T) {
 		{
 			name:  "both equally over limit",
 			limit: 24,
-			input: &ContextMetadata{
+			input: &cctx.Metadata{
 				ToolName:     "toolName",
 				ActionID:     "actionID-12345678",
 				InvocationID: "invocID*-12345678",
 			},
-			want: &ContextMetadata{
+			want: &cctx.Metadata{
 				ToolName:     "toolName",
 				ActionID:     "actionID",
 				InvocationID: "invocID*",
@@ -73,12 +74,12 @@ func TestCapToLimit(t *testing.T) {
 		{
 			name:  "both over limit but actionID is bigger",
 			limit: 24,
-			input: &ContextMetadata{
+			input: &cctx.Metadata{
 				ToolName:     "toolName",
 				ActionID:     "actionID-123456789012345678",
 				InvocationID: "invocID*-12345678",
 			},
-			want: &ContextMetadata{
+			want: &cctx.Metadata{
 				ToolName:     "toolName",
 				ActionID:     "actionID",
 				InvocationID: "invocID*",
@@ -87,12 +88,12 @@ func TestCapToLimit(t *testing.T) {
 		{
 			name:  "both over limit but invocationID is bigger",
 			limit: 24,
-			input: &ContextMetadata{
+			input: &cctx.Metadata{
 				ToolName:     "toolName",
 				ActionID:     "actionID-12345678",
 				InvocationID: "invocID*-123456789012345678",
 			},
-			want: &ContextMetadata{
+			want: &cctx.Metadata{
 				ToolName:     "toolName",
 				ActionID:     "actionID",
 				InvocationID: "invocID*",

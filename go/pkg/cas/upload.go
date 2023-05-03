@@ -32,9 +32,16 @@ var errEarly = errors.New("early cancellation")
 // by the filter are uploaded.
 // Symlinks are handled according to the SymlinkOptions field.
 type UploadRequest struct {
+	// Bytes takes precedence over Path.
+	Bytes          []byte
+
+	// Path is ignored if Bytes is set.
 	Path           impath.Absolute
 	SymlinkOptions slo.Options
 	Exclude        walker.Filter
+
+	// ctx is used to unify metadata when making remote calls.
+	ctx context.Context
 	// tag is used internally to identify the client of the request.
 	tag tag
 	// done is used internally to signal to the processor that the client will not be sending any further requests.
@@ -270,9 +277,6 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 // Any path or file that matches the specified filter is excluded.
 // Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
 //
-// This method does not accept a context because the requests are unified across concurrent calls.
-// The context that was used to initialize the uploader is used to make remote calls.
-//
 // Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
 // The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
 // With infinite speed and limits, every blob will be uploaded exactly once. On the other extreme, every blob is uploaded
@@ -286,7 +290,8 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 // The returned error wraps a number of errors proportional to the length of the specified slice.
 //
 // This method must not be called after cancelling the uploader's context.
-func (u *BatchingUploader) Upload(reqs ...UploadRequest) ([]digest.Digest, *Stats, error) {
+func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, *Stats, error) {
+	// TODO: accept context and unify metadata.
 	glog.V(1).Infof("upload: %d requests", len(reqs))
 	defer glog.V(1).Infof("upload.done")
 
@@ -295,7 +300,7 @@ func (u *BatchingUploader) Upload(reqs ...UploadRequest) ([]digest.Digest, *Stat
 	}
 
 	ch := make(chan UploadRequest)
-	resCh := u.uploadStreamer(ch)
+	resCh := u.uploadStreamer(ctx, ch)
 
 	u.clientSenderWg.Add(1)
 	go func() {
@@ -326,9 +331,7 @@ func (u *BatchingUploader) Upload(reqs ...UploadRequest) ([]digest.Digest, *Stat
 
 // Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
 //
-// The caller must close in as a termination signal.
-// This method does not accept a context because the requests are unified across concurrent calls.
-// The context that was used to initialize the uploader is used to make remote calls.
+// The caller must close in as a termination signal. Cancelling the context is not enough.
 //
 // Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
 // The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
@@ -338,11 +341,11 @@ func (u *BatchingUploader) Upload(reqs ...UploadRequest) ([]digest.Digest, *Stat
 // digest receives a copy of the coorresponding UploadResponse.
 //
 // This method must not be called after cancelling the uploader's context.
-func (u *StreamingUploader) Upload(in <-chan UploadRequest) <-chan UploadResponse {
-	return u.uploadStreamer(in)
+func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
+	return u.uploadStreamer(ctx, in)
 }
 
-func (u *uploaderv2) uploadStreamer(in <-chan UploadRequest) <-chan UploadResponse {
+func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
 	ch := make(chan UploadResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
@@ -373,6 +376,7 @@ func (u *uploaderv2) uploadStreamer(in <-chan UploadRequest) <-chan UploadRespon
 		defer u.uploadSenderWg.Done()
 		for r := range in {
 			r.tag = tag
+			r.ctx = ctx
 			u.uploadCh <- r
 		}
 		// Let the processor know that no further requests are expected.
@@ -433,6 +437,12 @@ func (u *uploaderv2) uploadProcessor() {
 				wg.Wait()
 				u.uploadDispatchCh <- blob{tag: req.tag, done: true}
 			}()
+			continue
+		}
+
+		if len(req.Bytes) > 0 {
+			d := digest.NewFromBlob(req.Bytes)
+			u.uploadDispatchCh <- blob{digest: d, bytes: req.Bytes, tag: req.tag}
 			continue
 		}
 
