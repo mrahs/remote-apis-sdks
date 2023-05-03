@@ -14,6 +14,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
+	"github.com/klauspost/compress/zstd"
 	"github.com/pborman/uuid"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
@@ -106,11 +107,11 @@ func (c *Client) WriteBlob(ctx context.Context, blob []byte) (digest.Digest, err
 		LogContextInfof(ctx, log.Level(2), "Skipping upload of empty blob %s", dg)
 		return dg, nil
 	}
-	ch, err := chunker.New(ue, c.shouldCompress(dg.Size), int(c.ChunkMaxSize))
+	ch, err := chunker.New(ue, c.shouldCompressEntry(ue), int(c.ChunkMaxSize))
 	if err != nil {
 		return dg, err
 	}
-	_, err = c.writeChunked(ctx, c.writeRscName(dg), ch, false, 0)
+	_, err = c.writeChunked(ctx, c.writeRscName(ue), ch, false, 0)
 	return dg, err
 }
 
@@ -123,6 +124,9 @@ func (c *Client) WriteProto(ctx context.Context, msg proto.Message) (digest.Dige
 	return c.WriteBlob(ctx, bytes)
 }
 
+// zstdEncoder is a shared instance that should only be used in stateless mode, i.e. only by calling EncodeAll()
+var zstdEncoder, _ = zstd.NewWriter(nil)
+
 // BatchWriteBlobs (over)writes specified blobs to the CAS, regardless if they already exist.
 //
 // The collective size must be below the maximum total size for a batch upload, which
@@ -132,11 +136,18 @@ func (c *Client) BatchWriteBlobs(ctx context.Context, blobs map[digest.Digest][]
 	var reqs []*repb.BatchUpdateBlobsRequest_Request
 	var sz int64
 	for k, b := range blobs {
-		sz += int64(k.Size)
-		reqs = append(reqs, &repb.BatchUpdateBlobsRequest_Request{
+		r := &repb.BatchUpdateBlobsRequest_Request{
 			Digest: k.ToProto(),
 			Data:   b,
-		})
+		}
+		if c.batchCompression && c.shouldCompress(k.Size) {
+			r.Data = zstdEncoder.EncodeAll(r.Data, nil)
+			r.Compressor = repb.Compressor_ZSTD
+			sz += int64(len(r.Data))
+		} else {
+			sz += int64(k.Size)
+		}
+		reqs = append(reqs, r)
 	}
 	if sz > int64(c.MaxBatchSize) {
 		return fmt.Errorf("batch update of %d total bytes exceeds maximum of %d", sz, c.MaxBatchSize)
@@ -204,11 +215,11 @@ func (c *Client) ResourceNameCompressedWrite(hash string, sizeBytes int64) strin
 	return fmt.Sprintf("%s/uploads/%s/compressed-blobs/zstd/%s/%d", c.InstanceName, uuid.New(), hash, sizeBytes)
 }
 
-func (c *Client) writeRscName(dg digest.Digest) string {
-	if c.shouldCompress(dg.Size) {
-		return c.ResourceNameCompressedWrite(dg.Hash, dg.Size)
+func (c *Client) writeRscName(ue *uploadinfo.Entry) string {
+	if c.shouldCompressEntry(ue) {
+		return c.ResourceNameCompressedWrite(ue.Digest.Hash, ue.Digest.Size)
 	}
-	return c.ResourceNameWrite(dg.Hash, dg.Size)
+	return c.ResourceNameWrite(ue.Digest.Hash, ue.Digest.Size)
 }
 
 type uploadRequest struct {
@@ -240,22 +251,38 @@ type uploadState struct {
 }
 
 func (c *Client) uploadUnified(ctx context.Context, entries ...*uploadinfo.Entry) ([]digest.Digest, int64, error) {
-	uploads := len(entries)
-	LogContextInfof(ctx, log.Level(2), "Request to upload %d blobs", uploads)
+	LogContextInfof(ctx, log.Level(2), "Request to upload %d blobs", len(entries))
 
-	if uploads == 0 {
+	if len(entries) == 0 {
 		return nil, 0, nil
 	}
 	meta, err := GetContextMetadata(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
-	wait := make(chan *uploadResponse, uploads)
-	var missing []digest.Digest
+	wait := make(chan *uploadResponse, len(entries))
+	var dgs []digest.Digest
+	dedupDgs := make(map[digest.Digest]bool, len(entries))
+	for _, ue := range entries {
+		if _, ok := dedupDgs[ue.Digest]; !ok {
+			dgs = append(dgs, ue.Digest)
+			dedupDgs[ue.Digest] = true
+		}
+	}
+	missing, err := c.MissingBlobs(ctx, dgs)
+	if err != nil {
+		return nil, 0, err
+	}
+	missingDgs := make(map[digest.Digest]bool, len(missing))
+	for _, dg := range missing {
+		missingDgs[dg] = true
+	}
 	var reqs []*uploadRequest
 	for _, ue := range entries {
+		if _, ok := missingDgs[ue.Digest]; !ok {
+			continue
+		}
 		if ue.Digest.IsEmpty() {
-			uploads--
 			LogContextInfof(ctx, log.Level(2), "Skipping upload of empty entry %s", ue.Digest)
 			continue
 		}
@@ -275,7 +302,8 @@ func (c *Client) uploadUnified(ctx context.Context, entries ...*uploadinfo.Entry
 		}
 	}
 	totalBytesMoved := int64(0)
-	for uploads > 0 {
+	finalMissing := make([]digest.Digest, len(reqs))
+	for i := 0; i < len(reqs); i++ {
 		select {
 		case <-ctx.Done():
 			c.cancelPendingRequests(reqs)
@@ -285,13 +313,12 @@ func (c *Client) uploadUnified(ctx context.Context, entries ...*uploadinfo.Entry
 				return nil, 0, resp.err
 			}
 			if resp.missing {
-				missing = append(missing, resp.digest)
+				finalMissing = append(finalMissing, resp.digest)
 			}
 			totalBytesMoved += resp.bytesMoved
-			uploads--
 		}
 	}
-	return missing, totalBytesMoved, nil
+	return finalMissing, totalBytesMoved, nil
 }
 
 func (c *Client) uploadProcessor() {
@@ -395,26 +422,16 @@ func (c *Client) upload(reqs []*uploadRequest) {
 		}
 		return
 	}
-	missing, present, err := c.findBlobState(ctx, newUploads)
-	if err != nil {
-		for _, st := range newStates {
-			updateAndNotify(st, 0, err, false)
-		}
-		return
-	}
-	for _, dg := range present {
-		updateAndNotify(newStates[dg], 0, nil, false)
-	}
 
-	LogContextInfof(ctx, log.Level(2), "%d new items to store", len(missing))
+	LogContextInfof(ctx, log.Level(2), "%d new items to store", len(newUploads))
 	var batches [][]digest.Digest
 	if c.useBatchOps {
-		batches = c.makeBatches(ctx, missing, true)
+		batches = c.makeBatches(ctx, newUploads, true)
 	} else {
 		LogContextInfof(ctx, log.Level(2), "Uploading them individually")
-		for i := range missing {
-			LogContextInfof(ctx, log.Level(3), "Creating single batch of blob %s", missing[i])
-			batches = append(batches, missing[i:i+1])
+		for i := range newUploads {
+			LogContextInfof(ctx, log.Level(3), "Creating single batch of blob %s", newUploads[i])
+			batches = append(batches, newUploads[i:i+1])
 		}
 	}
 
@@ -462,32 +479,16 @@ func (c *Client) upload(reqs []*uploadRequest) {
 				cCtx, cancel := context.WithCancel(ctx)
 				st.cancel = cancel
 				st.mu.Unlock()
-				dg := st.ue.Digest
 				log.V(3).Infof("Uploading single blob with digest %s", batch[0])
-				ch, err := chunker.New(st.ue, c.shouldCompress(dg.Size), int(c.ChunkMaxSize))
+				ch, err := chunker.New(st.ue, c.shouldCompressEntry(st.ue), int(c.ChunkMaxSize))
 				if err != nil {
 					updateAndNotify(st, 0, err, true)
 				}
-				totalBytes, err := c.writeChunked(cCtx, c.writeRscName(dg), ch, false, 0)
+				totalBytes, err := c.writeChunked(cCtx, c.writeRscName(st.ue), ch, false, 0)
 				updateAndNotify(st, totalBytes, err, true)
 			}
 		}()
 	}
-}
-
-func (c *Client) findBlobState(ctx context.Context, dgs []digest.Digest) (missing []digest.Digest, present []digest.Digest, err error) {
-	dgMap := make(map[digest.Digest]bool)
-	for _, d := range dgs {
-		dgMap[d] = true
-	}
-	missing, err = c.MissingBlobs(ctx, dgs)
-	for _, d := range missing {
-		delete(dgMap, d)
-	}
-	for d := range dgMap {
-		present = append(present, d)
-	}
-	return missing, present, err
 }
 
 // This function is only used when UnifiedUploads is false. It will be removed
@@ -564,12 +565,11 @@ func (c *Client) uploadNonUnified(ctx context.Context, data ...*uploadinfo.Entry
 			} else {
 				LogContextInfof(ctx, log.Level(3), "Uploading single blob with digest %s", batch[0])
 				ue := ueList[batch[0]]
-				dg := ue.Digest
-				ch, err := chunker.New(ue, c.shouldCompress(dg.Size), int(c.ChunkMaxSize))
+				ch, err := chunker.New(ue, c.shouldCompressEntry(ue), int(c.ChunkMaxSize))
 				if err != nil {
 					return err
 				}
-				written, err := c.writeChunked(eCtx, c.writeRscName(dg), ch, false, 0)
+				written, err := c.writeChunked(eCtx, c.writeRscName(ue), ch, false, 0)
 				if err != nil {
 					return fmt.Errorf("failed to upload %s: %w", ue.Path, err)
 				}
