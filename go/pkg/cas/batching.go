@@ -261,10 +261,6 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	return stats, err
 }
 
-// split into digested and undigested
-// query digested
-// send missing and undigested to processor
-
 // Upload processes the specified blobs for upload. Blobs that already exist in the CAS are not uploaded.
 // Any path or file that matches the specified filter is excluded.
 // Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
@@ -283,6 +279,11 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, *Stats, error) {
+	// TODO:
+	// split into digested and undigested
+	// query digested
+	// send missing and undigested to processor
+
 	glog.V(1).Infof("upload: %d requests", len(reqs))
 	defer glog.V(1).Infof("upload.done")
 

@@ -1,3 +1,15 @@
+// This file includes the streaming implementation.
+// The overall streaming flow is as follows:
+//   digester   -> dispatcher
+//   dispatcher -> querier (not queried yet)
+//   querier    -> dispatcher
+//   dispatcher -> requester (cache hit)
+//   dispatcher -> batcher (small)
+//   dispatcher -> streamer (medium and large)
+//   batcher    -> dispatcher
+//   streamer   -> dispatcher
+//   dispatcher -> requester
+
 package cas
 
 import (
@@ -21,18 +33,6 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
-
-// digester -> dispatcher
-// dispatcher -> querier (unknown)
-// querier -> dispatcher
-// dispatcher -> requester (cache hit)
-// dispatcher -> batch (small)
-// dispatcher -> stream (medium and large)
-// batch -> dispatcher
-// stream -> dispatcher
-// dispatcher -> requester
-//
-// Note that the dispatcher assumes the blob is missing (does not pipe to query).
 
 // UploadRequest represents a path to start uploading from.
 //
@@ -192,7 +192,6 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest
 // If the request is for an already digested blob, it is forwarded to the dispatcher.
 // The number of concurrent requests is limited to the number of concurrent file system walks.
 func (u *uploaderv2) digester() {
-	// TODO: if already digested, forward a blob to the dispatcher.
 	glog.V(1).Info("upload.processor.start")
 	defer glog.V(1).Info("upload.processor.stop")
 
@@ -444,7 +443,7 @@ func (u *uploaderv2) dispatcher() {
 		glog.V(1).Info("upload.dispatcher.sender.start")
 		defer glog.V(1).Info("upload.dispatcher.sender.stop")
 
-		// TODO: dispatch based on blob size.
+		batchItemSizeLimit := int64(u.batchRpcCfg.BytesLimit - u.uploadRequestBaseSize - u.uploadRequestItemBaseSize)
 		for b := range u.dispatcherBlobCh {
 			if b.done { // The requester will not be sending any further requests.
 				pendingCh <- tagCount{b.tag, 0}
@@ -461,7 +460,7 @@ func (u *uploaderv2) dispatcher() {
 			switch {
 			case !b.queried:
 				u.queryPipeCh <- b
-			case b.digest.Size <= u.ioCfg.SmallFileSizeThreshold:
+			case b.digest.Size <= batchItemSizeLimit:
 				u.batcherCh <- b
 			default:
 				u.streamerCh <- b
@@ -629,7 +628,6 @@ func (u *uploaderv2) querier(queryCh chan digest.Digest, queryResCh <-chan Missi
 
 // uploadBatcher handles files below the small threshold which are buffered in-memory.
 func (u *uploaderv2) batcher() {
-	// TODO: do not forward anything to the streamer.
 	// TODO: unify contexts.
 	glog.V(1).Info("upload.batch.start")
 	defer glog.V(1).Info("upload.batch.stop")
@@ -663,28 +661,18 @@ func (u *uploaderv2) batcher() {
 		bundleSize = u.uploadRequestBaseSize
 	}
 
-	bundleTicker := time.NewTicker(u.uploadRpcCfg.BundleTimeout)
+	bundleTicker := time.NewTicker(u.batchRpcCfg.BundleTimeout)
 	defer bundleTicker.Stop()
 	for {
 		select {
+		// The dispatcher guarantees that the dispatched blob is not oversized.
 		case b, ok := <-u.batcherCh:
 			if !ok {
 				return
 			}
 			glog.V(2).Infof("upload.batch.req: digest=%s, tag=%s", b.digest, b.tag)
 
-			r := &repb.BatchUpdateBlobsRequest_Request{
-				Digest: b.digest.ToProto(),
-				Data:   b.bytes, // TODO: add compression support as in https://github.com/bazelbuild/remote-apis-sdks/pull/443/files
-			}
-			rSize := proto.Size(r)
-
-			// Reroute oversized blobs to the streamer.
-			if rSize >= (u.uploadRpcCfg.BytesLimit - u.uploadRequestBaseSize) {
-				u.streamerCh <- b
-				continue
-			}
-
+			// Unify.
 			item, ok := bundle[b.digest]
 			if ok {
 				// Duplicate tags are allowed to ensure the requester can match the number of responses to the number of requests.
@@ -694,17 +682,56 @@ func (u *uploaderv2) batcher() {
 				continue
 			}
 
-			if bundleSize+rSize >= u.uploadRpcCfg.BytesLimit {
+			// Load the bytes without blocking the batcher by deferring the blob.
+			if len(b.bytes) == 0 {
+				u.workerWg.Add(1)
+				go func(b blob) (err error) {
+					defer u.workerWg.Done()
+					defer func() {
+						if err != nil {
+							u.dispatcherResCh <- UploadResponse{
+								Digest: b.digest,
+								Err:    err,
+								tags:   []tag{b.tag},
+							}
+						}
+					}()
+					if err := u.ioSem.Acquire(u.ctx, 1); err != nil {
+						return err
+					}
+					f, err := os.Open(b.path)
+					if err != nil {
+						return err
+					}
+					defer f.Close()
+					bytes, err := io.ReadAll(f)
+					if err != nil {
+						return err
+					}
+					b.bytes = bytes
+					u.batcherCh <- b
+					return nil
+				}(b)
+				continue
+			}
+
+			// If the blob doesn't fit in the current bundle, cycle it.
+			rSize := u.uploadRequestItemBaseSize + len(b.bytes)
+			if bundleSize+rSize >= u.batchRpcCfg.BytesLimit {
 				handle()
 			}
 
+			r := &repb.BatchUpdateBlobsRequest_Request{
+				Digest: b.digest.ToProto(),
+				Data:   b.bytes, // TODO: add compression support as in https://github.com/bazelbuild/remote-apis-sdks/pull/443/files
+			}
 			item.tags = append(item.tags, b.tag)
 			item.req = r
 			bundle[b.digest] = item
 			bundleSize += rSize
 
-			// Check length threshold.
-			if len(bundle) >= u.uploadRpcCfg.ItemsLimit {
+			// If the bundle is full, cycle it.
+			if len(bundle) >= u.batchRpcCfg.ItemsLimit {
 				handle()
 				continue
 			}
@@ -729,7 +756,7 @@ func (u *uploaderv2) callBatchUpload(bundle uploadRequestBundle) {
 	digestRetryCount := make(map[digest.Digest]int64)
 	ctxGrpc, ctxGrpcCancel := context.WithCancel(u.ctx)
 	err := u.withTimeout(u.queryRpcCfg.Timeout, ctxGrpcCancel, func() error {
-		return u.withRetry(ctxGrpc, u.uploadRpcCfg.RetryPredicate, u.uploadRpcCfg.RetryPolicy, func() error {
+		return u.withRetry(ctxGrpc, u.batchRpcCfg.RetryPredicate, u.batchRpcCfg.RetryPolicy, func() error {
 			// This call can have partial failures. Only retry retryable failed requests.
 			res, errCall := u.cas.BatchUpdateBlobs(ctxGrpc, req)
 			reqErr := errCall // return this error if nothing is retryable.
