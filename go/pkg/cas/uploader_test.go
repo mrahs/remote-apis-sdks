@@ -3,8 +3,10 @@ package cas_test
 
 import (
 	"context"
-	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
@@ -16,22 +18,19 @@ import (
 )
 
 var (
-	largeDigest = digest.Digest{Hash: strings.Repeat("foobar,", 512)}
-	errWrite    = fmt.Errorf("write error")
-	errSend     = fmt.Errorf("send error")
-	errClose    = fmt.Errorf("close error")
-	retryNever  = retry.Immediately(retry.Attempts(1))
-	retryTwice  = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
-	rpcCfg      = cas.GRPCConfig{
+	retryNever    = retry.Immediately(retry.Attempts(1))
+	retryTwice    = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
+	retryAll      = func(error) bool { return true }
+	defaultRpcCfg = cas.GRPCConfig{
 		ConcurrentCallsLimit: 5,
 		ItemsLimit:           2,
 		BytesLimit:           1024,
 		Timeout:              time.Second,
 		BundleTimeout:        time.Millisecond,
 		RetryPolicy:          retryNever,
-		RetryPredicate:       func(error) bool { return true },
+		RetryPredicate:       retryAll,
 	}
-	ioCfg = cas.IOConfig{
+	defaultIoCfg = cas.IOConfig{
 		ConcurrentWalksLimit:     1,
 		OpenFilesLimit:           1,
 		OpenLargeFilesLimit:      1,
@@ -41,6 +40,36 @@ var (
 		BufferSize:               2,
 	}
 )
+
+// makeFs creates a temp dir, populates it with files, and returns the path of the temp dir.
+func makeFs(t *testing.T, paths map[string][]byte) string {
+	t.Helper()
+
+	if len(paths) == 0 {
+		t.Fatalf("paths cannot be empty")
+	}
+
+	tmp := t.TempDir()
+
+	for p, b := range paths {
+		// Check for suffix before joining since filepath.Join removes trailing slashes.
+		d := p
+		if !strings.HasSuffix(p, "/") {
+			d = filepath.Dir(p)
+		}
+		if err := os.MkdirAll(filepath.Join(tmp, d), 0766); err != nil {
+			t.Fatalf("io error: %v", err)
+		}
+		if p == d {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(tmp, p), b, 0666); err != nil {
+			t.Fatalf("io error: %v", err)
+		}
+	}
+
+	return tmp
+}
 
 type fakeByteStreamClient struct {
 	bspb.ByteStreamClient

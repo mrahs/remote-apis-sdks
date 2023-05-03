@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/prototext"
+	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 
 	rc "github.com/bazelbuild/remote-apis-sdks/go/pkg/client"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -53,7 +54,7 @@ func (c *Client) NewContext(ctx context.Context, cmd *command.Command, opt *comm
 	if err := cmd.Validate(); err != nil {
 		return nil, err
 	}
-	grpcCtx, err := rc.ContextWithMetadata(ctx, &rc.ContextMetadata{
+	grpcCtx, err := cctx.WithMetadata(ctx, &cctx.Metadata{
 		ToolName:               cmd.Identifiers.ToolName,
 		ToolVersion:            cmd.Identifiers.ToolVersion,
 		ActionID:               cmd.Identifiers.CommandID,

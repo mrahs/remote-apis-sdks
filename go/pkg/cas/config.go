@@ -49,6 +49,7 @@ const (
 )
 
 // GRPCConfig specifies the configuration for a gRPC endpoint.
+// TODO: bundling is not a grpc config.
 type GRPCConfig struct {
 	// ConcurrentCallsLimit sets the upper bound of concurrent calls.
 	// Must be > 0.
