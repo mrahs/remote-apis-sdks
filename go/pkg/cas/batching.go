@@ -279,11 +279,6 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, *Stats, error) {
-	// TODO:
-	// split into digested and undigested
-	// query digested
-	// send missing and undigested to processor
-
 	glog.V(1).Infof("upload: %d requests", len(reqs))
 	defer glog.V(1).Infof("upload.done")
 
@@ -291,14 +286,49 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		return nil, nil, nil
 	}
 
+	var stats Stats
+	var undigested []UploadRequest
+	digested := make(map[digest.Digest]UploadRequest)
+	var digests []digest.Digest
+	for _, r := range reqs {
+		if r.Digest.IsEmpty() {
+			undigested = append(undigested, r)
+			continue
+		}
+		digested[r.Digest] = r
+		digests = append(digests, r.Digest)
+	}
+	missing, err := u.MissingBlobs(ctx, digests)
+	if err != nil {
+		return nil, nil, err
+	}
+	glog.V(1).Infof("upload: missing=%d, undigested=%d", len(missing), len(undigested))
+
+	reqs = undigested
+	for _, d := range missing {
+		reqs = append(reqs, digested[d])
+		delete(digested, d)
+	}
+	for d := range digested {
+		stats.BytesRequested += d.Size
+		stats.LogicalBytesCached += d.Size
+		stats.CacheHitCount += 1
+		stats.DigestCount += 1
+	}
+	if len(reqs) == 0 {
+		glog.V(1).Info("upload: nothing is missing")
+		return nil, &stats, nil
+	}
+
+	glog.V(1).Infof("upload: uploading %d blobs", len(reqs))
 	ch := make(chan UploadRequest)
-	resCh := u.uploadStreamer(ctx, ch)
+	resCh := u.streamPipe(ctx, ch)
 
 	u.clientSenderWg.Add(1)
 	go func() {
 		glog.V(1).Info("upload.sender.start")
 		defer glog.V(1).Info("upload.sender.stop")
-		defer close(ch) // ensure the streamer closes its response channel.
+		defer close(ch) // let the streamer terminate.
 		defer u.clientSenderWg.Done()
 		for _, r := range reqs {
 			r.ctx = ctx
@@ -307,8 +337,6 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	}()
 
 	var uploaded []digest.Digest
-	var err error
-	stats := &Stats{}
 	for r := range resCh {
 		if r.Err != nil {
 			err = errors.Join(r.Err, err)
@@ -319,5 +347,5 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		}
 	}
 
-	return uploaded, stats, err
+	return uploaded, &stats, err
 }

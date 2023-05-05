@@ -170,10 +170,16 @@ type uploaderv2 struct {
 
 	// The reference is used internally to terminate request workers or prevent them from running on a terminated uploader.
 	ctx context.Context
+	// wg is used to wait for the uploader to fully shutdown.
+	wg sync.WaitGroup
 }
 
 // Wait blocks until the context is cancelled and all resources held by the uploader are released.
 func (u *uploaderv2) Wait() {
+	u.wg.Wait()
+}
+
+func (u *uploaderv2) close() {
 	// The context must be cancelled first.
 	<-u.ctx.Done()
 
@@ -186,10 +192,10 @@ func (u *uploaderv2) Wait() {
 	// These senders are terminated by the user.
 	glog.V(1).Infof("uploader: waiting for upload senders")
 	u.uploadSenderWg.Wait()
-	close(u.digesterCh)
+	close(u.digesterCh) // The digester will propagate the termination signal.
 
 	// 3rd, streaming API query senders should stop producing queries.
-	// This either propagates from the user or from the uploader's pipe, hence, the uploader must stop first.
+	// This propagates from the uploader's pipe, hence, the uploader must stop first.
 	glog.V(1).Infof("uploader: waiting for query senders")
 	u.querySenderWg.Wait()
 	close(u.queryCh)
@@ -332,8 +338,8 @@ func newUploaderv2(
 	}()
 
 	// Initializing the query streamer here to ensure wait groups are initialized before returning from this constructor call.
-	queryCh := make(chan digest.Digest)
-	queryResCh := u.missingBlobsStreamer(u.ctx, queryCh)
+	queryCh := make(chan missingBlobRequest)
+	queryResCh := u.missingBlobsPipe(queryCh)
 	u.processorWg.Add(1)
 	go func() {
 		u.querier(queryCh, queryResCh)
@@ -352,6 +358,7 @@ func newUploaderv2(
 		u.processorWg.Done()
 	}()
 
+	go u.close()
 	return u, nil
 }
 

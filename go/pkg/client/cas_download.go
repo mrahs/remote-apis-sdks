@@ -677,7 +677,7 @@ func (c *Client) download(data []*downloadRequest) {
 		}
 	}
 
-	unifiedMeta := getUnifiedMetadata(metas)
+	unifiedMeta := cctx.MergeMetadata(metas...)
 	var err error
 	ctx := context.Background()
 	if unifiedMeta.ActionID != "" {

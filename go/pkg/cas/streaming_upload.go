@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
@@ -117,6 +118,8 @@ type tagCount struct {
 // Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
 //
 // The caller must close in as a termination signal. Cancelling the context is not enough.
+// The uploader's context is used to make remote calls. It will carry any metadata present in ctx.
+// Metadata unification assumes all requests share the same correlated invocation ID.
 //
 // Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
 // The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
@@ -127,10 +130,10 @@ type tagCount struct {
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
-	return u.uploadStreamer(ctx, in)
+	return u.streamPipe(ctx, in)
 }
 
-func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
+func (u *uploaderv2) streamPipe(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
 	ch := make(chan UploadResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
@@ -156,8 +159,8 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest
 	// Forward the requests to the internal processor.
 	u.uploadSenderWg.Add(1)
 	go func() {
-		glog.V(1).Info("upload.streamer.sender.start")
-		defer glog.V(1).Info("upload.streamer.sender.stop")
+		glog.V(1).Info("upload.stream_pipe.sender.start")
+		defer glog.V(1).Info("upload.stream_pipe.sender.stop")
 		defer u.uploadSenderWg.Done()
 		for r := range in {
 			r.tag = tag
@@ -168,10 +171,12 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest
 		u.digesterCh <- UploadRequest{tag: tag, done: true}
 	}()
 
+	// Receive responses from the internal processor.
+	// Once the sender above sends a done-tagged request, the processor will send a done-tagged response.
 	u.receiverWg.Add(1)
 	go func() {
-		glog.V(1).Info("upload.streamer.receiver.start")
-		defer glog.V(1).Info("upload.streamer.receiver.stop")
+		glog.V(1).Info("upload.stream_pipe.receiver.start")
+		defer glog.V(1).Info("upload.stream_pipe.receiver.stop")
 		defer u.receiverWg.Done()
 		defer close(ch)
 		for rawR := range resChan {
@@ -192,12 +197,19 @@ func (u *uploaderv2) uploadStreamer(ctx context.Context, in <-chan UploadRequest
 // If the request is for an already digested blob, it is forwarded to the dispatcher.
 // The number of concurrent requests is limited to the number of concurrent file system walks.
 func (u *uploaderv2) digester() {
-	glog.V(1).Info("upload.processor.start")
-	defer glog.V(1).Info("upload.processor.stop")
+	glog.V(1).Info("upload.digester.start")
+	defer glog.V(1).Info("upload.digester.stop")
+
+	// The digester receives requests from a stream pipe, and sends digested blobs to the dispatcher.
+	//
+	// Once the digester receives a done-tagged request from a requester, it will send a done-tagged blob to the dispatcher
+	// after all related walks are done.
+	//
+	// Once the uploader's context is cancelled, it will terminate after all the pending walks are done (implies all requesters are notified).
 
 	defer func() {
 		u.walkerWg.Wait()
-		// Tell the dispatcher to terminate once it forwarded all remaining responses.
+		// Let the dispatcher know that the digester has terminated by sending an untagged done blob.
 		u.dispatcherBlobCh <- blob{done: true}
 	}()
 
@@ -205,10 +217,11 @@ func (u *uploaderv2) digester() {
 		// If the requester will not be sending any further requests, wait for in-flight walks from previous requests
 		// then tell the dispatcher to forward the signal once all dispatched blobs are done.
 		if req.done {
-			glog.V(2).Infof("upload.processor.req.done: tag=%s", req.tag)
+			glog.V(2).Infof("upload.digester.req.done: tag=%s", req.tag)
 			wg := u.requesterWalkWg[req.tag]
 			if wg == nil {
-				glog.V(2).Infof("upload.processor.req.done: no pending walks for tag=%s", req.tag)
+				glog.V(2).Infof("upload.digester.req.done: no pending walks for tag=%s", req.tag)
+				// Let the dispatcher know that this requester is done.
 				u.dispatcherBlobCh <- blob{tag: req.tag, done: true}
 				continue
 			}
@@ -218,8 +231,8 @@ func (u *uploaderv2) digester() {
 			u.workerWg.Add(1)
 			// Wait for the walkers to finish dispatching blobs then tell the dispatcher that no further blobs are expected from this requester.
 			go func() {
-				glog.V(2).Infof("upload.processor.walk.wait.start: tag=%s", req.tag)
-				defer glog.V(2).Infof("upload.processor.walk.wait.done: tag=%s", req.tag)
+				glog.V(2).Infof("upload.digester.walk.wait.start: tag=%s", req.tag)
+				defer glog.V(2).Infof("upload.digester.walk.wait.done: tag=%s", req.tag)
 				defer u.workerWg.Done()
 				wg.Wait()
 				u.dispatcherBlobCh <- blob{tag: req.tag, done: true}
@@ -236,7 +249,7 @@ func (u *uploaderv2) digester() {
 			continue
 		}
 
-		glog.V(2).Infof("upload.processor.req: path=%s, slo=%s, filter=%s, tag=%s", req.Path, req.SymlinkOptions, req.Exclude, req.tag)
+		glog.V(2).Infof("upload.digester.req: path=%s, slo=%s, filter=%s, tag=%s", req.Path, req.SymlinkOptions, req.Exclude, req.tag)
 		// Wait if too many walks are in-flight.
 		if err := u.walkSem.Acquire(u.ctx, 1); err != nil {
 			// err is always ctx.Err()
@@ -426,7 +439,7 @@ func (u *uploaderv2) dispatcher() {
 	defer glog.V(1).Info("upload.dispatcher.stop")
 
 	defer func() {
-		// Tell the pipe processor to terminate once it forwarded all remaining responses.
+		// Tell the query pipe that the dispatcher has terminated by sending an untagged done blob.
 		u.queryPipeCh <- blob{done: true}
 	}()
 
@@ -551,7 +564,7 @@ func (u *uploaderv2) dispatcher() {
 
 // querier pipes the digest of a blob to the internal query processor to determine if it needs uploading.
 // Cache hits and errors are piped back to the dispatcher while cache misses are piped to the uploader.
-func (u *uploaderv2) querier(queryCh chan digest.Digest, queryResCh <-chan MissingBlobsResponse) {
+func (u *uploaderv2) querier(queryCh chan missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
 	glog.V(1).Info("upload.pipe.start")
 	defer glog.V(1).Info("upload.pipe.stop")
 
@@ -582,7 +595,7 @@ func (u *uploaderv2) querier(queryCh chan digest.Digest, queryResCh <-chan Missi
 			}
 
 			digestBlobs[b.digest] = append(digestBlobs[b.digest], b)
-			queryCh <- b.digest
+			queryCh <- missingBlobRequest{digest: b.digest, ctx: b.ctx}
 
 		// The query streamer closes this channel when the context is done.
 		case r, ok := <-queryResCh:
@@ -628,7 +641,6 @@ func (u *uploaderv2) querier(queryCh chan digest.Digest, queryResCh <-chan Missi
 
 // uploadBatcher handles files below the small threshold which are buffered in-memory.
 func (u *uploaderv2) batcher() {
-	// TODO: unify contexts.
 	glog.V(1).Info("upload.batch.start")
 	defer glog.V(1).Info("upload.batch.stop")
 
@@ -639,6 +651,7 @@ func (u *uploaderv2) batcher() {
 
 	bundle := make(uploadRequestBundle)
 	bundleSize := u.uploadRequestBaseSize
+	ctx := u.ctx // context with unified metadata.
 
 	handle := func() {
 		if len(bundle) < 1 {
@@ -652,13 +665,14 @@ func (u *uploaderv2) batcher() {
 		defer u.uploadSem.Release(1)
 
 		u.workerWg.Add(1)
-		go func(b uploadRequestBundle) {
+		go func(ctx context.Context, b uploadRequestBundle) {
 			defer u.workerWg.Done()
-			u.callBatchUpload(b)
-		}(bundle)
+			u.callBatchUpload(ctx, b)
+		}(ctx, bundle)
 
 		bundle = make(uploadRequestBundle)
 		bundleSize = u.uploadRequestBaseSize
+		ctx = u.ctx
 	}
 
 	bundleTicker := time.NewTicker(u.batchRpcCfg.BundleTimeout)
@@ -729,6 +743,7 @@ func (u *uploaderv2) batcher() {
 			item.req = r
 			bundle[b.digest] = item
 			bundleSize += rSize
+			ctx, _ = cctx.FromContexts(ctx, b.ctx) // ignore non-essential error.
 
 			// If the bundle is full, cycle it.
 			if len(bundle) >= u.batchRpcCfg.ItemsLimit {
@@ -742,7 +757,7 @@ func (u *uploaderv2) batcher() {
 	}
 }
 
-func (u *uploaderv2) callBatchUpload(bundle uploadRequestBundle) {
+func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBundle) {
 	glog.V(2).Infof("upload.batch.call: len=%d", len(bundle))
 
 	req := &repb.BatchUpdateBlobsRequest{InstanceName: u.instanceName}
@@ -754,7 +769,7 @@ func (u *uploaderv2) callBatchUpload(bundle uploadRequestBundle) {
 	var uploaded []digest.Digest
 	failed := make(map[digest.Digest]error)
 	digestRetryCount := make(map[digest.Digest]int64)
-	ctxGrpc, ctxGrpcCancel := context.WithCancel(u.ctx)
+	ctxGrpc, ctxGrpcCancel := context.WithCancel(ctx)
 	err := u.withTimeout(u.queryRpcCfg.Timeout, ctxGrpcCancel, func() error {
 		return u.withRetry(ctxGrpc, u.batchRpcCfg.RetryPredicate, u.batchRpcCfg.RetryPolicy, func() error {
 			// This call can have partial failures. Only retry retryable failed requests.

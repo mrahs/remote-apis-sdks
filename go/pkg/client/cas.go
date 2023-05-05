@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
@@ -19,9 +18,6 @@ import (
 // DefaultCompressedBytestreamThreshold is the default threshold, in bytes, for
 // transferring blobs compressed on ByteStream.Write RPCs.
 const DefaultCompressedBytestreamThreshold = -1
-
-// DefaultMaxHeaderSize is the defaut maximum gRPC header size.
-const DefaultMaxHeaderSize = 8 * 1024
 
 const logInterval = 25
 
@@ -133,70 +129,6 @@ func (c *Client) makeQueryBatches(ctx context.Context, digests []digest.Digest) 
 		batches = append(batches, batch)
 	}
 	return batches
-}
-
-func getUnifiedLabel(labels map[string]bool) string {
-	var keys []string
-	for k := range labels {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return strings.Join(keys, ",")
-}
-
-func getUnifiedMetadata(metas []*cctx.Metadata) *cctx.Metadata {
-	if len(metas) == 0 {
-		return &cctx.Metadata{}
-	}
-	actionIDs := make(map[string]bool)
-	invocationIDs := make(map[string]bool)
-	for _, m := range metas {
-		actionIDs[m.ActionID] = true
-		invocationIDs[m.InvocationID] = true
-	}
-	m := &cctx.Metadata{
-		ToolName:               metas[0].ToolName,
-		ToolVersion:            metas[0].ToolVersion,
-		ActionID:               getUnifiedLabel(actionIDs),
-		InvocationID:           getUnifiedLabel(invocationIDs),
-		CorrelatedInvocationID: metas[0].CorrelatedInvocationID,
-	}
-	// We cap to a bit less than the maximum header size in order to allow
-	// for some proto fields serialization overhead.
-	capToLimit(m, DefaultMaxHeaderSize-100)
-	return m
-}
-
-// capToLimit ensures total length does not exceed max header size.
-func capToLimit(m *cctx.Metadata, limit int) {
-	total := len(m.ToolName) + len(m.ToolVersion) + len(m.ActionID) + len(m.InvocationID) + len(m.CorrelatedInvocationID)
-	excess := total - limit
-	if excess <= 0 {
-		return
-	}
-	// We ignore the tool name, because in practice this is a
-	// very short constant which makes no sense to truncate.
-	diff := len(m.ActionID) - len(m.InvocationID)
-	if diff > 0 {
-		if diff > excess {
-			m.ActionID = m.ActionID[:len(m.ActionID)-excess]
-		} else {
-			m.ActionID = m.ActionID[:len(m.ActionID)-diff]
-			rem := (excess - diff + 1) / 2
-			m.ActionID = m.ActionID[:len(m.ActionID)-rem]
-			m.InvocationID = m.InvocationID[:len(m.InvocationID)-rem]
-		}
-	} else {
-		diff = -diff
-		if diff > excess {
-			m.InvocationID = m.InvocationID[:len(m.InvocationID)-excess]
-		} else {
-			m.InvocationID = m.InvocationID[:len(m.InvocationID)-diff]
-			rem := (excess - diff + 1) / 2
-			m.InvocationID = m.InvocationID[:len(m.InvocationID)-rem]
-			m.ActionID = m.ActionID[:len(m.ActionID)-rem]
-		}
-	}
 }
 
 func marshalledFieldSize(size int64) int64 {

@@ -413,7 +413,7 @@ func (c *Client) upload(reqs []*uploadRequest) {
 		}
 	}
 
-	unifiedMeta := getUnifiedMetadata(metas)
+	unifiedMeta := cctx.MergeMetadata(metas...)
 	var err error
 	ctx := context.Background()
 	if unifiedMeta.ActionID != "" {

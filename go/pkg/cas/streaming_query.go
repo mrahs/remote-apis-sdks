@@ -7,6 +7,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
+	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 	"github.com/golang/glog"
 	"google.golang.org/protobuf/proto"
 )
@@ -38,6 +39,8 @@ type missingBlobRequestBundle = map[digest.Digest][]tag
 // For a large list of known digests, consider using the batching uploader.
 //
 // The digests are unified (aggregated/bundled) based on ItemsLimit, BytesLimit and BundleTimeout of the gRPC config.
+// The uploader's context is used to make remote calls. It will carry any metadata present in ctx.
+// Metadata unification assumes all requests share the same correlated invocation ID.
 //
 // The caller must close the specified input channel as a termination signal. Cancelling the context is not enough.
 // The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
@@ -49,11 +52,21 @@ type missingBlobRequestBundle = map[digest.Digest][]tag
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
-	return u.missingBlobsStreamer(ctx, in)
+	pipeIn := make(chan missingBlobRequest)
+	out := u.missingBlobsPipe(pipeIn)
+	u.clientSenderWg.Add(1)
+	go func(){
+		defer u.clientSenderWg.Done()
+		defer close(pipeIn)
+		for d := range in {
+			pipeIn <- missingBlobRequest{digest: d, ctx: ctx}
+		}
+	}()
+	return out
 }
 
-// missingBlobsStreamer is defined on the underlying uploader to be accessible by the upload code.
-func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
+// missingBlobsPipe is defined on the underlying uploader to be accessible by the upload code.
+func (u *uploaderv2) missingBlobsPipe(in <-chan missingBlobRequest) <-chan MissingBlobsResponse {
 	ch := make(chan MissingBlobsResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
@@ -61,10 +74,10 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 	case <-u.ctx.Done():
 		go func() {
 			defer close(ch)
-			r := MissingBlobsResponse{Err: ErrTerminatedUploader}
-			for d := range in {
-				r.Digest = d
-				ch <- r
+			res := MissingBlobsResponse{Err: ErrTerminatedUploader}
+			for req := range in {
+				res.Digest = req.digest
+				ch <- res
 			}
 		}()
 		return ch
@@ -83,8 +96,9 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 		glog.V(1).Info("query.streamer.sender.start")
 		defer glog.V(1).Info("query.streamer.sender.stop")
 		defer u.querySenderWg.Done()
-		for d := range in {
-			u.queryCh <- missingBlobRequest{digest: d, tag: tag, ctx: ctx}
+		for r := range in {
+			r.tag = tag
+			u.queryCh <- r
 			pendingCh <- 1
 		}
 		pendingCh <- 0
@@ -134,11 +148,11 @@ func (u *uploaderv2) missingBlobsStreamer(ctx context.Context, in <-chan digest.
 
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
 func (u *uploaderv2) queryProcessor() {
-	// TODO: unify contexts.
 	glog.V(1).Info("query.processor.start")
 	defer glog.V(1).Info("query.processor.stop")
 
 	bundle := make(missingBlobRequestBundle)
+	ctx := u.ctx // context with unified metadata.
 	bundleSize := u.queryRequestBaseSize
 
 	handle := func() {
@@ -153,13 +167,14 @@ func (u *uploaderv2) queryProcessor() {
 		defer u.querySem.Release(1)
 
 		u.workerWg.Add(1)
-		go func(b missingBlobRequestBundle) {
+		go func(ctx context.Context, b missingBlobRequestBundle) {
 			defer u.workerWg.Done()
-			u.callMissingBlobs(b)
-		}(bundle)
+			u.callMissingBlobs(ctx, b)
+		}(ctx, bundle)
 
 		bundle = make(missingBlobRequestBundle)
 		bundleSize = u.queryRequestBaseSize
+		ctx = u.ctx
 	}
 
 	bundleTicker := time.NewTicker(u.queryRpcCfg.BundleTimeout)
@@ -190,6 +205,7 @@ func (u *uploaderv2) queryProcessor() {
 			// Duplicate tags are allowed to ensure the requester can match the number of responses to the number of requests.
 			bundle[req.digest] = append(bundle[req.digest], req.tag)
 			bundleSize += dSize
+			ctx, _ = cctx.FromContexts(ctx, req.ctx) // ignore non-essential error.
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRpcCfg.ItemsLimit {
@@ -203,7 +219,7 @@ func (u *uploaderv2) queryProcessor() {
 
 // callMissingBlobs calls the gRPC endpoint and notifies requesters of the results.
 // It assumes ownership of the bundle argument.
-func (u *uploaderv2) callMissingBlobs(bundle missingBlobRequestBundle) {
+func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
 	glog.V(2).Infof("query.call: len=%d", len(bundle))
 
 	if len(bundle) < 1 {
@@ -225,7 +241,7 @@ func (u *uploaderv2) callMissingBlobs(bundle missingBlobRequestBundle) {
 
 	var res *repb.FindMissingBlobsResponse
 	var err error
-	ctx, ctxCancel := context.WithCancel(u.ctx)
+	ctx, ctxCancel := context.WithCancel(ctx)
 	err = u.withTimeout(u.queryRpcCfg.Timeout, ctxCancel, func() error {
 		return u.withRetry(ctx, u.queryRpcCfg.RetryPredicate, u.queryRpcCfg.RetryPolicy, func() error {
 			res, err = u.cas.FindMissingBlobs(ctx, req)
