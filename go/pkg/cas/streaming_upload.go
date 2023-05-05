@@ -9,6 +9,21 @@
 //   batcher    -> dispatcher
 //   streamer   -> dispatcher
 //   dispatcher -> requester
+//
+// The termination sequence is as follows:
+//   uploader's context is cancelled.
+//   client senders close their input channels and sender goroutines terminate.
+//   wait for all digester walks to complete, which will be aborted by the uploader's context.
+//   the digester channel is closed, and a termination signal is sent to the dispatcher.
+//   the dispatcher terminates its sender and propagates the signal to the querier.
+//   the querier terminates its pipe sender and propagates the signal to the pipe.
+//   the pipe flushes its output channel then closes it.
+//   the querier terminates its pipe receiver.
+//   up until this point, the dispatcher was still receiving and dispatching responses.
+//   the dispatcher drains the responses from the batcher and the streamer.
+//   the dispatcher's counter terminates and closes the receiver's channel which terminates.
+//   the dispatcher closes the batcher's channel which terminates.
+//   the dispatcher closes the streamer's channel which terminates.
 
 package cas
 
@@ -88,11 +103,9 @@ type uploadRequestBundleItem struct {
 // uploadRequestBundle is used to aggregate (unify) requests by digest.
 type uploadRequestBundle = map[digest.Digest]uploadRequestBundleItem
 
-// blob is a tuple of (digest, content, client_id, done_signal).
+// blob is a tuple of (digest, content, client_id, client_ctx, done_signal, queried_flag).
 // The digest is the blob's unique identifier.
-// The content must be one of reader, path, or bytes, in that order.
-// Depending on which field is set, resources are acquired and released.
-// TODO: consider reusing UploadRequest instead.
+// The content must be one of reader, path, or bytes, in that order. Depending on which field is set, resources are acquired and released.
 type blob struct {
 	digest digest.Digest
 	bytes  []byte
@@ -109,7 +122,7 @@ type blob struct {
 }
 
 // tagCount is a tuple used by the dispatcher to track the number of in-flight blobs for each client.
-// A blob is in-flight if it has been dispatched, but no corresponding response has been received for it.
+// A blob is in-flight if it has been dispatched, but no corresponding response has been received for it yet.
 type tagCount struct {
 	t tag
 	c int
@@ -117,9 +130,12 @@ type tagCount struct {
 
 // Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
 //
-// The caller must close in as a termination signal. Cancelling the context is not enough.
+// The caller must close in as a termination signal. Cancelling ctx or the uploader's context is not enough.
 // The uploader's context is used to make remote calls. It will carry any metadata present in ctx.
 // Metadata unification assumes all requests share the same correlated invocation ID.
+//
+// The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
+// All received requests will have corresponding responses sent on the returned channel.
 //
 // Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
 // The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
@@ -205,7 +221,7 @@ func (u *uploaderv2) digester() {
 	// Once the digester receives a done-tagged request from a requester, it will send a done-tagged blob to the dispatcher
 	// after all related walks are done.
 	//
-	// Once the uploader's context is cancelled, it will terminate after all the pending walks are done (implies all requesters are notified).
+	// Once the uploader's context is cancelled, the digester will terminate after all the pending walks are done (implies all requesters are notified).
 
 	defer func() {
 		u.walkerWg.Wait()
@@ -439,8 +455,9 @@ func (u *uploaderv2) dispatcher() {
 	defer glog.V(1).Info("upload.dispatcher.stop")
 
 	defer func() {
-		// Tell the query pipe that the dispatcher has terminated by sending an untagged done blob.
-		u.queryPipeCh <- blob{done: true}
+		// Let the batcher and the streamer know we're done dispatching blobs.
+		close(u.batcherCh)
+		close(u.streamerCh)
 	}()
 
 	// Maintain a count of in-flight uploads per requester.
@@ -453,6 +470,10 @@ func (u *uploaderv2) dispatcher() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer func() {
+			// Let the query pipe know that the dispatcher will not be sending any more blobs.
+			u.queryPipeCh <- blob{done: true}
+		}()
 		glog.V(1).Info("upload.dispatcher.sender.start")
 		defer glog.V(1).Info("upload.dispatcher.sender.stop")
 
@@ -460,7 +481,7 @@ func (u *uploaderv2) dispatcher() {
 		for b := range u.dispatcherBlobCh {
 			if b.done { // The requester will not be sending any further requests.
 				pendingCh <- tagCount{b.tag, 0}
-				if b.tag == "" { // In fact, all requesters have terminated.
+				if b.tag == "" { // In fact, the digester (and all requesters) have terminated.
 					return
 				}
 				continue
@@ -520,21 +541,21 @@ func (u *uploaderv2) dispatcher() {
 		}
 	}()
 
-	// This counter keeps track of in-flight blobs and notifies requesters when all their blobs have been fully dispatched.
+	// This counter keeps track of in-flight blobs and notifies requesters when they have no more responses.
 	// It terminates after the sender, but before the receiver.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		glog.V(1).Info("upload.dispatcher.counter.start")
 		defer glog.V(1).Info("upload.dispatcher.counter.stop")
-		defer func() { close(u.dispatcherResCh) }()
+		defer close(u.dispatcherResCh) // Let the receiver know we're done.
 
 		tagReqCount := make(map[tag]int)
 		tagDone := make(map[tag]bool)
 		allDone := false
 		for tc := range pendingCh {
-			if tc.c == 0 { // There will be no more blobs for this tag.
-				if tc.t == "" { // In fact, no more blobs for any tag.
+			if tc.c == 0 { // There will be no more blobs from this requester.
+				if tc.t == "" { // In fact, no more blobs for any requester.
 					if len(tagReqCount) == 0 {
 						return
 					}
@@ -564,22 +585,16 @@ func (u *uploaderv2) dispatcher() {
 
 // querier pipes the digest of a blob to the internal query processor to determine if it needs uploading.
 // Cache hits and errors are piped back to the dispatcher while cache misses are piped to the uploader.
-func (u *uploaderv2) querier(queryCh chan missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
+func (u *uploaderv2) querier(queryCh chan<- missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
 	glog.V(1).Info("upload.pipe.start")
 	defer glog.V(1).Info("upload.pipe.stop")
-
-	// TODO: review termination order.
-	defer func() {
-		// Tell the batch processor to terminate.
-		close(u.batcherCh)
-	}()
 
 	// Keep track of the associated blobs since the query API accepts a digest only.
 	digestBlobs := make(map[digest.Digest][]blob)
 	done := false
 	for {
 		select {
-		// Pipe dispatched blobs to the query processor.
+		// The dispatcher sends blobs on this channel, but never closes it.
 		case b := <-u.queryPipeCh:
 			// In the off chance that a request is received after a done signal, ignore it to avoid sending on a closed channel.
 			if done {
@@ -597,7 +612,8 @@ func (u *uploaderv2) querier(queryCh chan missingBlobRequest, queryResCh <-chan 
 			digestBlobs[b.digest] = append(digestBlobs[b.digest], b)
 			queryCh <- missingBlobRequest{digest: b.digest, ctx: b.ctx}
 
-		// The query streamer closes this channel when the context is done.
+		// This channel is closed by the query pipe when queryCh is closed, which happens when the dispatcher
+		// sends a done signal. This ensures all responses are forwarded to the dispatcher.
 		case r, ok := <-queryResCh:
 			if !ok {
 				return
@@ -643,11 +659,6 @@ func (u *uploaderv2) querier(queryCh chan missingBlobRequest, queryResCh <-chan 
 func (u *uploaderv2) batcher() {
 	glog.V(1).Info("upload.batch.start")
 	defer glog.V(1).Info("upload.batch.stop")
-
-	defer func() {
-		// Tell the stream processor to terminate once it finished all remaining requests.
-		u.streamerCh <- blob{done: true}
-	}()
 
 	bundle := make(uploadRequestBundle)
 	bundleSize := u.uploadRequestBaseSize
@@ -884,26 +895,14 @@ func (u *uploaderv2) streamer() {
 	// Unify duplicate requests.
 	digestTags := make(map[digest.Digest][]tag)
 	streamResCh := make(chan UploadResponse)
-	done := false
 	pending := 0
 	for {
 		select {
-		case b := <-u.streamerCh:
-			// In the off chance that a request is received after a done signal, ignore it to avoid sending on a closed channel.
-			if done {
-				glog.Errorf("upload.stream: received a request after a done signal from tag=%s; ignoring", b.tag)
-				continue
-			}
-			// If the dispatcher has terminated, continue draining the response channel then terminate.
-			// The dispatcher and the batch processor are the only senders.
-			// This signal comes from the batch processor, which terminates after the dispatcher.
-			if b.done {
-				glog.V(2).Info("upload.stream.done: pendint=%d", pending)
-				if pending == 0 {
-					return
-				}
-				done = true
-				continue
+		// The dispatcher closes this channel when it's done dispatching, which happens after the streamer
+		// had sent all pending responses.
+		case b, ok := <-u.streamerCh:
+			if !ok {
+				return
 			}
 			glog.V(2).Infof("upload.stream.req: digest=%s, tag=%s", b.digest, b.tag)
 
@@ -955,10 +954,7 @@ func (u *uploaderv2) streamer() {
 			delete(digestTags, r.Digest)
 			u.dispatcherResCh <- r
 			pending -= 1
-			glog.V(2).Infof("upload.stream.res: pending=%d, done=%t", pending, done)
-			if pending == 0 && done {
-				return
-			}
+			glog.V(2).Infof("upload.stream.res: pending=%d", pending)
 		}
 	}
 }

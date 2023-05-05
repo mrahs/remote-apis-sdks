@@ -179,45 +179,6 @@ func (u *uploaderv2) Wait() {
 	u.wg.Wait()
 }
 
-func (u *uploaderv2) close() {
-	// The context must be cancelled first.
-	<-u.ctx.Done()
-
-	// 1st, batching API senders should stop producing requests.
-	// These senders are terminated by the user.
-	glog.V(1).Infof("uploader: waiting for client senders")
-	u.clientSenderWg.Wait()
-
-	// 2nd, streaming API upload senders should stop producing queries and requests.
-	// These senders are terminated by the user.
-	glog.V(1).Infof("uploader: waiting for upload senders")
-	u.uploadSenderWg.Wait()
-	close(u.digesterCh) // The digester will propagate the termination signal.
-
-	// 3rd, streaming API query senders should stop producing queries.
-	// This propagates from the uploader's pipe, hence, the uploader must stop first.
-	glog.V(1).Infof("uploader: waiting for query senders")
-	u.querySenderWg.Wait()
-	close(u.queryCh)
-
-	// 4th, internal routres should flush all remaining requests.
-	glog.V(1).Infof("uploader: waiting for processors")
-	u.processorWg.Wait()
-
-	// 5th, internal brokers should flush all remaining messages.
-	glog.V(1).Infof("uploader: waiting for brokers")
-	u.queryPubSub.wait()
-	u.uploadPubSub.wait()
-
-	// 6th, receivers should have drained their channels by now.
-	glog.V(1).Infof("uploader: waiting for receivers")
-	u.receiverWg.Wait()
-
-	// 7th, workers should have terminated by now.
-	glog.V(1).Infof("uploader: waiting for workers")
-	u.workerWg.Wait()
-}
-
 // NewBatchingUploader creates a new instance of the batching uploader.
 //
 // The specified configs must be compatible with the capabilities of the server that the specified clients are connected to.
@@ -360,6 +321,45 @@ func newUploaderv2(
 
 	go u.close()
 	return u, nil
+}
+
+func (u *uploaderv2) close() {
+	// The context must be cancelled first.
+	<-u.ctx.Done()
+
+	// 1st, batching API senders should stop producing requests.
+	// These senders are terminated by the user.
+	glog.V(1).Infof("uploader: waiting for client senders")
+	u.clientSenderWg.Wait()
+
+	// 2nd, streaming API upload senders should stop producing queries and requests.
+	// These senders are terminated by the user.
+	glog.V(1).Infof("uploader: waiting for upload senders")
+	u.uploadSenderWg.Wait()
+	close(u.digesterCh) // The digester will propagate the termination signal.
+
+	// 3rd, streaming API query senders should stop producing queries.
+	// This propagates from the uploader's pipe, hence, the uploader must stop first.
+	glog.V(1).Infof("uploader: waiting for query senders")
+	u.querySenderWg.Wait()
+	close(u.queryCh) // Terminate the query processor.
+
+	// 4th, internal routres should flush all remaining requests.
+	glog.V(1).Infof("uploader: waiting for processors")
+	u.processorWg.Wait()
+
+	// 5th, internal brokers should flush all remaining messages.
+	glog.V(1).Infof("uploader: waiting for brokers")
+	u.queryPubSub.wait()
+	u.uploadPubSub.wait()
+
+	// 6th, receivers should have drained their channels by now.
+	glog.V(1).Infof("uploader: waiting for receivers")
+	u.receiverWg.Wait()
+
+	// 7th, workers should have terminated by now.
+	glog.V(1).Infof("uploader: waiting for workers")
+	u.workerWg.Wait()
 }
 
 func (u *uploaderv2) withRetry(ctx context.Context, predicate retry.ShouldRetry, policy retry.BackoffPolicy, fn func() error) error {

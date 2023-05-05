@@ -42,7 +42,7 @@ type missingBlobRequestBundle = map[digest.Digest][]tag
 // The uploader's context is used to make remote calls. It will carry any metadata present in ctx.
 // Metadata unification assumes all requests share the same correlated invocation ID.
 //
-// The caller must close the specified input channel as a termination signal. Cancelling the context is not enough.
+// The caller must close in as a termination signal. Cancelling ctx or the uploader's context is not enough.
 // The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
 // All received requests will have corresponding responses sent on the returned channel.
 //
