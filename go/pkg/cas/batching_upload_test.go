@@ -12,7 +12,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-	"github.com/golang/glog"
+	log "github.com/golang/glog"
 	"github.com/google/go-cmp/cmp"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
@@ -428,7 +428,7 @@ func TestUpload_Batching(t *testing.T) {
 		}
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			glog.Infof("test: %s", test.name)
+			log.Infof("test: %s", test.name)
 			tmp := makeFs(t, test.fs)
 			if test.rpcCfg == nil {
 				test.rpcCfg = &rpcCfg
@@ -466,7 +466,7 @@ func TestUpload_Batching(t *testing.T) {
 			u.Wait()
 		})
 	}
-	glog.Flush()
+	log.Flush()
 }
 
 func TestUpload_BatchingAbort(t *testing.T) {

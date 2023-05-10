@@ -9,7 +9,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-	"github.com/golang/glog"
+	log "github.com/golang/glog"
 	"github.com/klauspost/compress/zstd"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 )
@@ -24,7 +24,7 @@ import (
 // In other words, if an error is returned, any digest that is not in the returned slice is not missing.
 // If no error is returned, the returned slice contains all the missing digests.
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
-	glog.V(2).Infof("batch.query: len=%d", len(digests))
+	log.V(2).Infof("batch.query: len=%d", len(digests))
 
 	// Deduplicate and split into batches.
 	var batches [][]*repb.Digest
@@ -47,7 +47,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	if len(batches) == 0 {
 		return nil, nil
 	}
-	glog.V(2).Infof("batch.query.deduped: len=%d", len(dgSet))
+	log.V(2).Infof("batch.query.deduped: len=%d", len(dgSet))
 
 	// Call remote.
 	missing := make([]digest.Digest, 0, len(dgSet))
@@ -72,7 +72,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			missing = append(missing, digest.NewFromProtoUnvalidated(d))
 		}
 	}
-	glog.V(2).Infof("batch.query.done: missing=%d", len(missing))
+	log.V(2).Infof("batch.query.done: missing=%d", len(missing))
 
 	if err != nil {
 		err = errors.Join(ErrGRPC, err)
@@ -101,8 +101,8 @@ func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r
 }
 
 func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error) {
-	glog.V(2).Infof("upload.write_bytes.start: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
-	defer glog.V(2).Infof("upload.write_bytes.done: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
+	log.V(2).Infof("upload.write_bytes.start: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
+	defer log.V(2).Infof("upload.write_bytes.done: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
 
 	var stats Stats
 	if err := u.streamSem.Acquire(ctx, 1); err != nil {
@@ -120,7 +120,7 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 	var encWg sync.WaitGroup
 	var withCompression bool // Used later to ensure the pipe is closed.
 	if size >= u.ioCfg.CompressionSizeThreshold {
-		glog.V(2).Infof("upload.write_bytes.compressing: name=%s, size=%d", name, size)
+		log.V(2).Infof("upload.write_bytes.compressing: name=%s, size=%d", name, size)
 		withCompression = true
 		pr, pw := io.Pipe()
 		// Closing pr always returns a nil error, but also sends ErrClosedPipe to pw.
@@ -279,8 +279,8 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, *Stats, error) {
-	glog.V(1).Infof("upload: %d requests", len(reqs))
-	defer glog.V(1).Infof("upload.done")
+	log.V(1).Infof("upload: %d requests", len(reqs))
+	defer log.V(1).Infof("upload.done")
 
 	if len(reqs) == 0 {
 		return nil, nil, nil
@@ -302,7 +302,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	if err != nil {
 		return nil, nil, err
 	}
-	glog.V(1).Infof("upload: missing=%d, undigested=%d", len(missing), len(undigested))
+	log.V(1).Infof("upload: missing=%d, undigested=%d", len(missing), len(undigested))
 
 	reqs = undigested
 	for _, d := range missing {
@@ -316,18 +316,18 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		stats.DigestCount += 1
 	}
 	if len(reqs) == 0 {
-		glog.V(1).Info("upload: nothing is missing")
+		log.V(1).Info("upload: nothing is missing")
 		return nil, &stats, nil
 	}
 
-	glog.V(1).Infof("upload: uploading %d blobs", len(reqs))
+	log.V(1).Infof("upload: uploading %d blobs", len(reqs))
 	ch := make(chan UploadRequest)
 	resCh := u.streamPipe(ctx, ch)
 
 	u.clientSenderWg.Add(1)
 	go func() {
-		glog.V(1).Info("upload.sender.start")
-		defer glog.V(1).Info("upload.sender.stop")
+		log.V(1).Info("upload.sender.start")
+		defer log.V(1).Info("upload.sender.stop")
 		defer close(ch) // let the streamer terminate.
 		defer u.clientSenderWg.Done()
 		for _, r := range reqs {

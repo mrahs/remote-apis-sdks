@@ -14,7 +14,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-	"github.com/golang/glog"
+	log "github.com/golang/glog"
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/proto"
 )
@@ -135,7 +135,7 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioS
 		IsExecutable: info.Mode()&0100 != 0,
 	}
 	if info.Size() <= smallFileSizeThreshold {
-		glog.V(2).Infof("upload.digest.file.small: path=%s, size=%d", path, info.Size())
+		log.V(2).Infof("upload.digest.file.small: path=%s, size=%d", path, info.Size())
 		f, err := os.Open(path.String())
 		if err != nil {
 			return nil, blb, err
@@ -157,7 +157,7 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioS
 	}
 
 	if info.Size() < largeFileSizeThreshold {
-		glog.V(2).Infof("upload.digest.file.medium: path=%s, size=%d", path, info.Size())
+		log.V(2).Infof("upload.digest.file.medium: path=%s, size=%d", path, info.Size())
 		d, err := digest.NewFromFile(path.String())
 		if err != nil {
 			return nil, blb, err
@@ -168,7 +168,7 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioS
 		return node, blb, nil
 	}
 
-	glog.V(2).Infof("upload.digest.file.large: path=%s, size=%d", path, info.Size())
+	log.V(2).Infof("upload.digest.file.large: path=%s, size=%d", path, info.Size())
 	if err := ioLargeSem.Acquire(ctx, 1); err != nil {
 		return nil, blb, ctx.Err()
 	}

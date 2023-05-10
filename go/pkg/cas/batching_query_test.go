@@ -11,7 +11,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-	"github.com/golang/glog"
+	log "github.com/golang/glog"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc"
 )
@@ -77,7 +77,7 @@ func TestQuery_Batching(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			glog.Infof("test: %s", test.name)
+			log.Infof("test: %s", test.name)
 			ctx, ctxCancel := context.WithCancel(context.Background())
 			u, err := cas.NewBatchingUploader(ctx, test.cas, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
 			if err != nil {
@@ -99,5 +99,5 @@ func TestQuery_Batching(t *testing.T) {
 			u.Wait()
 		})
 	}
-	glog.Flush()
+	log.Flush()
 }
