@@ -9,6 +9,7 @@ import (
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/chunker"
+	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
@@ -85,7 +86,7 @@ func (c *Client) UploadIfMissing(ctx context.Context, entries ...*uploadinfo.Ent
 	return c.uploadNonUnified(ctx, entries...)
 }
 
-// WriteBlobs is a proxy method for UploadIfMissing that facilitates specifing a map of
+// WriteBlobs is a proxy method for UploadIfMissing that facilitates specifying a map of
 // digest-to-blob. It's intended for use with PackageTree.
 // TODO(olaola): rethink the API of this layer:
 // * Do we want to allow []byte uploads, or require the user to construct Chunkers?
@@ -252,8 +253,7 @@ type uploadState struct {
 }
 
 func (c *Client) uploadUnified(ctx context.Context, entries ...*uploadinfo.Entry) ([]digest.Digest, int64, error) {
-	uploads := len(entries)
-	cctx.Infof(ctx, log.Level(2), "Request to upload %d blobs", uploads)
+	cctx.Infof(ctx, log.Level(2), "Request to upload %d blobs", len(entries))
 
 	if len(entries) == 0 {
 		return nil, 0, nil
@@ -285,7 +285,6 @@ func (c *Client) uploadUnified(ctx context.Context, entries ...*uploadinfo.Entry
 			continue
 		}
 		if ue.Digest.IsEmpty() {
-			uploads--
 			cctx.Infof(ctx, log.Level(2), "Skipping upload of empty entry %s", ue.Digest)
 			continue
 		}
@@ -305,7 +304,7 @@ func (c *Client) uploadUnified(ctx context.Context, entries ...*uploadinfo.Entry
 		}
 	}
 	totalBytesMoved := int64(0)
-	finalMissing := make([]digest.Digest, len(reqs))
+	finalMissing := make([]digest.Digest, 0, len(reqs))
 	for i := 0; i < len(reqs); i++ {
 		select {
 		case <-ctx.Done():
