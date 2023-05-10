@@ -7,8 +7,7 @@ import (
 )
 
 // Options represents a set of options for handling symlinks.
-// To ensure a valid set of options, use one of the functions provided in this package
-// to get the desired options.
+// To ensure a valid set of options, use one of the functions provided in this package.
 type Options uint32
 
 const (
@@ -74,6 +73,7 @@ func (o Options) ResolveExternal() bool {
 }
 
 // ResolveAlways return the correct set of options to always resolve symlinks.
+//
 // This implies that symlinks are followed and no dangling symlinks are allowed.
 // Each target will have the path of the symlink.
 func ResolveAlways() Options {
@@ -82,6 +82,7 @@ func ResolveAlways() Options {
 
 // ResolveExternalOnly returns the correct set of options to only resolve symlinks
 // if the target is outside the execution root. Otherwise, the symlink is preserved.
+//
 // This implies that all symlinks are followed, therefore, no dangling links are allowed.
 // Otherwise, it's not possible to guarantee that all required files are under the execution root.
 // Targets of non-external symlinks are not included.
@@ -94,14 +95,15 @@ func ResolveExternalOnlyWithTarget() Options {
 	return Preserve | NoDangling | IncludeTarget | ResolveExternal
 }
 
-// PreserveWithTarget returns the correct set of options to preserve all symlinks
-// and include the targets.
+// PreserveWithTarget returns the correct set of options to preserve all symlinks and include the targets.
+//
 // This implies that dangling links are not allowed.
 func PreserveWithTarget() Options {
 	return Preserve | NoDangling | IncludeTarget
 }
 
 // PreserveNoDangling returns the correct set of options to preserve all symlinks without targets.
+//
 // Targets need to be explicitly included.
 // Dangling links are not allowed.
 func PreserveNoDangling() Options {
@@ -109,6 +111,7 @@ func PreserveNoDangling() Options {
 }
 
 // PreserveAllowDangling returns the correct set of options to preserve all symlinks without targets.
+//
 // Targets need to be explicitly included.
 // Dangling links are allowed.
 func PreserveAllowDangling() Options {
