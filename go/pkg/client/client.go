@@ -764,7 +764,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			BytesLimit:           int(client.MaxBatchSize),
 			ItemsLimit:           int(client.MaxQueryBatchDigests),
-			BundleTimeout:        10*time.Millisecond, // Low value to fast track queries.
+			BundleTimeout:        10 * time.Millisecond, // Low value to fast track queries.
 			Timeout:              DefaultRPCTimeouts["FindMissingBlobs"],
 			RetryPolicy:          client.Retrier.Backoff,
 			RetryPredicate:       client.Retrier.ShouldRetry,
@@ -785,13 +785,13 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			RetryPredicate:       client.Retrier.ShouldRetry,
 		}
 		ioCfg := cas.IOConfig{
-			ConcurrentWalksLimit: int(client.casConcurrency),
-			OpenFilesLimit: cas.DefaultOpenFilesLimit,
-			OpenLargeFilesLimit: cas.DefaultOpenLargeFilesLimit,
-			SmallFileSizeThreshold: cas.DefaultSmallFileSizeThreshold,
-			LargeFileSizeThreshold: cas.DefaultLargeFileSizeThreshold,
+			ConcurrentWalksLimit:     int(client.casConcurrency),
+			OpenFilesLimit:           cas.DefaultOpenFilesLimit,
+			OpenLargeFilesLimit:      cas.DefaultOpenLargeFilesLimit,
+			SmallFileSizeThreshold:   cas.DefaultSmallFileSizeThreshold,
+			LargeFileSizeThreshold:   cas.DefaultLargeFileSizeThreshold,
 			CompressionSizeThreshold: int64(client.CompressedBytestreamThreshold),
-			BufferSize: int(client.ChunkMaxSize),
+			BufferSize:               int(client.ChunkMaxSize),
 		}
 		if client.CompressedBytestreamThreshold < 0 {
 			ioCfg.CompressionSizeThreshold = math.MaxInt64

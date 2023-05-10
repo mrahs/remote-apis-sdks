@@ -123,7 +123,7 @@ type uploaderv2 struct {
 	instanceName string
 
 	queryRpcCfg  GRPCConfig
-	batchRpcCfg GRPCConfig
+	batchRpcCfg  GRPCConfig
 	streamRpcCfg GRPCConfig
 
 	// gRPC throttling controls.
@@ -237,7 +237,7 @@ func newUploaderv2(
 		instanceName: instanceName,
 
 		queryRpcCfg:  queryCfg,
-		batchRpcCfg: uploadCfg,
+		batchRpcCfg:  uploadCfg,
 		streamRpcCfg: streamCfg,
 
 		querySem:  semaphore.NewWeighted(int64(queryCfg.ConcurrentCallsLimit)),

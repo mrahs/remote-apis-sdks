@@ -12,7 +12,6 @@ import (
 	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
-	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"

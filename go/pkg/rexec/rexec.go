@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/command"
+	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/outerr"
@@ -16,7 +17,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/prototext"
-	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 
 	rc "github.com/bazelbuild/remote-apis-sdks/go/pkg/client"
 	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"

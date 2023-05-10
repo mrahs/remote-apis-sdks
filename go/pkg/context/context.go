@@ -77,7 +77,7 @@ func ExtractMetadata(ctx context.Context) (m *Metadata, err error) {
 // context. This function should be called in every test method after a context is created. It uses
 // the already created context to generate a new one containing the metadata header.
 func WithMetadata(ctx context.Context, ms ...*Metadata) (context.Context, error) {
-	m  := MergeMetadata(ms...)
+	m := MergeMetadata(ms...)
 	actionID := m.ActionID
 	if actionID == "" {
 		actionID = uuid.New()
@@ -154,7 +154,7 @@ func FromContexts(ctxs ...context.Context) (context.Context, error) {
 
 	// We cap to a bit less than the maximum header size in order to allow
 	// for some proto fields serialization overhead.
-	m := capToLimit(MergeMetadata(metas...), defaultMaxHeaderSize - 100)
+	m := capToLimit(MergeMetadata(metas...), defaultMaxHeaderSize-100)
 	return WithMetadata(ctx, m)
 }
 

@@ -24,6 +24,7 @@ func (c *sliceCache) LoadAndDelete(key any) []any {
 	delete(c.store, key)
 	return s
 }
+
 // Append appends the specified value to the slice associated with the specified key.
 // If the key does not exist, a new empty slice is created and the value is appended to it.
 // Returns the length of the associated slice.

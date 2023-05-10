@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
+	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
 	"github.com/golang/glog"
 	"google.golang.org/protobuf/proto"
 )
@@ -55,7 +55,7 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 	pipeIn := make(chan missingBlobRequest)
 	out := u.missingBlobsPipe(pipeIn)
 	u.clientSenderWg.Add(1)
-	go func(){
+	go func() {
 		defer u.clientSenderWg.Done()
 		defer close(pipeIn)
 		for d := range in {
