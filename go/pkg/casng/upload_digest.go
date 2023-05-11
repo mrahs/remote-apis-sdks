@@ -21,6 +21,10 @@ import (
 
 // digestSymlink follows the target and/or constructs a symlink node.
 func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) (*repb.SymlinkNode, walker.SymlinkAction, error) {
+	if slo.Skip() {
+		return nil, walker.SkipSymlink, nil
+	}
+
 	// Replace symlink with target.
 	if slo.Resolve() {
 		return nil, walker.Replace, nil
