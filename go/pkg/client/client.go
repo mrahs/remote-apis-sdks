@@ -30,9 +30,12 @@ import (
 	"google.golang.org/grpc/status"
 
 	configpb "github.com/bazelbuild/remote-apis-sdks/go/pkg/balancer/proto"
+	regrpc "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
+	bsgrpc "google.golang.org/genproto/googleapis/bytestream"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
+	opgrpc "google.golang.org/genproto/googleapis/longrunning"
 	oppb "google.golang.org/genproto/googleapis/longrunning"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
@@ -111,14 +114,14 @@ func (ce *InitError) Error() string {
 type Client struct {
 	// InstanceName is the instance name for the targeted remote execution instance; e.g. for Google
 	// RBE: "projects/<foo>/instances/default_instance".
-	InstanceName  string
-	actionCache   repb.ActionCacheClient
-	byteStream    bspb.ByteStreamClient
-	cas           repb.ContentAddressableStorageClient
+	InstanceName string
+	actionCache  regrpc.ActionCacheClient
+	byteStream   bsgrpc.ByteStreamClient
+	cas          regrpc.ContentAddressableStorageClient
 	casImpl       CASImpl
 	casUploaderv2 *cas.BatchingUploader
-	execution     repb.ExecutionClient
-	operations    oppb.OperationsClient
+	execution    regrpc.ExecutionClient
+	operations   opgrpc.OperationsClient
 	// Retrier is the Retrier that is used for RPCs made by this client.
 	//
 	// These fields are logically "protected" and are intended for use by extensions of Client.
@@ -719,11 +722,11 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 	}
 	client := &Client{
 		InstanceName:                  instanceName,
-		actionCache:                   repb.NewActionCacheClient(casConn),
-		byteStream:                    bspb.NewByteStreamClient(casConn),
-		cas:                           repb.NewContentAddressableStorageClient(casConn),
-		execution:                     repb.NewExecutionClient(conn),
-		operations:                    oppb.NewOperationsClient(conn),
+		actionCache:                   regrpc.NewActionCacheClient(casConn),
+		byteStream:                    bsgrpc.NewByteStreamClient(casConn),
+		cas:                           regrpc.NewContentAddressableStorageClient(casConn),
+		execution:                     regrpc.NewExecutionClient(conn),
+		operations:                    opgrpc.NewOperationsClient(conn),
 		rpcTimeouts:                   DefaultRPCTimeouts,
 		Connection:                    conn,
 		CASConnection:                 casConn,
@@ -943,7 +946,7 @@ func (c *Client) UpdateActionResult(ctx context.Context, req *repb.UpdateActionR
 // The wrapper is here for completeness to provide access to the low-level
 // RPCs. Prefer using higher-level functions such as ReadBlob(ToFile) instead,
 // as they include retries/timeouts handling.
-func (c *Client) Read(ctx context.Context, req *bspb.ReadRequest) (res bspb.ByteStream_ReadClient, err error) {
+func (c *Client) Read(ctx context.Context, req *bspb.ReadRequest) (res bsgrpc.ByteStream_ReadClient, err error) {
 	return c.byteStream.Read(ctx, req, c.RPCOpts()...)
 }
 
@@ -951,7 +954,7 @@ func (c *Client) Read(ctx context.Context, req *bspb.ReadRequest) (res bspb.Byte
 // The wrapper is here for completeness to provide access to the low-level
 // RPCs. Prefer using higher-level functions such as WriteBlob(s) instead,
 // as they include retries/timeouts handling.
-func (c *Client) Write(ctx context.Context) (res bspb.ByteStream_WriteClient, err error) {
+func (c *Client) Write(ctx context.Context) (res bsgrpc.ByteStream_WriteClient, err error) {
 	return c.byteStream.Write(ctx, c.RPCOpts()...)
 }
 
@@ -1023,7 +1026,7 @@ func (c *Client) BatchReadBlobs(ctx context.Context, req *repb.BatchReadBlobsReq
 // The wrapper is here for completeness to provide access to the low-level
 // RPCs. Prefer using higher-level GetDirectoryTree instead,
 // as it includes retries/timeouts handling.
-func (c *Client) GetTree(ctx context.Context, req *repb.GetTreeRequest) (res repb.ContentAddressableStorage_GetTreeClient, err error) {
+func (c *Client) GetTree(ctx context.Context, req *repb.GetTreeRequest) (res regrpc.ContentAddressableStorage_GetTreeClient, err error) {
 	return c.cas.GetTree(ctx, req, c.RPCOpts()...)
 }
 
@@ -1031,7 +1034,7 @@ func (c *Client) GetTree(ctx context.Context, req *repb.GetTreeRequest) (res rep
 // The wrapper is here for completeness to provide access to the low-level
 // RPCs. Prefer using higher-level ExecuteAndWait instead,
 // as it includes retries/timeouts handling.
-func (c *Client) Execute(ctx context.Context, req *repb.ExecuteRequest) (res repb.Execution_ExecuteClient, err error) {
+func (c *Client) Execute(ctx context.Context, req *repb.ExecuteRequest) (res regrpc.Execution_ExecuteClient, err error) {
 	return c.execution.Execute(ctx, req, c.RPCOpts()...)
 }
 
@@ -1039,7 +1042,7 @@ func (c *Client) Execute(ctx context.Context, req *repb.ExecuteRequest) (res rep
 // The wrapper is here for completeness to provide access to the low-level
 // RPCs. Prefer using higher-level ExecuteAndWait instead,
 // as it includes retries/timeouts handling.
-func (c *Client) WaitExecution(ctx context.Context, req *repb.WaitExecutionRequest) (res repb.Execution_ExecuteClient, err error) {
+func (c *Client) WaitExecution(ctx context.Context, req *repb.WaitExecutionRequest) (res regrpc.Execution_ExecuteClient, err error) {
 	return c.execution.WaitExecution(ctx, req, c.RPCOpts()...)
 }
 
@@ -1049,7 +1052,7 @@ func (c *Client) GetBackendCapabilities(ctx context.Context, conn *grpc.ClientCo
 	opts := c.RPCOpts()
 	err = c.Retrier.Do(ctx, func() (e error) {
 		return c.CallWithTimeout(ctx, "GetCapabilities", func(ctx context.Context) (e error) {
-			res, e = repb.NewCapabilitiesClient(conn).GetCapabilities(ctx, req, opts...)
+			res, e = regrpc.NewCapabilitiesClient(conn).GetCapabilities(ctx, req, opts...)
 			return e
 		})
 	})
