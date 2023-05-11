@@ -25,7 +25,7 @@
 //   the dispatcher closes the batcher's channel which terminates.
 //   the dispatcher closes the streamer's channel which terminates.
 
-package cas
+package casng
 
 import (
 	"bytes"
@@ -37,7 +37,7 @@ import (
 	"sync"
 	"time"
 
-	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
@@ -754,7 +754,7 @@ func (u *uploaderv2) batcher() {
 			item.req = r
 			bundle[b.digest] = item
 			bundleSize += rSize
-			ctx, _ = cctx.FromContexts(ctx, b.ctx) // ignore non-essential error.
+			ctx, _ = contextmd.FromContexts(ctx, b.ctx) // ignore non-essential error.
 
 			// If the bundle is full, cycle it.
 			if len(bundle) >= u.batchRpcCfg.ItemsLimit {

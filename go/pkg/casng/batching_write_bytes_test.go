@@ -1,4 +1,4 @@
-package cas_test
+package casng_test
 
 import (
 	"bytes"
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	"github.com/google/go-cmp/cmp"
@@ -29,7 +29,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 		offset      int64
 		finish      bool
 		wantErr     error
-		wantStats   cas.Stats
+		wantStats   casng.Stats
 		retryPolicy *retry.BackoffPolicy
 	}{
 		{
@@ -50,7 +50,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:       []byte("abs"),
 			wantErr: nil,
-			wantStats: cas.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  3,
 				TotalBytesMoved:      3,
@@ -76,7 +76,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:       []byte(strings.Repeat("abcdefg", 500)),
 			wantErr: nil,
-			wantStats: cas.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:       3500,
 				EffectiveBytesMoved:  29,
 				TotalBytesMoved:      29,
@@ -95,7 +95,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:         []byte("abc"),
 			wantErr:   errWrite,
-			wantStats: cas.Stats{},
+			wantStats: casng.Stats{},
 		},
 		{
 			name: "cache_hit",
@@ -113,7 +113,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:       []byte("abc"),
 			wantErr: nil,
-			wantStats: cas.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  2, // matches buffer size
 				TotalBytesMoved:      2,
@@ -139,8 +139,8 @@ func TestUpload_WriteBytes(t *testing.T) {
 				},
 			},
 			b:       []byte("abc"),
-			wantErr: cas.ErrGRPC,
-			wantStats: cas.Stats{
+			wantErr: casng.ErrGRPC,
+			wantStats: casng.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  2, // matches buffer size
 				TotalBytesMoved:      2,
@@ -165,8 +165,8 @@ func TestUpload_WriteBytes(t *testing.T) {
 				},
 			},
 			b:       []byte("abc"),
-			wantErr: cas.ErrGRPC,
-			wantStats: cas.Stats{
+			wantErr: casng.ErrGRPC,
+			wantStats: casng.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  2, // matches one buffer size
 				TotalBytesMoved:      4, // matches two buffer sizes
@@ -192,8 +192,8 @@ func TestUpload_WriteBytes(t *testing.T) {
 				},
 			},
 			b:       []byte("abc"),
-			wantErr: cas.ErrGRPC,
-			wantStats: cas.Stats{
+			wantErr: casng.ErrGRPC,
+			wantStats: casng.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  3,
 				TotalBytesMoved:      3,
@@ -222,7 +222,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:      []byte("abc"),
 			offset: 5,
-			wantStats: cas.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  3,
 				TotalBytesMoved:      3,
@@ -251,7 +251,7 @@ func TestUpload_WriteBytes(t *testing.T) {
 			},
 			b:      []byte("abc"),
 			finish: true,
-			wantStats: cas.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:       3,
 				EffectiveBytesMoved:  3,
 				TotalBytesMoved:      3,
@@ -271,11 +271,11 @@ func TestUpload_WriteBytes(t *testing.T) {
 			if test.retryPolicy != nil {
 				testRpcCfg.RetryPolicy = *test.retryPolicy
 			}
-			u, err := cas.NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", testRpcCfg, testRpcCfg, testRpcCfg, defaultIoCfg)
+			u, err := casng.NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", testRpcCfg, testRpcCfg, testRpcCfg, defaultIoCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
-			var stats cas.Stats
+			var stats casng.Stats
 			if test.finish {
 				stats, err = u.WriteBytes(context.Background(), "", bytes.NewReader(test.b), int64(len(test.b)), test.offset)
 			} else {

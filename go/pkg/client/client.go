@@ -16,7 +16,7 @@ import (
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/actas"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/balancer"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/chunker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
@@ -115,14 +115,14 @@ func (ce *InitError) Error() string {
 type Client struct {
 	// InstanceName is the instance name for the targeted remote execution instance; e.g. for Google
 	// RBE: "projects/<foo>/instances/default_instance".
-	InstanceName string
-	actionCache  regrpc.ActionCacheClient
-	byteStream   bsgrpc.ByteStreamClient
-	cas          regrpc.ContentAddressableStorageClient
+	InstanceName  string
+	actionCache   regrpc.ActionCacheClient
+	byteStream    bsgrpc.ByteStreamClient
+	cas           regrpc.ContentAddressableStorageClient
 	casImpl       CASImpl
-	casUploaderv2 *cas.BatchingUploader
-	execution    regrpc.ExecutionClient
-	operations   opgrpc.OperationsClient
+	casUploaderv2 *casng.BatchingUploader
+	execution     regrpc.ExecutionClient
+	operations    opgrpc.OperationsClient
 	// Retrier is the Retrier that is used for RPCs made by this client.
 	//
 	// These fields are logically "protected" and are intended for use by extensions of Client.
@@ -764,7 +764,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 		return nil, fmt.Errorf("CASConcurrency should be at least 1")
 	}
 	if client.casImpl == CASv2 {
-		queryCfg := cas.GRPCConfig{
+		queryCfg := casng.GRPCConfig{
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			BytesLimit:           int(client.MaxBatchSize),
 			ItemsLimit:           int(client.MaxQueryBatchDigests),
@@ -773,7 +773,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			RetryPolicy:          client.Retrier.Backoff,
 			RetryPredicate:       client.Retrier.ShouldRetry,
 		}
-		batchCfg := cas.GRPCConfig{
+		batchCfg := casng.GRPCConfig{
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			BytesLimit:           int(client.MaxBatchSize),
 			ItemsLimit:           int(client.UnifiedUploadBufferSize),
@@ -782,18 +782,18 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			RetryPolicy:          client.Retrier.Backoff,
 			RetryPredicate:       client.Retrier.ShouldRetry,
 		}
-		streamCfg := cas.GRPCConfig{
+		streamCfg := casng.GRPCConfig{
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			Timeout:              DefaultRPCTimeouts["default"],
 			RetryPolicy:          client.Retrier.Backoff,
 			RetryPredicate:       client.Retrier.ShouldRetry,
 		}
-		ioCfg := cas.IOConfig{
+		ioCfg := casng.IOConfig{
 			ConcurrentWalksLimit:     int(client.casConcurrency),
-			OpenFilesLimit:           cas.DefaultOpenFilesLimit,
-			OpenLargeFilesLimit:      cas.DefaultOpenLargeFilesLimit,
-			SmallFileSizeThreshold:   cas.DefaultSmallFileSizeThreshold,
-			LargeFileSizeThreshold:   cas.DefaultLargeFileSizeThreshold,
+			OpenFilesLimit:           casng.DefaultOpenFilesLimit,
+			OpenLargeFilesLimit:      casng.DefaultOpenLargeFilesLimit,
+			SmallFileSizeThreshold:   casng.DefaultSmallFileSizeThreshold,
+			LargeFileSizeThreshold:   casng.DefaultLargeFileSizeThreshold,
 			CompressionSizeThreshold: int64(client.CompressedBytestreamThreshold),
 			BufferSize:               int(client.ChunkMaxSize),
 		}
@@ -801,7 +801,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			ioCfg.CompressionSizeThreshold = math.MaxInt64
 		}
 		var err error
-		client.casUploaderv2, err = cas.NewBatchingUploader(ctx, client.cas, client.byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
+		client.casUploaderv2, err = casng.NewBatchingUploader(ctx, client.cas, client.byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
 		if err != nil {
 			return nil, fmt.Errorf("error initializing CASv2: %w", err)
 		}

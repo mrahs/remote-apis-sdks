@@ -1,10 +1,10 @@
-package cas_test
+package casng_test
 
 import (
 	"context"
 	"testing"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"google.golang.org/grpc"
@@ -16,7 +16,7 @@ func TestMissingBlobs_StreamingAbort(t *testing.T) {
 	}}
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	ctxCancel()
-	u, err := cas.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
+	u, err := casng.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestMissingBlobs_Streaming(t *testing.T) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
 	ctx, ctxCancel := context.WithCancel(context.Background())
-	u, err := cas.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
+	u, err := casng.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}

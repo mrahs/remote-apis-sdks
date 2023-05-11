@@ -1,10 +1,10 @@
-package cas
+package casng
 
 import (
 	"context"
 	"time"
 
-	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -205,7 +205,7 @@ func (u *uploaderv2) queryProcessor() {
 			// Duplicate tags are allowed to ensure the requester can match the number of responses to the number of requests.
 			bundle[req.digest] = append(bundle[req.digest], req.tag)
 			bundleSize += dSize
-			ctx, _ = cctx.FromContexts(ctx, req.ctx) // ignore non-essential error.
+			ctx, _ = contextmd.FromContexts(ctx, req.ctx) // ignore non-essential error.
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRpcCfg.ItemsLimit {

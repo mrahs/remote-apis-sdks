@@ -1,5 +1,5 @@
 // Using a different package name to strictly exclude types defined here from the original package.
-package cas_test
+package casng_test
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -21,7 +21,7 @@ var (
 	retryNever    = retry.Immediately(retry.Attempts(1))
 	retryTwice    = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
 	retryAll      = func(error) bool { return true }
-	defaultRpcCfg = cas.GRPCConfig{
+	defaultRpcCfg = casng.GRPCConfig{
 		ConcurrentCallsLimit: 5,
 		ItemsLimit:           2,
 		BytesLimit:           1024,
@@ -30,7 +30,7 @@ var (
 		RetryPolicy:          retryNever,
 		RetryPredicate:       retryAll,
 	}
-	defaultIoCfg = cas.IOConfig{
+	defaultIoCfg = casng.IOConfig{
 		ConcurrentWalksLimit:     1,
 		OpenFilesLimit:           1,
 		OpenLargeFilesLimit:      1,

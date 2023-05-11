@@ -19,6 +19,7 @@ go_library(
         "//go/pkg/actas",
         "//go/pkg/balancer",
         "//go/pkg/balancer/proto",
+        "//go/pkg/casng",
         "//go/pkg/chunker",
         "//go/pkg/command",
         "//go/pkg/contextmd",
@@ -69,7 +70,6 @@ go_test(
     deps = [
         "//go/pkg/chunker",
         "//go/pkg/command",
-        "//go/pkg/context",
         "//go/pkg/digest",
         "//go/pkg/fakes",
         "//go/pkg/filemetadata",

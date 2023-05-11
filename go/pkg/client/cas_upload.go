@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/chunker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
@@ -624,9 +624,9 @@ func updateAndNotify(st *uploadState, bytesMoved int64, err error, missing bool)
 }
 
 func (c *Client) uploadv2(ctx context.Context, entries []*uploadinfo.Entry) ([]digest.Digest, int64, error) {
-	reqs := make([]cas.UploadRequest, len(entries))
+	reqs := make([]casng.UploadRequest, len(entries))
 	for i, entry := range entries {
-		r := cas.UploadRequest{}
+		r := casng.UploadRequest{}
 		if entry.Path == "" {
 			r.Bytes = entry.Contents
 		} else if abs, err := impath.Abs(entry.Path); err != nil {

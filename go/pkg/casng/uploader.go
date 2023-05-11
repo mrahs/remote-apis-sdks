@@ -50,7 +50,7 @@
 //	Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
 //	Level 2 is used for internal functions that may be called per request.
 //	Level 3 is used for messages that contain large objects.
-package cas
+package casng
 
 import (
 	"context"
@@ -71,12 +71,6 @@ import (
 )
 
 var (
-	// ErrNegativeLimit indicates an invalid value that is < 0.
-	ErrNegativeLimit = errors.New("limit value must be >= 0")
-
-	// ErrZeroOrNegativeLimit indicates an invalid value that is <= 0.
-	ErrZeroOrNegativeLimit = errors.New("limit value must be > 0")
-
 	// ErrNilClient indicates an invalid nil argument.
 	ErrNilClient = errors.New("client cannot be nil")
 

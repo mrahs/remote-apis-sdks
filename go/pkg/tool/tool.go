@@ -18,7 +18,7 @@ import (
 	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 
-	cas "github.com/bazelbuild/remote-apis-sdks/go/pkg/casuploader"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
 	rc "github.com/bazelbuild/remote-apis-sdks/go/pkg/client"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/command"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"

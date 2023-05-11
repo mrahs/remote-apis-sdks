@@ -1,5 +1,5 @@
 // Using a different package name to strictly exclude types defined here from the original package.
-package cas_test
+package casng_test
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -79,7 +79,7 @@ func TestQuery_Batching(t *testing.T) {
 			t.Parallel()
 			log.Infof("test: %s", test.name)
 			ctx, ctxCancel := context.WithCancel(context.Background())
-			u, err := cas.NewBatchingUploader(ctx, test.cas, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
+			u, err := casng.NewBatchingUploader(ctx, test.cas, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}

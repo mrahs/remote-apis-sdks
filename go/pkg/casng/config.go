@@ -1,10 +1,19 @@
-package cas
+package casng
 
 import (
+	"errors"
 	"math"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
+)
+
+var (
+	// ErrNegativeLimit indicates an invalid value that is < 0.
+	ErrNegativeLimit = errors.New("limit value must be >= 0")
+
+	// ErrZeroOrNegativeLimit indicates an invalid value that is <= 0.
+	ErrZeroOrNegativeLimit = errors.New("limit value must be > 0")
 )
 
 const (
@@ -49,7 +58,6 @@ const (
 )
 
 // GRPCConfig specifies the configuration for a gRPC endpoint.
-// TODO: bundling is not a grpc config.
 type GRPCConfig struct {
 	// ConcurrentCallsLimit sets the upper bound of concurrent calls.
 	// Must be > 0.
