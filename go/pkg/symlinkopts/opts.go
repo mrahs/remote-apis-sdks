@@ -6,17 +6,14 @@ import (
 	"strings"
 )
 
-// Options represents a set of options for handling symlinks.
-// To ensure a valid set of options, use one of the functions provided in this package.
-type Options uint32
-
-const (
-	Preserve Options = 1 << (32 - 1 - iota)
-	NoDangling
-	IncludeTarget
-	Resolve
-	ResolveExternal
-)
+// Options represents a set of options for handling symlinks. The zero value is equivalent to skipping all symlinks.
+type Options struct {
+	preserve        bool
+	noDangling      bool
+	includeTarget   bool
+	resolve         bool
+	resolveExternal bool
+}
 
 // String returns a string representation of the options.
 //
@@ -29,19 +26,19 @@ const (
 //	E for Replace External
 func (o Options) String() string {
 	var b strings.Builder
-	if o.Preserve() {
+	if o.preserve {
 		fmt.Fprint(&b, "P")
 	}
-	if o.NoDangling() {
+	if o.noDangling {
 		fmt.Fprint(&b, "N")
 	}
-	if o.IncludeTarget() {
+	if o.includeTarget {
 		fmt.Fprint(&b, "I")
 	}
-	if o.Resolve() {
+	if o.resolve {
 		fmt.Fprint(&b, "R")
 	}
-	if o.ResolveExternal() {
+	if o.resolveExternal {
 		fmt.Fprint(&b, "E")
 	}
 	return b.String()
@@ -49,57 +46,81 @@ func (o Options) String() string {
 
 // Preserve returns true if the options include the corresponding property.
 func (o Options) Preserve() bool {
-	return o&Preserve == Preserve
+	return o.preserve
 }
 
-// NoDangling returns true if the options includes the corresponding property.
+// NoDangling returns true if the options include the corresponding property.
 func (o Options) NoDangling() bool {
-	return o&NoDangling == NoDangling
+	return o.noDangling
 }
 
-// IncludeTarget returns true if the options includes the corresponding property.
+// IncludeTarget returns true if the options include the corresponding property.
 func (o Options) IncludeTarget() bool {
-	return o&IncludeTarget == IncludeTarget
+	return o.includeTarget
 }
 
-// Resolve returns true if the options includes the corresponding property.
+// Resolve returns true if the options include the corresponding property.
 func (o Options) Resolve() bool {
-	return o&Resolve == Resolve
+	return o.resolve
 }
 
-// ResolveExternal returns true if the options includes the corresponding property.
+// ResolveExternal returns true if the options include the corresponding property.
 func (o Options) ResolveExternal() bool {
-	return o&ResolveExternal == ResolveExternal
+	return o.resolveExternal
+}
+
+// Skip returns true if the options indicate that symlinks should be skipped.
+func (o Options) Skip() bool {
+	return !o.preserve && !o.noDangling && !o.includeTarget && !o.resolve && !o.resolveExternal
 }
 
 // ResolveAlways return the correct set of options to always resolve symlinks.
 //
 // This implies that symlinks are followed and no dangling symlinks are allowed.
-// Each target will have the path of the symlink.
+// Every symlink will be replaced by its target. For example, if foo/bar was a symlink
+// to the regular file baz, then foo/bar will become a regular file with the content of baz.
 func ResolveAlways() Options {
-	return NoDangling | IncludeTarget | Resolve | ResolveExternal
+	return Options{
+		resolve:         true,
+		resolveExternal: true,
+		includeTarget:   true,
+		noDangling:      true,
+	}
 }
 
 // ResolveExternalOnly returns the correct set of options to only resolve symlinks
-// if the target is outside the execution root. Otherwise, the symlink is preserved.
+// if the target is outside the root directory. Otherwise, the symlink is preserved.
 //
 // This implies that all symlinks are followed, therefore, no dangling links are allowed.
-// Otherwise, it's not possible to guarantee that all required files are under the execution root.
+// Otherwise, it's not possible to guarantee that all required files are under the root.
 // Targets of non-external symlinks are not included.
 func ResolveExternalOnly() Options {
-	return Preserve | NoDangling | ResolveExternal
+	return Options{
+		preserve:        true,
+		resolveExternal: true,
+		noDangling:      true,
+	}
 }
 
 // ResolveExternalOnlyWithTarget is like ResolveExternalOnly but targets of non-external symlinks are included.
 func ResolveExternalOnlyWithTarget() Options {
-	return Preserve | NoDangling | IncludeTarget | ResolveExternal
+	return Options{
+		preserve:        true,
+		resolveExternal: true,
+		includeTarget:   true,
+		noDangling:      true,
+	}
 }
 
 // PreserveWithTarget returns the correct set of options to preserve all symlinks and include the targets.
 //
 // This implies that dangling links are not allowed.
 func PreserveWithTarget() Options {
-	return Preserve | NoDangling | IncludeTarget
+	return Options{
+		preserve:      true,
+		includeTarget: true,
+		noDangling:    true,
+	}
 }
 
 // PreserveNoDangling returns the correct set of options to preserve all symlinks without targets.
@@ -107,7 +128,10 @@ func PreserveWithTarget() Options {
 // Targets need to be explicitly included.
 // Dangling links are not allowed.
 func PreserveNoDangling() Options {
-	return Preserve | NoDangling
+	return Options{
+		preserve:   true,
+		noDangling: true,
+	}
 }
 
 // PreserveAllowDangling returns the correct set of options to preserve all symlinks without targets.
@@ -115,5 +139,10 @@ func PreserveNoDangling() Options {
 // Targets need to be explicitly included.
 // Dangling links are allowed.
 func PreserveAllowDangling() Options {
-	return Preserve
+	return Options{preserve: true}
+}
+
+// Skip is the zero value for Options which is equivalent to skipping all symlinks (as if they did not exist).
+func Skip() Options {
+	return Options{}
 }
