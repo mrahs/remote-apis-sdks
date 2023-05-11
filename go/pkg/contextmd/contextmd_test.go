@@ -1,10 +1,4 @@
-<<<<<<<< HEAD:go/pkg/context/context_test.go
-package context
-|||||||| b2957eb:go/pkg/client/cas_internal_test.go
-package client
-========
 package contextmd
->>>>>>>> master:go/pkg/contextmd/contextmd_test.go
 
 import (
 	"testing"

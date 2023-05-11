@@ -28,7 +28,6 @@ go_test(
     srcs = ["rexec_test.go"],
     deps = [
         "//go/pkg/command",
-        "//go/pkg/context",
         "//go/pkg/digest",
         "//go/pkg/fakes",
         "//go/pkg/outerr",
