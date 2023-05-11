@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	// Redundant imports are required for the google3 mirror. Aliases should not be changed.
 	"github.com/pkg/errors"
 	"golang.org/x/sync/semaphore"
 	bsgrpc "google.golang.org/genproto/googleapis/bytestream"

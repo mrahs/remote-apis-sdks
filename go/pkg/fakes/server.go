@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	// Redundant imports are required for the google3 mirror. Aliases should not be changed.
 	rc "github.com/bazelbuild/remote-apis-sdks/go/pkg/client"
 	regrpc "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"

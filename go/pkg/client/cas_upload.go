@@ -9,7 +9,7 @@ import (
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/cas"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/chunker"
-	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
@@ -39,7 +39,7 @@ func (c *Client) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]d
 			}
 			defer c.casUploaders.Release(1)
 			if i%logInterval == 0 {
-				cctx.Infof(ctx, log.Level(3), "%d missing batches left to query", len(batches)-i)
+				contextmd.Infof(ctx, log.Level(3), "%d missing batches left to query", len(batches)-i)
 			}
 			var batchPb []*repb.Digest
 			for _, dg := range batch {
@@ -64,9 +64,9 @@ func (c *Client) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]d
 			return nil
 		})
 	}
-	cctx.Infof(ctx, log.Level(3), "Waiting for remaining query jobs")
+	contextmd.Infof(ctx, log.Level(3), "Waiting for remaining query jobs")
 	err := eg.Wait()
-	cctx.Infof(ctx, log.Level(3), "Done")
+	contextmd.Infof(ctx, log.Level(3), "Done")
 	return missing, err
 }
 
@@ -105,7 +105,7 @@ func (c *Client) WriteBlob(ctx context.Context, blob []byte) (digest.Digest, err
 	ue := uploadinfo.EntryFromBlob(blob)
 	dg := ue.Digest
 	if dg.IsEmpty() {
-		cctx.Infof(ctx, log.Level(2), "Skipping upload of empty blob %s", dg)
+		contextmd.Infof(ctx, log.Level(2), "Skipping upload of empty blob %s", dg)
 		return dg, nil
 	}
 	ch, err := chunker.New(ue, c.shouldCompressEntry(ue), int(c.ChunkMaxSize))
@@ -225,7 +225,7 @@ func (c *Client) writeRscName(ue *uploadinfo.Entry) string {
 
 type uploadRequest struct {
 	ue     *uploadinfo.Entry
-	meta   *cctx.Metadata
+	meta   *contextmd.Metadata
 	wait   chan<- *uploadResponse
 	cancel bool
 }
@@ -252,12 +252,12 @@ type uploadState struct {
 }
 
 func (c *Client) uploadUnified(ctx context.Context, entries ...*uploadinfo.Entry) ([]digest.Digest, int64, error) {
-	cctx.Infof(ctx, log.Level(2), "Request to upload %d blobs", len(entries))
+	contextmd.Infof(ctx, log.Level(2), "Request to upload %d blobs", len(entries))
 
 	if len(entries) == 0 {
 		return nil, 0, nil
 	}
-	meta, err := cctx.ExtractMetadata(ctx)
+	meta, err := contextmd.ExtractMetadata(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -284,7 +284,7 @@ func (c *Client) uploadUnified(ctx context.Context, entries ...*uploadinfo.Entry
 			continue
 		}
 		if ue.Digest.IsEmpty() {
-			cctx.Infof(ctx, log.Level(2), "Skipping upload of empty entry %s", ue.Digest)
+			contextmd.Infof(ctx, log.Level(2), "Skipping upload of empty entry %s", ue.Digest)
 			continue
 		}
 		req := &uploadRequest{
@@ -295,7 +295,7 @@ func (c *Client) uploadUnified(ctx context.Context, entries ...*uploadinfo.Entry
 		reqs = append(reqs, req)
 		select {
 		case <-ctx.Done():
-			cctx.Infof(ctx, log.Level(2), "Upload canceled")
+			contextmd.Infof(ctx, log.Level(2), "Upload canceled")
 			c.cancelPendingRequests(reqs)
 			return nil, 0, fmt.Errorf("context cancelled: %w", ctx.Err())
 		case c.casUploadRequests <- req:
@@ -386,7 +386,7 @@ func (c *Client) upload(reqs []*uploadRequest) {
 	// Collect new uploads.
 	newStates := make(map[digest.Digest]*uploadState)
 	var newUploads []digest.Digest
-	var metas []*cctx.Metadata
+	var metas []*contextmd.Metadata
 	log.V(2).Infof("Upload is processing %d requests", len(reqs))
 	for _, req := range reqs {
 		dg := req.ue.Digest
@@ -411,11 +411,11 @@ func (c *Client) upload(reqs []*uploadRequest) {
 		}
 	}
 
-	unifiedMeta := cctx.MergeMetadata(metas...)
+	unifiedMeta := contextmd.MergeMetadata(metas...)
 	var err error
 	ctx := context.Background()
 	if unifiedMeta.ActionID != "" {
-		ctx, err = cctx.WithMetadata(context.Background(), unifiedMeta)
+		ctx, err = contextmd.WithMetadata(context.Background(), unifiedMeta)
 	}
 	if err != nil {
 		for _, st := range newStates {
@@ -424,14 +424,14 @@ func (c *Client) upload(reqs []*uploadRequest) {
 		return
 	}
 
-	cctx.Infof(ctx, log.Level(2), "%d new items to store", len(newUploads))
+	contextmd.Infof(ctx, log.Level(2), "%d new items to store", len(newUploads))
 	var batches [][]digest.Digest
 	if c.useBatchOps {
 		batches = c.makeBatches(ctx, newUploads, true)
 	} else {
-		cctx.Infof(ctx, log.Level(2), "Uploading them individually")
+		contextmd.Infof(ctx, log.Level(2), "Uploading them individually")
 		for i := range newUploads {
-			cctx.Infof(ctx, log.Level(3), "Creating single batch of blob %s", newUploads[i])
+			contextmd.Infof(ctx, log.Level(3), "Creating single batch of blob %s", newUploads[i])
 			batches = append(batches, newUploads[i:i+1])
 		}
 	}
@@ -443,10 +443,10 @@ func (c *Client) upload(reqs []*uploadRequest) {
 				defer c.casUploaders.Release(1)
 			}
 			if i%logInterval == 0 {
-				cctx.Infof(ctx, log.Level(2), "%d batches left to store", len(batches)-i)
+				contextmd.Infof(ctx, log.Level(2), "%d batches left to store", len(batches)-i)
 			}
 			if len(batch) > 1 {
-				cctx.Infof(ctx, log.Level(3), "Uploading batch of %d blobs", len(batch))
+				contextmd.Infof(ctx, log.Level(3), "Uploading batch of %d blobs", len(batch))
 				bchMap := make(map[digest.Digest][]byte)
 				totalBytesMap := make(map[digest.Digest]int64)
 				for _, dg := range batch {
@@ -469,7 +469,7 @@ func (c *Client) upload(reqs []*uploadRequest) {
 					updateAndNotify(newStates[dg], totalBytesMap[dg], err, true)
 				}
 			} else {
-				cctx.Infof(ctx, log.Level(3), "Uploading single blob with digest %s", batch[0])
+				contextmd.Infof(ctx, log.Level(3), "Uploading single blob with digest %s", batch[0])
 				st := newStates[batch[0]]
 				st.mu.Lock()
 				if len(st.clients) == 0 { // Already cancelled.
@@ -500,7 +500,7 @@ func (c *Client) uploadNonUnified(ctx context.Context, data ...*uploadinfo.Entry
 	for _, ue := range data {
 		dg := ue.Digest
 		if dg.IsEmpty() {
-			cctx.Infof(ctx, log.Level(2), "Skipping upload of empty blob %s", dg)
+			contextmd.Infof(ctx, log.Level(2), "Skipping upload of empty blob %s", dg)
 			continue
 		}
 		if _, ok := ueList[dg]; !ok {
@@ -513,14 +513,14 @@ func (c *Client) uploadNonUnified(ctx context.Context, data ...*uploadinfo.Entry
 	if err != nil {
 		return nil, 0, err
 	}
-	cctx.Infof(ctx, log.Level(2), "%d items to store", len(missing))
+	contextmd.Infof(ctx, log.Level(2), "%d items to store", len(missing))
 	var batches [][]digest.Digest
 	if c.useBatchOps {
 		batches = c.makeBatches(ctx, missing, true)
 	} else {
-		cctx.Infof(ctx, log.Level(2), "Uploading them individually")
+		contextmd.Infof(ctx, log.Level(2), "Uploading them individually")
 		for i := range missing {
-			cctx.Infof(ctx, log.Level(3), "Creating single batch of blob %s", missing[i])
+			contextmd.Infof(ctx, log.Level(3), "Creating single batch of blob %s", missing[i])
 			batches = append(batches, missing[i:i+1])
 		}
 	}
@@ -536,10 +536,10 @@ func (c *Client) uploadNonUnified(ctx context.Context, data ...*uploadinfo.Entry
 			}
 			defer c.casUploaders.Release(1)
 			if i%logInterval == 0 {
-				cctx.Infof(ctx, log.Level(2), "%d batches left to store", len(batches)-i)
+				contextmd.Infof(ctx, log.Level(2), "%d batches left to store", len(batches)-i)
 			}
 			if len(batch) > 1 {
-				cctx.Infof(ctx, log.Level(3), "Uploading batch of %d blobs", len(batch))
+				contextmd.Infof(ctx, log.Level(3), "Uploading batch of %d blobs", len(batch))
 				bchMap := make(map[digest.Digest][]byte)
 				for _, dg := range batch {
 					ue := ueList[dg]
@@ -564,7 +564,7 @@ func (c *Client) uploadNonUnified(ctx context.Context, data ...*uploadinfo.Entry
 					return err
 				}
 			} else {
-				cctx.Infof(ctx, log.Level(3), "Uploading single blob with digest %s", batch[0])
+				contextmd.Infof(ctx, log.Level(3), "Uploading single blob with digest %s", batch[0])
 				ue := ueList[batch[0]]
 				ch, err := chunker.New(ue, c.shouldCompressEntry(ue), int(c.ChunkMaxSize))
 				if err != nil {
@@ -583,11 +583,11 @@ func (c *Client) uploadNonUnified(ctx context.Context, data ...*uploadinfo.Entry
 		})
 	}
 
-	cctx.Infof(ctx, log.Level(2), "Waiting for remaining jobs")
+	contextmd.Infof(ctx, log.Level(2), "Waiting for remaining jobs")
 	err = eg.Wait()
-	cctx.Infof(ctx, log.Level(2), "Done")
+	contextmd.Infof(ctx, log.Level(2), "Done")
 	if err != nil {
-		cctx.Infof(ctx, log.Level(2), "Upload error: %v", err)
+		contextmd.Infof(ctx, log.Level(2), "Upload error: %v", err)
 	}
 
 	return missing, totalBytesTransferred, err

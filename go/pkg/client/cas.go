@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	cctx "github.com/bazelbuild/remote-apis-sdks/go/pkg/context"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -77,7 +77,7 @@ func (c *Client) shouldCompressEntry(ue *uploadinfo.Entry) bool {
 // operations.
 func (c *Client) makeBatches(ctx context.Context, dgs []digest.Digest, optimizeSize bool) [][]digest.Digest {
 	var batches [][]digest.Digest
-	cctx.Infof(ctx, log.Level(2), "Batching %d digests", len(dgs))
+	contextmd.Infof(ctx, log.Level(2), "Batching %d digests", len(dgs))
 	if optimizeSize {
 		sort.Slice(dgs, func(i, j int) bool {
 			return dgs[i].Size < dgs[j].Size
@@ -106,10 +106,10 @@ func (c *Client) makeBatches(ctx context.Context, dgs []digest.Digest, optimizeS
 				nextSize = marshalledRequestSize(dgs[0])
 			}
 		}
-		cctx.Infof(ctx, log.Level(3), "Created batch of %d blobs with total size %d", len(batch), sz)
+		contextmd.Infof(ctx, log.Level(3), "Created batch of %d blobs with total size %d", len(batch), sz)
 		batches = append(batches, batch)
 	}
-	cctx.Infof(ctx, log.Level(2), "%d batches created", len(batches))
+	contextmd.Infof(ctx, log.Level(2), "%d batches created", len(batches))
 	return batches
 }
 
@@ -125,7 +125,7 @@ func (c *Client) makeQueryBatches(ctx context.Context, digests []digest.Digest) 
 			batch = append(batch, digests[i])
 		}
 		digests = digests[batchSize:]
-		cctx.Infof(ctx, log.Level(3), "Created query batch of %d blobs", len(batch))
+		contextmd.Infof(ctx, log.Level(3), "Created query batch of %d blobs", len(batch))
 		batches = append(batches, batch)
 	}
 	return batches
