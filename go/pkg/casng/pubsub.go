@@ -103,7 +103,7 @@ func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
 func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 	if len(tags) == 0 {
 		log.Warning("pubsub.pub: called without tags")
-		log.V(3).Infof("pubsub.pub: called without tags: msg=%v, subs=%v", m, ps.subs)
+		log.V(3).Infof("pubsub.pub: called without tags: msg=%v", m)
 	}
 	if n <= 0 {
 		log.Warningf("pubsub.pub: nothing published because n=%d", n)
@@ -156,6 +156,9 @@ func newPubSub() *pubsub {
 }
 
 func excludeTag(tags []tag, et tag) []tag {
+	if len(tags) == 0 {
+		return []tag{}
+	}
 	ts := make([]tag, 0, len(tags)-1)
 	// Only exclude the tag once.
 	excluded := false

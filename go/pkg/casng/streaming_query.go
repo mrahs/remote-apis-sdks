@@ -249,7 +249,10 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 		})
 	})
 
-	missing := res.MissingBlobDigests
+	var missing []*repb.Digest
+	if res != nil {
+		missing = res.MissingBlobDigests
+	}
 	if err != nil {
 		err = errors.Join(ErrGRPC, err)
 		missing = digests

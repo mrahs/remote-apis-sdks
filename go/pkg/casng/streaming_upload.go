@@ -395,6 +395,7 @@ func (u *uploaderv2) digest(req UploadRequest) {
 				}
 				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
 				blb.tag = req.tag
+				blb.ctx = req.ctx
 				u.dispatcherBlobCh <- blb
 				u.digestCache.Store(key, digest.NewFromProtoUnvalidated(node.Digest))
 				log.V(2).Infof("upload.digest.visit.file: realPath=%s, desiredPath=%s, digest=%v", realPath, path, node.Digest)

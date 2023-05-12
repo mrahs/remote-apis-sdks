@@ -626,7 +626,7 @@ func updateAndNotify(st *uploadState, bytesMoved int64, err error, missing bool)
 func (c *Client) uploadng(ctx context.Context, entries []*uploadinfo.Entry) ([]digest.Digest, int64, error) {
 	reqs := make([]casng.UploadRequest, len(entries))
 	for i, entry := range entries {
-		r := casng.UploadRequest{}
+		r := casng.UploadRequest{Digest: entry.Digest}
 		if entry.Path == "" {
 			r.Bytes = entry.Contents
 		} else if abs, err := impath.Abs(entry.Path); err != nil {
