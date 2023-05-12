@@ -290,21 +290,22 @@ func (u *uploaderv2) digester() {
 // digest initiates a file system walk to digest files and dispatch them for uploading.
 func (u *uploaderv2) digest(req UploadRequest) {
 	log.V(2).Infof("upload.digest.start: root=%s, tag=%s", req.Path, req.tag)
-	defer log.V(2).Infof("upload.digest.done: root=%s, tag=%s", req.Path, req.tag)
+	defer log.V(3).Infof("upload.digest.done: root=%s, tag=%s", req.Path, req.tag)
 
 	stats := Stats{}
 	var err error
+	deferredWg := make(map[string]*sync.WaitGroup)
 	walker.DepthFirst(req.Path, req.Exclude, walker.Callback{
 		Err: func(path impath.Absolute, realPath impath.Absolute, errVisit error) bool {
-			log.V(2).Infof("upload.digest.visit.err: realPath=%s, desiredPath=%s, err=%v", realPath, path, errVisit)
+			log.V(3).Infof("upload.digest.visit.err: realPath=%s, desiredPath=%s, err=%v", realPath, path, errVisit)
 			err = errors.Join(errVisit, err)
 			return false
 		},
 		Pre: func(path impath.Absolute, realPath impath.Absolute) (walker.PreAction, bool) {
-			log.V(2).Infof("upload.digest.visit.pre: realPath=%s, desiredPath=%s", realPath, path)
+			log.V(3).Infof("upload.digest.visit.pre: realPath=%s, desiredPath=%s", realPath, path)
 			select {
 			case <-u.ctx.Done():
-				log.V(2).Info("upload.digest.cancel")
+				log.V(3).Info("upload.digest.cancel")
 				return walker.SkipPath, false
 			default:
 			}
@@ -313,21 +314,30 @@ func (u *uploaderv2) digest(req UploadRequest) {
 
 			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
 			// In both cases, deferring is the right call. Once the upload is processed, all requestters will revisit the path to get the digestion result.
-			// If the path was not cached before, claim it by makring it as in-flight using a nil value.
-			m, ok := u.digestCache.LoadOrStore(key, nil)
+			// If the path was not cached before, claim it by makring it as in-flight.
+			wg := &sync.WaitGroup{}
+			wg.Add(1)
+			m, ok := u.digestCache.LoadOrStore(key, wg)
 			if !ok {
 				// Claimed. Access it.
 				return walker.Access, true
 			}
 
-			// Defer if in-flight.
-			if m == nil {
-				log.V(2).Infof("upload.digest.visit.defer: realPath=%s, desiredPath=%s", realPath, path)
+			// Defer if in-flight. Wait if already deferred since there is nothing else to do.
+			if wg, ok := m.(*sync.WaitGroup); ok {
+				if deferredWg[key] == nil {
+					deferredWg[key] = wg
+					log.V(3).Infof("upload.digest.visit.defer: realPath=%s, desiredPath=%s", realPath, path)
+					return walker.Defer, true
+				}
+				log.V(3).Infof("upload.digest.visit.defer.wait: realPath=%s, desiredPath=%s", realPath, path)
+				wg.Wait()
+				delete(deferredWg, key)
 				return walker.Defer, true
 			}
 
 			node, _ := m.(proto.Message) // Guaranteed assertion because the cache is an internal field.
-			log.V(2).Infof("upload.digest.visit.cached: realPath=%s, desiredPath=%s", realPath, path)
+			log.V(3).Infof("upload.digest.visit.cached: realPath=%s, desiredPath=%s", realPath, path)
 
 			// Forward it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
 			switch node := node.(type) {
@@ -350,10 +360,10 @@ func (u *uploaderv2) digest(req UploadRequest) {
 			return walker.SkipPath, true
 		},
 		Post: func(path impath.Absolute, realPath impath.Absolute, info fs.FileInfo) (ok bool) {
-			log.V(2).Infof("upload.digest.visit.post: realPath=%s, desiredPath=%s", realPath, path)
+			log.V(3).Infof("upload.digest.visit.post: realPath=%s, desiredPath=%s", realPath, path)
 			select {
 			case <-u.ctx.Done():
-				log.V(2).Info("upload.digest.cancel")
+				log.V(3).Info("upload.digest.cancel")
 				return false
 			default:
 			}
@@ -361,10 +371,14 @@ func (u *uploaderv2) digest(req UploadRequest) {
 			key := path.String() + req.Exclude.String()
 			parentKey := path.Dir().String() + req.Exclude.String()
 
-			// If there was a digestion error, unclaim the path.
+			wg, _ := u.digestCache.Load(key)
 			defer func() {
+				// If there was a digestion error, unclaim the path.
 				if !ok {
 					u.digestCache.Delete(key)
+				}
+				if wg != nil {
+					wg.(*sync.WaitGroup).Done()
 				}
 			}()
 
@@ -381,7 +395,6 @@ func (u *uploaderv2) digest(req UploadRequest) {
 				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
 				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
 				u.digestCache.Store(key, digest.NewFromProtoUnvalidated(node.Digest))
-				log.V(2).Infof("upload.digest.visit.dir: realPath=%s, desiredPath=%s, digset=%v", realPath, path, node.Digest)
 				log.V(3).Infof("upload.digest.visit.dir: realPath=%s, desiredPath=%s, digset=%v, node=%v", realPath, path, node.Digest, node)
 				return true
 
@@ -398,20 +411,20 @@ func (u *uploaderv2) digest(req UploadRequest) {
 				blb.ctx = req.ctx
 				u.dispatcherBlobCh <- blb
 				u.digestCache.Store(key, digest.NewFromProtoUnvalidated(node.Digest))
-				log.V(2).Infof("upload.digest.visit.file: realPath=%s, desiredPath=%s, digest=%v", realPath, path, node.Digest)
+				log.V(3).Infof("upload.digest.visit.file: realPath=%s, desiredPath=%s, digest=%v", realPath, path, node.Digest)
 				return true
 
 			default:
 				// Ignore everything else (e.g. sockets and pipes).
-				log.V(2).Infof("upload.digest.visit.other: realPath=%s, desiredPath=%s", realPath, path)
+				log.V(3).Infof("upload.digest.visit.other: realPath=%s, desiredPath=%s", realPath, path)
 			}
 			return true
 		},
 		Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (action walker.SymlinkAction, ok bool) {
-			log.V(2).Infof("upload.digest.visit.symlink: realPath=%s, desiredPath=%s", realPath, path)
+			log.V(3).Infof("upload.digest.visit.symlink: realPath=%s, desiredPath=%s", realPath, path)
 			select {
 			case <-u.ctx.Done():
-				log.V(2).Info("upload.digest.cancel")
+				log.V(3).Info("upload.digest.cancel")
 				return walker.SkipSymlink, false
 			default:
 			}
@@ -419,15 +432,19 @@ func (u *uploaderv2) digest(req UploadRequest) {
 			key := path.String() + req.Exclude.String()
 			parentKey := path.Dir().String() + req.Exclude.String()
 
-			// If there was a digestion error, unclaim the path.
+			wg, _ := u.digestCache.Load(key)
 			defer func() {
+				// If there was a digestion error, unclaim the path.
 				if !ok {
 					u.digestCache.Delete(key)
+				}
+				if wg != nil {
+					wg.(*sync.WaitGroup).Done()
 				}
 			}()
 
 			stats.DigestCount += 1
-			log.V(2).Infof("upload.digest.visit.symlink: realPath=%s, desiredPath=%s", realPath, path)
+			log.V(3).Infof("upload.digest.visit.symlink: realPath=%s, desiredPath=%s", realPath, path)
 			stats.InputSymlinkCount += 1
 			node, nextStep, errDigest := digestSymlink(req.Path, realPath, req.SymlinkOptions)
 			if errDigest != nil {

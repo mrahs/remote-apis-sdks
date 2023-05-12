@@ -76,9 +76,9 @@ func (c *Client) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]d
 // Returns a slice of missing digests that were written and the sum of total bytes moved, which
 // may be different from logical bytes moved (i.e. sum of digest sizes) due to compression.
 func (c *Client) UploadIfMissing(ctx context.Context, entries ...*uploadinfo.Entry) ([]digest.Digest, int64, error) {
-	if c.useCasNg {
-		return c.uploadng(ctx, entries)
-	}
+	// if c.useCasNg {
+	// 	return c.uploadng(ctx, entries)
+	// }
 	if c.UnifiedUploads {
 		return c.uploadUnified(ctx, entries...)
 	}
@@ -624,8 +624,13 @@ func updateAndNotify(st *uploadState, bytesMoved int64, err error, missing bool)
 }
 
 func (c *Client) uploadng(ctx context.Context, entries []*uploadinfo.Entry) ([]digest.Digest, int64, error) {
-	reqs := make([]casng.UploadRequest, len(entries))
-	for i, entry := range entries {
+	reqs := make([]casng.UploadRequest, 0, len(entries))
+	for _, entry := range entries {
+		// In this call stack, the entries are pre-digested and nothing should trigger a digestion call.
+		if entry.Digest.IsEmpty() {
+			contextmd.Infof(ctx, log.Level(2), "got empty digest for upload; skipping")
+			continue
+		}
 		r := casng.UploadRequest{Digest: entry.Digest}
 		if entry.Path == "" {
 			r.Bytes = entry.Contents
@@ -634,7 +639,7 @@ func (c *Client) uploadng(ctx context.Context, entries []*uploadinfo.Entry) ([]d
 		} else {
 			r.Path = abs
 		}
-		reqs[i] = r
+		reqs = append(reqs, r)
 	}
 	uploaded, stats, err := c.casUploaderNg.Upload(ctx, reqs...)
 	return uploaded, stats.TotalBytesMoved, err

@@ -133,7 +133,7 @@ type uploaderv2 struct {
 	ioSem        *semaphore.Weighted // Controls total number of open files.
 	ioLargeSem   *semaphore.Weighted // Controls total number of open large files.
 	// digestCache allows digesting each path only once.
-	// Concurrent walkers claim a path by storing a nil value, which allows other walkers to defer
+	// Concurrent walkers claim a path by storing a sync.WaitGroup reference, which allows other walkers to defer
 	// digesting that path until the first walker stores the digest once it's computed.
 	digestCache sync.Map
 	// dirChildren is shared between all callers. However, since a directory is owned by a single
