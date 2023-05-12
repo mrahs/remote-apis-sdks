@@ -64,6 +64,9 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 				return errRes
 			})
 		})
+		if res == nil {
+			res = &repb.FindMissingBlobsResponse{}
+		}
 		if errRes != nil {
 			err = errors.Join(errRes, err)
 			res.MissingBlobDigests = batch
@@ -282,11 +285,12 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	log.V(1).Infof("upload: %d requests", len(reqs))
 	defer log.V(1).Infof("upload.done")
 
+	var stats Stats
+
 	if len(reqs) == 0 {
-		return nil, nil, nil
+		return nil, &stats, nil
 	}
 
-	var stats Stats
 	var undigested []UploadRequest
 	digested := make(map[digest.Digest]UploadRequest)
 	var digests []digest.Digest
@@ -300,7 +304,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	}
 	missing, err := u.MissingBlobs(ctx, digests)
 	if err != nil {
-		return nil, nil, err
+		return nil, &stats, err
 	}
 	log.V(1).Infof("upload: missing=%d, undigested=%d", len(missing), len(undigested))
 

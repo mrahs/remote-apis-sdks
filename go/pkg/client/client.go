@@ -119,8 +119,8 @@ type Client struct {
 	actionCache   regrpc.ActionCacheClient
 	byteStream    bsgrpc.ByteStreamClient
 	cas           regrpc.ContentAddressableStorageClient
-	casImpl       CASImpl
-	casUploaderv2 *casng.BatchingUploader
+	useCasNg      bool
+	casUploaderNg *casng.BatchingUploader
 	execution     regrpc.ExecutionClient
 	operations    opgrpc.OperationsClient
 	// Retrier is the Retrier that is used for RPCs made by this client.
@@ -435,17 +435,10 @@ func (p *PerRPCCreds) Apply(c *Client) {
 	c.creds = p.Creds
 }
 
-type CASImpl int
+type UseCASNG bool
 
-const (
-	// CASv1 is the original implementation under the client package.
-	CASv1 CASImpl = iota
-	// CASv2 is the new canonical implementation currently in beta stage.
-	CASv2
-)
-
-func (impl CASImpl) Apply(c *Client) {
-	c.casImpl = impl
+func (o UseCASNG) Apply(c *Client) {
+	c.useCasNg = bool(o)
 }
 
 func getImpersonatedRPCCreds(ctx context.Context, actAs string, cred credentials.PerRPCCredentials) credentials.PerRPCCredentials {
@@ -763,15 +756,16 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 	if client.casConcurrency < 1 {
 		return nil, fmt.Errorf("CASConcurrency should be at least 1")
 	}
-	if client.casImpl == CASv2 {
+	if client.useCasNg {
 		queryCfg := casng.GRPCConfig{
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			BytesLimit:           int(client.MaxBatchSize),
 			ItemsLimit:           int(client.MaxQueryBatchDigests),
 			BundleTimeout:        10 * time.Millisecond, // Low value to fast track queries.
-			Timeout:              DefaultRPCTimeouts["FindMissingBlobs"],
-			RetryPolicy:          client.Retrier.Backoff,
-			RetryPredicate:       client.Retrier.ShouldRetry,
+			// Timeout:              DefaultRPCTimeouts["FindMissingBlobs"],
+			Timeout:        DefaultRPCTimeouts["default"],
+			RetryPolicy:    client.Retrier.Backoff,
+			RetryPredicate: client.Retrier.ShouldRetry,
 		}
 		batchCfg := casng.GRPCConfig{
 			ConcurrentCallsLimit: int(client.casConcurrency),
@@ -784,6 +778,9 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 		}
 		streamCfg := casng.GRPCConfig{
 			ConcurrentCallsLimit: int(client.casConcurrency),
+			BytesLimit:           1,                // Unused.
+			ItemsLimit:           1,                // Unused.
+			BundleTimeout:        time.Millisecond, // Unused.
 			Timeout:              DefaultRPCTimeouts["default"],
 			RetryPolicy:          client.Retrier.Backoff,
 			RetryPredicate:       client.Retrier.ShouldRetry,
@@ -801,9 +798,9 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			ioCfg.CompressionSizeThreshold = math.MaxInt64
 		}
 		var err error
-		client.casUploaderv2, err = casng.NewBatchingUploader(ctx, client.cas, client.byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
+		client.casUploaderNg, err = casng.NewBatchingUploader(ctx, client.cas, client.byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
 		if err != nil {
-			return nil, fmt.Errorf("error initializing CASv2: %w", err)
+			return nil, fmt.Errorf("error initializing CASNG: %w", err)
 		}
 	}
 	return client, nil
