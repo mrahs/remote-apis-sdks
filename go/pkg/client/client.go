@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/user"
@@ -756,53 +757,53 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 	if client.casConcurrency < 1 {
 		return nil, fmt.Errorf("CASConcurrency should be at least 1")
 	}
-	// if client.useCasNg {
-	// 	queryCfg := casng.GRPCConfig{
-	// 		ConcurrentCallsLimit: int(client.casConcurrency),
-	// 		BytesLimit:           int(client.MaxBatchSize),
-	// 		ItemsLimit:           int(client.MaxQueryBatchDigests),
-	// 		BundleTimeout:        10 * time.Millisecond, // Low value to fast track queries.
-	// 		// Timeout:              DefaultRPCTimeouts["FindMissingBlobs"],
-	// 		Timeout:        DefaultRPCTimeouts["default"],
-	// 		RetryPolicy:    client.Retrier.Backoff,
-	// 		RetryPredicate: client.Retrier.ShouldRetry,
-	// 	}
-	// 	batchCfg := casng.GRPCConfig{
-	// 		ConcurrentCallsLimit: int(client.casConcurrency),
-	// 		BytesLimit:           int(client.MaxBatchSize),
-	// 		ItemsLimit:           int(client.UnifiedUploadBufferSize),
-	// 		BundleTimeout:        time.Duration(client.UnifiedUploadTickDuration), // Low value to fast track queries.
-	// 		Timeout:              DefaultRPCTimeouts["BatchUpdateBlobs"],
-	// 		RetryPolicy:          client.Retrier.Backoff,
-	// 		RetryPredicate:       client.Retrier.ShouldRetry,
-	// 	}
-	// 	streamCfg := casng.GRPCConfig{
-	// 		ConcurrentCallsLimit: int(client.casConcurrency),
-	// 		BytesLimit:           1,                // Unused.
-	// 		ItemsLimit:           1,                // Unused.
-	// 		BundleTimeout:        time.Millisecond, // Unused.
-	// 		Timeout:              DefaultRPCTimeouts["default"],
-	// 		RetryPolicy:          client.Retrier.Backoff,
-	// 		RetryPredicate:       client.Retrier.ShouldRetry,
-	// 	}
-	// 	ioCfg := casng.IOConfig{
-	// 		ConcurrentWalksLimit:     int(client.casConcurrency),
-	// 		OpenFilesLimit:           casng.DefaultOpenFilesLimit,
-	// 		OpenLargeFilesLimit:      casng.DefaultOpenLargeFilesLimit,
-	// 		SmallFileSizeThreshold:   casng.DefaultSmallFileSizeThreshold,
-	// 		LargeFileSizeThreshold:   casng.DefaultLargeFileSizeThreshold,
-	// 		CompressionSizeThreshold: int64(client.CompressedBytestreamThreshold),
-	// 		BufferSize:               int(client.ChunkMaxSize),
-	// 	}
-	// 	if client.CompressedBytestreamThreshold < 0 {
-	// 		ioCfg.CompressionSizeThreshold = math.MaxInt64
-	// 	}
-	// 	var err error
-	// 	client.casUploaderNg, err = casng.NewBatchingUploader(ctx, client.cas, client.byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("error initializing CASNG: %w", err)
-	// 	}
-	// }
+	if client.useCasNg {
+		queryCfg := casng.GRPCConfig{
+			ConcurrentCallsLimit: int(client.casConcurrency),
+			BytesLimit:           int(client.MaxBatchSize),
+			ItemsLimit:           int(client.MaxQueryBatchDigests),
+			BundleTimeout:        10 * time.Millisecond, // Low value to fast track queries.
+			// Timeout:              DefaultRPCTimeouts["FindMissingBlobs"],
+			Timeout:        DefaultRPCTimeouts["default"],
+			RetryPolicy:    client.Retrier.Backoff,
+			RetryPredicate: client.Retrier.ShouldRetry,
+		}
+		batchCfg := casng.GRPCConfig{
+			ConcurrentCallsLimit: int(client.casConcurrency),
+			BytesLimit:           int(client.MaxBatchSize),
+			ItemsLimit:           int(client.UnifiedUploadBufferSize),
+			BundleTimeout:        time.Duration(client.UnifiedUploadTickDuration), // Low value to fast track queries.
+			Timeout:              DefaultRPCTimeouts["BatchUpdateBlobs"],
+			RetryPolicy:          client.Retrier.Backoff,
+			RetryPredicate:       client.Retrier.ShouldRetry,
+		}
+		streamCfg := casng.GRPCConfig{
+			ConcurrentCallsLimit: int(client.casConcurrency),
+			BytesLimit:           1,                // Unused.
+			ItemsLimit:           1,                // Unused.
+			BundleTimeout:        time.Millisecond, // Unused.
+			Timeout:              DefaultRPCTimeouts["default"],
+			RetryPolicy:          client.Retrier.Backoff,
+			RetryPredicate:       client.Retrier.ShouldRetry,
+		}
+		ioCfg := casng.IOConfig{
+			ConcurrentWalksLimit:     int(client.casConcurrency),
+			OpenFilesLimit:           casng.DefaultOpenFilesLimit,
+			OpenLargeFilesLimit:      casng.DefaultOpenLargeFilesLimit,
+			SmallFileSizeThreshold:   casng.DefaultSmallFileSizeThreshold,
+			LargeFileSizeThreshold:   casng.DefaultLargeFileSizeThreshold,
+			CompressionSizeThreshold: int64(client.CompressedBytestreamThreshold),
+			BufferSize:               int(client.ChunkMaxSize),
+		}
+		if client.CompressedBytestreamThreshold < 0 {
+			ioCfg.CompressionSizeThreshold = math.MaxInt64
+		}
+		var err error
+		client.casUploaderNg, err = casng.NewBatchingUploader(ctx, client.cas, client.byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
+		if err != nil {
+			return nil, fmt.Errorf("error initializing CASNG: %w", err)
+		}
+	}
 	return client, nil
 }
 

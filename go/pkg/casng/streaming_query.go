@@ -93,8 +93,8 @@ func (u *uploaderv2) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missi
 	// Sender.
 	u.querySenderWg.Add(1)
 	go func() {
-		log.V(1).Info("query.streamer.sender.start")
-		defer log.V(1).Info("query.streamer.sender.stop")
+		log.V(1).Info("[casng] query.streamer.sender.start")
+		defer log.V(1).Info("[casng] query.streamer.sender.stop")
 		defer u.querySenderWg.Done()
 		for r := range in {
 			r.tag = tag
@@ -107,8 +107,8 @@ func (u *uploaderv2) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missi
 	// Receiver.
 	u.receiverWg.Add(1)
 	go func() {
-		log.V(1).Info("query.streamer.receiver.start")
-		defer log.V(1).Info("query.streamer.receiver.stop")
+		log.V(1).Info("[casng] query.streamer.receiver.start")
+		defer log.V(1).Info("[casng] query.streamer.receiver.stop")
 		defer u.receiverWg.Done()
 		defer close(ch)
 		// Continue to drain until the broker closes the channel.
@@ -125,8 +125,8 @@ func (u *uploaderv2) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missi
 	// Counter.
 	u.workerWg.Add(1)
 	go func() {
-		log.V(1).Info("query.streamer.counter.start")
-		defer log.V(1).Info("query.streamer.counter.stop")
+		log.V(1).Info("[casng] query.streamer.counter.start")
+		defer log.V(1).Info("[casng] query.streamer.counter.stop")
 		defer u.workerWg.Done()
 		defer ctxSubCancel() // let the broker and the receiver terminate.
 		pending := 0
@@ -148,8 +148,8 @@ func (u *uploaderv2) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missi
 
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
 func (u *uploaderv2) queryProcessor() {
-	log.V(1).Info("query.processor.start")
-	defer log.V(1).Info("query.processor.stop")
+	log.V(1).Info("[casng] query.processor.start")
+	defer log.V(1).Info("[casng] query.processor.stop")
 
 	bundle := make(missingBlobRequestBundle)
 	ctx := u.ctx // context with unified metadata.
@@ -220,7 +220,7 @@ func (u *uploaderv2) queryProcessor() {
 // callMissingBlobs calls the gRPC endpoint and notifies requesters of the results.
 // It assumes ownership of the bundle argument.
 func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
-	log.V(2).Infof("query.call: len=%d", len(bundle))
+	log.V(2).Infof("[casng] query.call: len=%d", len(bundle))
 
 	if len(bundle) < 1 {
 		return
@@ -257,7 +257,7 @@ func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobReq
 		err = errors.Join(ErrGRPC, err)
 		missing = digests
 	}
-	log.V(2).Infof("query.call.done: missing=%d", len(missing))
+	log.V(2).Infof("[casng] query.call.done: missing=%d", len(missing))
 
 	// Report missing.
 	for _, dpb := range missing {

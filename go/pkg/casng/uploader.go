@@ -323,36 +323,36 @@ func (u *uploaderv2) close() {
 
 	// 1st, batching API senders should stop producing requests.
 	// These senders are terminated by the user.
-	log.V(1).Infof("uploader: waiting for client senders")
+	log.V(1).Infof("[casng] uploader: waiting for client senders")
 	u.clientSenderWg.Wait()
 
 	// 2nd, streaming API upload senders should stop producing queries and requests.
 	// These senders are terminated by the user.
-	log.V(1).Infof("uploader: waiting for upload senders")
+	log.V(1).Infof("[casng] uploader: waiting for upload senders")
 	u.uploadSenderWg.Wait()
 	close(u.digesterCh) // The digester will propagate the termination signal.
 
 	// 3rd, streaming API query senders should stop producing queries.
 	// This propagates from the uploader's pipe, hence, the uploader must stop first.
-	log.V(1).Infof("uploader: waiting for query senders")
+	log.V(1).Infof("[casng] uploader: waiting for query senders")
 	u.querySenderWg.Wait()
 	close(u.queryCh) // Terminate the query processor.
 
 	// 4th, internal routres should flush all remaining requests.
-	log.V(1).Infof("uploader: waiting for processors")
+	log.V(1).Infof("[casng] uploader: waiting for processors")
 	u.processorWg.Wait()
 
 	// 5th, internal brokers should flush all remaining messages.
-	log.V(1).Infof("uploader: waiting for brokers")
+	log.V(1).Infof("[casng] uploader: waiting for brokers")
 	u.queryPubSub.wait()
 	u.uploadPubSub.wait()
 
 	// 6th, receivers should have drained their channels by now.
-	log.V(1).Infof("uploader: waiting for receivers")
+	log.V(1).Infof("[casng] uploader: waiting for receivers")
 	u.receiverWg.Wait()
 
 	// 7th, workers should have terminated by now.
-	log.V(1).Infof("uploader: waiting for workers")
+	log.V(1).Infof("[casng] uploader: waiting for workers")
 	u.workerWg.Wait()
 }
 

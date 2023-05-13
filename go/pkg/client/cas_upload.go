@@ -76,9 +76,9 @@ func (c *Client) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]d
 // Returns a slice of missing digests that were written and the sum of total bytes moved, which
 // may be different from logical bytes moved (i.e. sum of digest sizes) due to compression.
 func (c *Client) UploadIfMissing(ctx context.Context, entries ...*uploadinfo.Entry) ([]digest.Digest, int64, error) {
-	// if c.useCasNg {
-	// 	return c.uploadng(ctx, entries)
-	// }
+	if c.useCasNg {
+		return c.uploadng(ctx, entries)
+	}
 	if c.UnifiedUploads {
 		return c.uploadUnified(ctx, entries...)
 	}
@@ -628,7 +628,7 @@ func (c *Client) uploadng(ctx context.Context, entries []*uploadinfo.Entry) ([]d
 	for _, entry := range entries {
 		// In this call stack, the entries are pre-digested and nothing should trigger a digestion call.
 		if entry.Digest.IsEmpty() {
-			contextmd.Infof(ctx, log.Level(2), "got empty digest for upload; skipping")
+			contextmd.Infof(ctx, log.Level(2), "expecting digested entries, but got an empty digest for upload; skipping")
 			continue
 		}
 		r := casng.UploadRequest{Digest: entry.Digest}
