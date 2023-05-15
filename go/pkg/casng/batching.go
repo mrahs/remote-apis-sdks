@@ -281,14 +281,14 @@ func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, s
 // The returned error wraps a number of errors proportional to the length of the specified slice.
 //
 // This method must not be called after cancelling the uploader's context.
-func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, *Stats, error) {
+func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, Stats, error) {
 	log.V(1).Infof("[casng] upload: %d requests", len(reqs))
 	defer log.V(1).Infof("[casng] upload.done")
 
 	var stats Stats
 
 	if len(reqs) == 0 {
-		return nil, &stats, nil
+		return nil, stats, nil
 	}
 
 	var undigested []UploadRequest
@@ -304,7 +304,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	}
 	missing, err := u.MissingBlobs(ctx, digests)
 	if err != nil {
-		return nil, &stats, err
+		return nil, stats, err
 	}
 	log.V(1).Infof("[casng] upload: missing=%d, undigested=%d", len(missing), len(undigested))
 
@@ -321,7 +321,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	}
 	if len(reqs) == 0 {
 		log.V(1).Info("[casng] upload: nothing is missing")
-		return nil, &stats, nil
+		return nil, stats, nil
 	}
 
 	log.V(1).Infof("[casng] upload: uploading %d blobs", len(reqs))
@@ -355,5 +355,5 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		}
 	}
 
-	return uploaded, &stats, err
+	return uploaded, stats, err
 }

@@ -77,7 +77,7 @@ func (c *Client) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]d
 // may be different from logical bytes moved (i.e. sum of digest sizes) due to compression.
 func (c *Client) UploadIfMissing(ctx context.Context, entries ...*uploadinfo.Entry) ([]digest.Digest, int64, error) {
 	if c.useCasNg {
-		return c.uploadng(ctx, entries)
+		return c.ngUploadPredigested(ctx, entries)
 	}
 	if c.UnifiedUploads {
 		return c.uploadUnified(ctx, entries...)
@@ -623,7 +623,7 @@ func updateAndNotify(st *uploadState, bytesMoved int64, err error, missing bool)
 	st.ue = nil
 }
 
-func (c *Client) uploadng(ctx context.Context, entries []*uploadinfo.Entry) ([]digest.Digest, int64, error) {
+func (c *Client) ngUploadPredigested(ctx context.Context, entries []*uploadinfo.Entry) ([]digest.Digest, int64, error) {
 	reqs := make([]casng.UploadRequest, 0, len(entries))
 	for _, entry := range entries {
 		// In this call stack, the entries are pre-digested and nothing should trigger a digestion call.
@@ -643,4 +643,8 @@ func (c *Client) uploadng(ctx context.Context, entries []*uploadinfo.Entry) ([]d
 	}
 	uploaded, stats, err := c.casUploaderNg.Upload(ctx, reqs...)
 	return uploaded, stats.TotalBytesMoved, err
+}
+
+func (c *Client) NgUpload(ctx context.Context, reqs ...casng.UploadRequest) ([]digest.Digest, casng.Stats, error){
+	return c.casUploaderNg.Upload(ctx, reqs...)
 }

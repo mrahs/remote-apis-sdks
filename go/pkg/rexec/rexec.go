@@ -8,14 +8,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/command"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/outerr"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
 
 	rc "github.com/bazelbuild/remote-apis-sdks/go/pkg/client"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
@@ -199,6 +203,94 @@ func (ec *Context) computeInputs() error {
 	log.V(1).Infof("%s %s> Action digest: %s", cmdID, executionID, acDg)
 	ec.inputBlobs = append(ec.inputBlobs, ec.cmdUe)
 	ec.inputBlobs = append(ec.inputBlobs, ec.acUe)
+	ec.Metadata.ActionDigest = acDg
+	ec.Metadata.TotalInputBytes += cmdDg.Size + acDg.Size
+	return nil
+}
+
+func (ec *Context) computeInputsNg() error {
+	if ec.Metadata.ActionDigest.Size > 0 {
+		// Already computed inputs.
+		return nil
+	}
+	cmdID, executionID := ec.cmd.Identifiers.ExecutionID, ec.cmd.Identifiers.CommandID
+	commandHasOutputPathsField := ec.client.GrpcClient.SupportsCommandOutputPaths()
+	cmdPb := ec.cmd.ToREProto(commandHasOutputPathsField)
+	log.V(2).Infof("%s %s> Command: \n%s\n", cmdID, executionID, prototext.Format(cmdPb))
+	blob, err := proto.Marshal(cmdPb)
+	if err != nil {
+		return err
+	}
+	cmdDg := digest.NewFromBlob(blob)
+	ec.Metadata.CommandDigest = cmdDg
+	log.V(1).Infof("%s %s> Command digest: %s", cmdID, executionID, cmdDg)
+	log.V(1).Infof("%s %s> Computing input Merkle tree...", cmdID, executionID)
+	// TODO: use remoteWorkingDir in generated nodes from digestion.
+	execRoot, workingDir, remoteWorkingDir := ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir
+	var slo symlinkopts.Options
+	slTree := ec.client.GrpcClient.TreeSymlinkOpts
+	if slTree == nil {
+		slTree = rc.DefaultTreeSymlinkOpts()
+	}
+	slPreserve := slTree.Preserved
+	if ec.cmd.InputSpec.SymlinkBehavior == command.ResolveSymlink {
+		slPreserve = false
+	}
+	if ec.cmd.InputSpec.SymlinkBehavior == command.PreserveSymlink {
+		slPreserve = true
+	}
+	switch{
+		case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.FollowsTarget && ec.client.GrpcClient.TreeSymlinkOpts.MaterializeOutsideExecRoot:
+			slo = symlinkopts.ResolveExternalOnlyWithTarget()
+		case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.FollowsTarget:
+			slo = symlinkopts.PreserveWithTarget()
+		case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.MaterializeOutsideExecRoot:
+			slo = symlinkopts.ResolveExternalOnly()
+		case slPreserve:
+			slo = symlinkopts.PreserveNoDangling()
+		default:
+			slo = symlinkopts.ResolveAlways()
+	}
+	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+1)
+	reqs = append(reqs, casng.UploadRequest{Bytes: blob, Digest: cmdDg})
+	for _, p := range ec.cmd.InputSpec.Inputs {
+		absPath, err := impath.Abs(execRoot, p)
+		if err != nil {
+			return err
+		}
+		reqs = append(reqs, casng.UploadRequest{Path: absPath, SymlinkOptions: slo})
+	}
+	// TODO: return the root node
+	_, stats, err := ec.client.GrpcClient.NgUpload(ec.ctx, reqs...)
+	if err != nil {
+		return err
+	}
+	ec.Metadata.InputFiles = int(stats.InputFileCount)
+	ec.Metadata.InputDirectories = int(stats.InputDirCount)
+	ec.Metadata.TotalInputBytes = stats.BytesRequested
+	acPb := &repb.Action{
+		CommandDigest:   cmdDg.ToProto(),
+		InputRootDigest: root.ToProto(),
+		DoNotCache:      ec.opt.DoNotCache,
+	}
+	// If supported, we attach a copy of the platform properties list to the Action.
+	if ec.client.GrpcClient.SupportsActionPlatformProperties() {
+		acPb.Platform = cmdPb.Platform
+	}
+
+	if ec.cmd.Timeout > 0 {
+		acPb.Timeout = dpb.New(ec.cmd.Timeout)
+	}
+	blob, err = proto.Marshal(cmdPb)
+	if err != nil {
+		return err
+	}
+	acDg := digest.NewFromBlob(blob)
+	log.V(1).Infof("%s %s> Action digest: %s", cmdID, executionID, acDg)
+	_, _, err = ec.client.GrpcClient.NgUpload(ec.ctx, casng.UploadRequest{Bytes: blob, Digest: acDg})
+	if err != nil {
+		return err
+	}
 	ec.Metadata.ActionDigest = acDg
 	ec.Metadata.TotalInputBytes += cmdDg.Size + acDg.Size
 	return nil
