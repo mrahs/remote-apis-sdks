@@ -66,7 +66,7 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 }
 
 // missingBlobsPipe is defined on the underlying uploader to be accessible by the upload code.
-func (u *uploaderv2) missingBlobsPipe(in <-chan missingBlobRequest) <-chan MissingBlobsResponse {
+func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan MissingBlobsResponse {
 	ch := make(chan MissingBlobsResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
@@ -147,7 +147,7 @@ func (u *uploaderv2) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missi
 }
 
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
-func (u *uploaderv2) queryProcessor() {
+func (u *uploader) queryProcessor() {
 	log.V(1).Info("[casng] query.processor.start")
 	defer log.V(1).Info("[casng] query.processor.stop")
 
@@ -219,7 +219,7 @@ func (u *uploaderv2) queryProcessor() {
 
 // callMissingBlobs calls the gRPC endpoint and notifies requesters of the results.
 // It assumes ownership of the bundle argument.
-func (u *uploaderv2) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
+func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
 	log.V(2).Infof("[casng] query.call: len=%d", len(bundle))
 
 	if len(bundle) < 1 {

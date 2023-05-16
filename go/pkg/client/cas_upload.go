@@ -12,6 +12,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
@@ -647,4 +648,8 @@ func (c *Client) ngUploadPredigested(ctx context.Context, entries []*uploadinfo.
 
 func (c *Client) NgUpload(ctx context.Context, reqs ...casng.UploadRequest) ([]digest.Digest, casng.Stats, error) {
 	return c.casUploaderNg.Upload(ctx, reqs...)
+}
+
+func (c *Client) NgNode(path impath.Absolute, exclude walker.Filter) proto.Message {
+	return c.casUploaderNg.Node(path, exclude)
 }

@@ -152,7 +152,7 @@ func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest)
 	return u.streamPipe(ctx, in)
 }
 
-func (u *uploaderv2) streamPipe(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
+func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
 	ch := make(chan UploadResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
@@ -215,7 +215,7 @@ func (u *uploaderv2) streamPipe(ctx context.Context, in <-chan UploadRequest) <-
 // For each request, a file system walk is started concurrently to digest and forward blobs to the dispatcher.
 // If the request is for an already digested blob, it is forwarded to the dispatcher.
 // The number of concurrent requests is limited to the number of concurrent file system walks.
-func (u *uploaderv2) digester() {
+func (u *uploader) digester() {
 	log.V(1).Info("[casng] upload.digester.start")
 	defer log.V(1).Info("[casng] upload.digester.stop")
 
@@ -291,7 +291,7 @@ func (u *uploaderv2) digester() {
 }
 
 // digest initiates a file system walk to digest files and dispatch them for uploading.
-func (u *uploaderv2) digest(req UploadRequest) {
+func (u *uploader) digest(req UploadRequest) {
 	log.V(2).Infof("[casng] upload.digest.start: root=%s, tag=%s", req.Path, req.tag)
 	defer log.V(3).Infof("[casng] upload.digest.done: root=%s, tag=%s", req.Path, req.tag)
 
@@ -321,11 +321,11 @@ func (u *uploaderv2) digest(req UploadRequest) {
 			key := p.String() + req.Exclude.String()
 
 			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
-			// In both cases, deferring is the right call. Once the upload is processed, all requestters will revisit the path to get the digestion result.
+			// In both cases, deferring is the right call. Once the requset is processed, all requestters will revisit the path to get the digestion result.
 			// If the path was not cached before, claim it by makring it as in-flight.
 			wg := &sync.WaitGroup{}
 			wg.Add(1)
-			m, ok := u.digestCache.LoadOrStore(key, wg)
+			m, ok := u.nodeCache.LoadOrStore(key, wg)
 			if !ok {
 				// Claimed. Access it.
 				return walker.Access, true
@@ -352,7 +352,7 @@ func (u *uploaderv2) digest(req UploadRequest) {
 			case *repb.FileNode:
 				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), path: realPath.String(), tag: req.tag, ctx: req.ctx}
 			case *repb.DirectoryNode:
-				// The blob of the directory node is its proto representation.
+				// The blob of the directory node is the bytes of a repb.Directory message.
 				// Generate and forward it. If it was uploaded before, it'll be reported as a cache hit.
 				// Otherwise, it means the previous attempt to upload it failed and it is going to be retried.
 				node, b, errDigest := digestDirectory(realPath, u.dirChildren[key])
@@ -383,18 +383,27 @@ func (u *uploaderv2) digest(req UploadRequest) {
 			default:
 			}
 
-			key := path.String() + req.Exclude.String()
-			parentKey := path.Dir().String() + req.Exclude.String()
+			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
+			if errPath != nil {
+				err = errors.Join(errPath, err)
+				return false
+			}
+			key := p.String() + req.Exclude.String()
+			parentKey := p.Dir().String() + req.Exclude.String()
 
-			wg, _ := u.digestCache.Load(key)
+			// In post-access, the cache should have this walker's own wait group.
+			// Capture it here before it's overwritten with the actual result.
+			wg, pathClaimed := u.nodeCache.Load(key)
+			if !pathClaimed {
+				err = errors.Join(fmt.Errorf("attempted to post-access a non-claimed path %q", path), err)
+				return false
+			}
 			defer func() {
-				// If there was a digestion error, unclaim the path.
 				if !ok {
-					u.digestCache.Delete(key)
+					// Unclaim the path by deleting this walker's wait group.
+					u.nodeCache.Delete(key)
 				}
-				if wg != nil {
-					wg.(*sync.WaitGroup).Done()
-				}
+				wg.(*sync.WaitGroup).Done()
 			}()
 
 			switch {
@@ -416,7 +425,7 @@ func (u *uploaderv2) digest(req UploadRequest) {
 				node.Name = p.Base().String()
 				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
 				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
-				u.digestCache.Store(key, digest.NewFromProtoUnvalidated(node.Digest))
+				u.nodeCache.Store(key, node)
 				log.V(3).Infof("[casng] upload.digest.visit.dir: realPath=%s, desiredPath=%s, digset=%v, node=%v", realPath, path, node.Digest, node)
 				return true
 
@@ -439,7 +448,7 @@ func (u *uploaderv2) digest(req UploadRequest) {
 				blb.tag = req.tag
 				blb.ctx = req.ctx
 				u.dispatcherBlobCh <- blb
-				u.digestCache.Store(key, digest.NewFromProtoUnvalidated(node.Digest))
+				u.nodeCache.Store(key, node)
 				log.V(3).Infof("[casng] upload.digest.visit.file: realPath=%s, desiredPath=%s, digest=%v", realPath, path, node.Digest)
 				return true
 
@@ -458,18 +467,27 @@ func (u *uploaderv2) digest(req UploadRequest) {
 			default:
 			}
 
-			key := path.String() + req.Exclude.String()
-			parentKey := path.Dir().String() + req.Exclude.String()
+			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
+			if errPath != nil {
+				err = errors.Join(errPath, err)
+				return walker.SkipSymlink, false
+			}
+			key := p.String() + req.Exclude.String()
+			parentKey := p.Dir().String() + req.Exclude.String()
 
-			wg, _ := u.digestCache.Load(key)
+			// In symlink post-access, the cache should have this walker's own wait group.
+			// Capture it here before it's overwritten with the actual result.
+			wg, pathClaimed := u.nodeCache.Load(key)
+			if !pathClaimed {
+				err = errors.Join(fmt.Errorf("attempted to post-access a non-claimed path %q", path), err)
+				return walker.SkipSymlink, false
+			}
 			defer func() {
 				// If there was a digestion error, unclaim the path.
 				if !ok {
-					u.digestCache.Delete(key)
+					u.nodeCache.Delete(key)
 				}
-				if wg != nil {
-					wg.(*sync.WaitGroup).Done()
-				}
+				wg.(*sync.WaitGroup).Done()
 			}()
 
 			stats.DigestCount += 1
@@ -489,7 +507,7 @@ func (u *uploaderv2) digest(req UploadRequest) {
 				}
 				node.Name = p.Base().String()
 				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
-				u.digestCache.Store(key, digest.Digest{})
+				u.nodeCache.Store(key, node)
 			}
 			return nextStep, true
 		},
@@ -504,7 +522,7 @@ func (u *uploaderv2) digest(req UploadRequest) {
 
 // dispatcher receives digested blobs and forwards them to the uploader or back to the requester in case of a cache hit or error.
 // The dispatcher handles counting in-flight requests per requester and notifying requesters when all of their requests are completed.
-func (u *uploaderv2) dispatcher() {
+func (u *uploader) dispatcher() {
 	log.V(1).Info("[casng] upload.dispatcher.start")
 	defer log.V(1).Info("[casng] upload.dispatcher.stop")
 
@@ -639,7 +657,7 @@ func (u *uploaderv2) dispatcher() {
 
 // querier pipes the digest of a blob to the internal query processor to determine if it needs uploading.
 // Cache hits and errors are piped back to the dispatcher while cache misses are piped to the uploader.
-func (u *uploaderv2) querier(queryCh chan<- missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
+func (u *uploader) querier(queryCh chan<- missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
 	log.V(1).Info("[casng] upload.pipe.start")
 	defer log.V(1).Info("[casng] upload.pipe.stop")
 
@@ -710,7 +728,7 @@ func (u *uploaderv2) querier(queryCh chan<- missingBlobRequest, queryResCh <-cha
 }
 
 // uploadBatcher handles files below the small threshold which are buffered in-memory.
-func (u *uploaderv2) batcher() {
+func (u *uploader) batcher() {
 	log.V(1).Info("[casng] upload.batch.start")
 	defer log.V(1).Info("[casng] upload.batch.stop")
 
@@ -822,7 +840,7 @@ func (u *uploaderv2) batcher() {
 	}
 }
 
-func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBundle) {
+func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBundle) {
 	log.V(2).Infof("[casng] upload.batch.call: len=%d", len(bundle))
 
 	req := &repb.BatchUpdateBlobsRequest{InstanceName: u.instanceName}
@@ -942,7 +960,7 @@ func (u *uploaderv2) callBatchUpload(ctx context.Context, bundle uploadRequestBu
 // See https://github.com/bazelbuild/remote-apis/blob/0cd22f7b466ced15d7803e8845d08d3e8d2c51bc/build/bazel/remote/execution/v2/remote_execution.proto#L250-L254
 // For files above the large threshold, this method assumes the io and large io holds are already acquired and will release them accordingly.
 // For other files, only an io hold is acquired and released in this method.
-func (u *uploaderv2) streamer() {
+func (u *uploader) streamer() {
 	log.V(1).Info("[casng] upload.stream.start")
 	defer log.V(1).Info("[casng] upload.stream.stop")
 
@@ -1013,7 +1031,7 @@ func (u *uploaderv2) streamer() {
 	}
 }
 
-func (u *uploaderv2) callStream(ctx context.Context, name string, b blob) (stats Stats, err error) {
+func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats Stats, err error) {
 	log.V(2).Infof("[casng] upload.stream.call: digest=%s, tag=%s", b.digest, b.tag)
 	defer log.V(2).Infof("[casng] upload.stream.call.done: digest=%s, tag=%s, err=%v", b.digest, b.tag, err)
 

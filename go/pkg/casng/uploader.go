@@ -60,6 +60,8 @@ import (
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
@@ -102,16 +104,16 @@ func MakeCompressedWriteResourceName(instanceName, hash string, size int64) stri
 
 // batchingUplodaer implements the corresponding interface.
 type BatchingUploader struct {
-	*uploaderv2
+	*uploader
 }
 
 // streamingUploader implements the corresponding interface.
 type StreamingUploader struct {
-	*uploaderv2
+	*uploader
 }
 
 // uploader represents the state of an uploader implementation.
-type uploaderv2 struct {
+type uploader struct {
 	cas          repb.ContentAddressableStorageClient
 	byteStream   bspb.ByteStreamClient
 	instanceName string
@@ -132,10 +134,10 @@ type uploaderv2 struct {
 	walkSem      *semaphore.Weighted // Controls concurrent file system walks.
 	ioSem        *semaphore.Weighted // Controls total number of open files.
 	ioLargeSem   *semaphore.Weighted // Controls total number of open large files.
-	// digestCache allows digesting each path only once.
+	// nodeCache allows digesting each path only once.
 	// Concurrent walkers claim a path by storing a sync.WaitGroup reference, which allows other walkers to defer
 	// digesting that path until the first walker stores the digest once it's computed.
-	digestCache sync.Map
+	nodeCache sync.Map
 	// dirChildren is shared between all callers. However, since a directory is owned by a single
 	// walker at a time, there is no concurrent read/write to this map, but there might be concurrent reads.
 	dirChildren               map[string][]proto.Message
@@ -169,8 +171,25 @@ type uploaderv2 struct {
 }
 
 // Wait blocks until the context is cancelled and all resources held by the uploader are released.
-func (u *uploaderv2) Wait() {
+func (u *uploader) Wait() {
 	u.wg.Wait()
+}
+
+// Node looks up a node from the node cache which is populated during digestion.
+// The node is either an repb.FileNode, repb.DirectoryNode, or repb.SymlinkNode.
+//
+// Returns nil if no node corresponds to the key that is derived from the given path and filter.
+func (u *uploader) Node(path impath.Absolute, exclude walker.Filter) proto.Message {
+	key := path.String() + exclude.String()
+	n, ok := u.nodeCache.Load(key)
+	if !ok {
+		return nil
+	}
+	node, ok := n.(proto.Message)
+	if !ok {
+		return nil
+	}
+	return node
 }
 
 // NewBatchingUploader creates a new instance of the batching uploader.
@@ -185,7 +204,7 @@ func NewBatchingUploader(
 	if err != nil {
 		return nil, err
 	}
-	return &BatchingUploader{uploaderv2: uploader}, nil
+	return &BatchingUploader{uploader: uploader}, nil
 }
 
 // NewStreamingUploader creates a new instance of the streaming uploader.
@@ -200,13 +219,13 @@ func NewStreamingUploader(
 	if err != nil {
 		return nil, err
 	}
-	return &StreamingUploader{uploaderv2: uploader}, nil
+	return &StreamingUploader{uploader: uploader}, nil
 }
 
 func newUploaderv2(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
-) (*uploaderv2, error) {
+) (*uploader, error) {
 	if cas == nil || byteStream == nil {
 		return nil, ErrNilClient
 	}
@@ -223,7 +242,7 @@ func newUploaderv2(
 		return nil, err
 	}
 
-	u := &uploaderv2{
+	u := &uploader{
 		ctx: ctx,
 
 		cas:          cas,
@@ -317,7 +336,7 @@ func newUploaderv2(
 	return u, nil
 }
 
-func (u *uploaderv2) close() {
+func (u *uploader) close() {
 	// The context must be cancelled first.
 	<-u.ctx.Done()
 
@@ -356,11 +375,11 @@ func (u *uploaderv2) close() {
 	u.workerWg.Wait()
 }
 
-func (u *uploaderv2) withRetry(ctx context.Context, predicate retry.ShouldRetry, policy retry.BackoffPolicy, fn func() error) error {
+func (u *uploader) withRetry(ctx context.Context, predicate retry.ShouldRetry, policy retry.BackoffPolicy, fn func() error) error {
 	return retry.WithPolicy(ctx, predicate, policy, fn)
 }
 
-func (u *uploaderv2) withTimeout(timeout time.Duration, cancelFn context.CancelFunc, fn func() error) error {
+func (u *uploader) withTimeout(timeout time.Duration, cancelFn context.CancelFunc, fn func() error) error {
 	// Success signal.
 	done := make(chan struct{})
 	defer close(done)

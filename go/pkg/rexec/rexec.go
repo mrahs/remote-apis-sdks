@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -225,42 +226,11 @@ func (ec *Context) computeInputsNg() error {
 	ec.Metadata.CommandDigest = cmdDg
 	log.V(1).Infof("%s %s> Command digest: %s", cmdID, executionID, cmdDg)
 	log.V(1).Infof("%s %s> Computing input Merkle tree...", cmdID, executionID)
-	execRoot, err := impath.Abs(ec.cmd.ExecRoot)
+	execRoot, workingDir, remoteWorkingDir, err := cmdDirs(ec.cmd)
 	if err != nil {
 		return err
 	}
-	workingDir, err := impath.Abs(ec.cmd.ExecRoot, ec.cmd.WorkingDir)
-	if err != nil {
-		return err
-	}
-	remoteWorkingDir, err := impath.Abs(ec.cmd.ExecRoot, ec.cmd.RemoteWorkingDir)
-	if err != nil {
-		return err
-	}
-	var slo symlinkopts.Options
-	slTree := ec.client.GrpcClient.TreeSymlinkOpts
-	if slTree == nil {
-		slTree = rc.DefaultTreeSymlinkOpts()
-	}
-	slPreserve := slTree.Preserved
-	if ec.cmd.InputSpec.SymlinkBehavior == command.ResolveSymlink {
-		slPreserve = false
-	}
-	if ec.cmd.InputSpec.SymlinkBehavior == command.PreserveSymlink {
-		slPreserve = true
-	}
-	switch {
-	case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.FollowsTarget && ec.client.GrpcClient.TreeSymlinkOpts.MaterializeOutsideExecRoot:
-		slo = symlinkopts.ResolveExternalOnlyWithTarget()
-	case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.FollowsTarget:
-		slo = symlinkopts.PreserveWithTarget()
-	case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.MaterializeOutsideExecRoot:
-		slo = symlinkopts.ResolveExternalOnly()
-	case slPreserve:
-		slo = symlinkopts.PreserveNoDangling()
-	default:
-		slo = symlinkopts.ResolveAlways()
-	}
+	slo := symlinkOpts(ec.client.GrpcClient.TreeSymlinkOpts, ec.cmd.InputSpec.SymlinkBehavior)
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+1)
 	reqs = append(reqs, casng.UploadRequest{Bytes: blob, Digest: cmdDg})
 	for _, p := range ec.cmd.InputSpec.Inputs {
@@ -279,7 +249,6 @@ func (ec *Context) computeInputsNg() error {
 			SymlinkOptions: slo,
 		})
 	}
-	// TODO: return the root node
 	_, stats, err := ec.client.GrpcClient.NgUpload(ec.ctx, reqs...)
 	if err != nil {
 		return err
@@ -287,9 +256,38 @@ func (ec *Context) computeInputsNg() error {
 	ec.Metadata.InputFiles = int(stats.InputFileCount)
 	ec.Metadata.InputDirectories = int(stats.InputDirCount)
 	ec.Metadata.TotalInputBytes = stats.BytesRequested
+
+	// Construct the merkle tree root.
+	root := &repb.Directory{}
+	topLevel := topLevelReqs(reqs)
+	for _, r := range topLevel {
+		node := ec.client.GrpcClient.NgNode(r.PathRemote, r.Exclude)
+		if node == nil {
+			return fmt.Errorf("cannot construct a merkle tree with a missing node for path %q", r.PathRemote)
+		}
+		switch n := node.(type) {
+		case *repb.FileNode:
+			root.Files = append(root.Files, n)
+		case *repb.DirectoryNode:
+			root.Directories = append(root.Directories, n)
+		case *repb.SymlinkNode:
+			root.Symlinks = append(root.Symlinks, n)
+		default:
+			return fmt.Errorf("unexpeced node type %[1]T for path %[1]q while constructing merkle tree root", node)
+		}
+	}
+	// Children are already sorted as a side effect of topLevelReqs.
+	// sort.Slice(root.Files, func(i, j int) bool { return root.Files[i].Name < root.Files[j].Name })
+	// sort.Slice(root.Directories, func(i, j int) bool { return root.Directories[i].Name < root.Directories[j].Name })
+	// sort.Slice(root.Symlinks, func(i, j int) bool { return root.Symlinks[i].Name < root.Symlinks[j].Name })
+	rootBytes, err := proto.Marshal(root)
+	if err != nil {
+		return err
+	}
+
 	acPb := &repb.Action{
 		CommandDigest:   cmdDg.ToProto(),
-		InputRootDigest: root.ToProto(),
+		InputRootDigest: digest.NewFromBlob(rootBytes).ToProto(),
 		DoNotCache:      ec.opt.DoNotCache,
 	}
 	// If supported, we attach a copy of the platform properties list to the Action.
@@ -313,6 +311,67 @@ func (ec *Context) computeInputsNg() error {
 	ec.Metadata.ActionDigest = acDg
 	ec.Metadata.TotalInputBytes += cmdDg.Size + acDg.Size
 	return nil
+}
+
+func symlinkOpts(treeOpts *rc.TreeSymlinkOpts, cmdOpts command.SymlinkBehaviorType) symlinkopts.Options {
+	var slo symlinkopts.Options
+	if treeOpts == nil {
+		treeOpts = rc.DefaultTreeSymlinkOpts()
+	}
+	slPreserve := treeOpts.Preserved
+	if cmdOpts == command.ResolveSymlink {
+		slPreserve = false
+	}
+	if cmdOpts == command.PreserveSymlink {
+		slPreserve = true
+	}
+	switch {
+	case slPreserve && treeOpts.FollowsTarget && treeOpts.MaterializeOutsideExecRoot:
+		slo = symlinkopts.ResolveExternalOnlyWithTarget()
+	case slPreserve && treeOpts.FollowsTarget:
+		slo = symlinkopts.PreserveWithTarget()
+	case slPreserve && treeOpts.MaterializeOutsideExecRoot:
+		slo = symlinkopts.ResolveExternalOnly()
+	case slPreserve:
+		slo = symlinkopts.PreserveNoDangling()
+	default:
+		slo = symlinkopts.ResolveAlways()
+	}
+	return slo
+}
+
+func cmdDirs(cmd *command.Command) (execRoot impath.Absolute, workingDir impath.Absolute, remoteWorkingDir impath.Absolute, err error) {
+	execRoot, err = impath.Abs(cmd.ExecRoot)
+	if err != nil {
+		return
+	}
+	workingDir, err = impath.Abs(cmd.ExecRoot, cmd.WorkingDir)
+	if err != nil {
+		return
+	}
+	remoteWorkingDir, err = impath.Abs(cmd.ExecRoot, cmd.RemoteWorkingDir)
+	if err != nil {
+		return
+	}
+	return
+}
+
+// topLevelReqs returns a subset of reqs that corresponds to the top level paths.
+func topLevelReqs(reqs []casng.UploadRequest) []casng.UploadRequest {
+	if len(reqs) == 0 {
+		return nil
+	}
+	sort.Slice(reqs, func(i, j int) bool { return reqs[i].PathRemote.String() < reqs[j].PathRemote.String() })
+	top := []casng.UploadRequest{reqs[0]}
+	lastReq := top[0]
+	for i := 1; i < len(reqs); i++ {
+		r := reqs[i]
+		if _, err := impath.Descendant(lastReq.PathRemote, r.PathRemote); err != nil {
+			top = append(top, r)
+			lastReq = r
+		}
+	}
+	return top
 }
 
 // GetCachedResult tries to get the command result from the cache. The Result will be nil on a

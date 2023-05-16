@@ -103,7 +103,7 @@ func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r
 	return u.writeBytes(ctx, name, r, size, offset, false)
 }
 
-func (u *uploaderv2) writeBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error) {
+func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error) {
 	log.V(2).Infof("[casng] upload.write_bytes.start: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
 	defer log.V(2).Infof("[casng] upload.write_bytes.done: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
 
