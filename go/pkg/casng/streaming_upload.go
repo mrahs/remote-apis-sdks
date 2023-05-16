@@ -63,13 +63,16 @@ type UploadRequest struct {
 	// Bytes takes precedence over Path. It is meant for small blobs. Using a large slice of bytes might slow things down.
 	Bytes []byte
 
-	// Path is ignored if Bytes is set.
+	// Path is used to access and read files. It is ignored if Bytes is set.
 	Path impath.Absolute
 
-	// SymlinkOptions is ignored if Path is ignored.
+	// PathRemote is used when uploading files. It is ignored if Path is ignored.
+	PathRemote impath.Absolute
+
+	// SymlinkOptions is used when Path is set. It is ignored if Path is ignored.
 	SymlinkOptions slo.Options
 
-	// Exclude is ignored if Path is ignored.
+	// Exclude is used when Path is set. It is ignored if Path is ignored.
 	Exclude walker.Filter
 
 	// ctx is used to unify metadata in the streaming uploader when making remote calls.
@@ -310,7 +313,12 @@ func (u *uploaderv2) digest(req UploadRequest) {
 			default:
 			}
 
-			key := path.String() + req.Exclude.String()
+			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
+			if errPath != nil {
+				err = errors.Join(errPath, err)
+				return walker.SkipPath, false
+			}
+			key := p.String() + req.Exclude.String()
 
 			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
 			// In both cases, deferring is the right call. Once the upload is processed, all requestters will revisit the path to get the digestion result.
@@ -352,6 +360,13 @@ func (u *uploaderv2) digest(req UploadRequest) {
 					err = errors.Join(errDigest, err)
 					return walker.SkipPath, false
 				}
+				// Ensure the correct path is set on the node.
+				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
+				if errPath != nil {
+					err = errors.Join(errPath, err)
+					return walker.SkipPath, false
+				}
+				node.Name = p.Base().String()
 				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
@@ -392,6 +407,13 @@ func (u *uploaderv2) digest(req UploadRequest) {
 					err = errors.Join(errDigest, err)
 					return false
 				}
+				// Ensure the correct path is set on the node.
+				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
+				if errPath != nil {
+					err = errors.Join(errPath, err)
+					return false
+				}
+				node.Name = p.Base().String()
 				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
 				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
 				u.digestCache.Store(key, digest.NewFromProtoUnvalidated(node.Digest))
@@ -406,6 +428,13 @@ func (u *uploaderv2) digest(req UploadRequest) {
 					err = errors.Join(errDigest, err)
 					return false
 				}
+				// Ensure the correct path is set on the node.
+				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
+				if errPath != nil {
+					err = errors.Join(errPath, err)
+					return false
+				}
+				node.Name = p.Base().String()
 				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
 				blb.tag = req.tag
 				blb.ctx = req.ctx
@@ -452,6 +481,13 @@ func (u *uploaderv2) digest(req UploadRequest) {
 				return walker.SkipSymlink, false
 			}
 			if node != nil {
+				// Ensure the correct path is set on the node.
+				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
+				if errPath != nil {
+					err = errors.Join(errPath, err)
+					return walker.SkipSymlink, false
+				}
+				node.Name = p.Base().String()
 				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
 				u.digestCache.Store(key, digest.Digest{})
 			}

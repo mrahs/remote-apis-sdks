@@ -645,6 +645,6 @@ func (c *Client) ngUploadPredigested(ctx context.Context, entries []*uploadinfo.
 	return uploaded, stats.TotalBytesMoved, err
 }
 
-func (c *Client) NgUpload(ctx context.Context, reqs ...casng.UploadRequest) ([]digest.Digest, casng.Stats, error){
+func (c *Client) NgUpload(ctx context.Context, reqs ...casng.UploadRequest) ([]digest.Digest, casng.Stats, error) {
 	return c.casUploaderNg.Upload(ctx, reqs...)
 }

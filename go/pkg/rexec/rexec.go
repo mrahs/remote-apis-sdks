@@ -225,8 +225,18 @@ func (ec *Context) computeInputsNg() error {
 	ec.Metadata.CommandDigest = cmdDg
 	log.V(1).Infof("%s %s> Command digest: %s", cmdID, executionID, cmdDg)
 	log.V(1).Infof("%s %s> Computing input Merkle tree...", cmdID, executionID)
-	// TODO: use remoteWorkingDir in generated nodes from digestion.
-	execRoot, workingDir, remoteWorkingDir := ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir
+	execRoot, err := impath.Abs(ec.cmd.ExecRoot)
+	if err != nil {
+		return err
+	}
+	workingDir, err := impath.Abs(ec.cmd.ExecRoot, ec.cmd.WorkingDir)
+	if err != nil {
+		return err
+	}
+	remoteWorkingDir, err := impath.Abs(ec.cmd.ExecRoot, ec.cmd.RemoteWorkingDir)
+	if err != nil {
+		return err
+	}
 	var slo symlinkopts.Options
 	slTree := ec.client.GrpcClient.TreeSymlinkOpts
 	if slTree == nil {
@@ -239,26 +249,35 @@ func (ec *Context) computeInputsNg() error {
 	if ec.cmd.InputSpec.SymlinkBehavior == command.PreserveSymlink {
 		slPreserve = true
 	}
-	switch{
-		case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.FollowsTarget && ec.client.GrpcClient.TreeSymlinkOpts.MaterializeOutsideExecRoot:
-			slo = symlinkopts.ResolveExternalOnlyWithTarget()
-		case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.FollowsTarget:
-			slo = symlinkopts.PreserveWithTarget()
-		case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.MaterializeOutsideExecRoot:
-			slo = symlinkopts.ResolveExternalOnly()
-		case slPreserve:
-			slo = symlinkopts.PreserveNoDangling()
-		default:
-			slo = symlinkopts.ResolveAlways()
+	switch {
+	case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.FollowsTarget && ec.client.GrpcClient.TreeSymlinkOpts.MaterializeOutsideExecRoot:
+		slo = symlinkopts.ResolveExternalOnlyWithTarget()
+	case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.FollowsTarget:
+		slo = symlinkopts.PreserveWithTarget()
+	case slPreserve && ec.client.GrpcClient.TreeSymlinkOpts.MaterializeOutsideExecRoot:
+		slo = symlinkopts.ResolveExternalOnly()
+	case slPreserve:
+		slo = symlinkopts.PreserveNoDangling()
+	default:
+		slo = symlinkopts.ResolveAlways()
 	}
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+1)
 	reqs = append(reqs, casng.UploadRequest{Bytes: blob, Digest: cmdDg})
 	for _, p := range ec.cmd.InputSpec.Inputs {
-		absPath, err := impath.Abs(execRoot, p)
+		rel, err := impath.Rel(p)
 		if err != nil {
 			return err
 		}
-		reqs = append(reqs, casng.UploadRequest{Path: absPath, SymlinkOptions: slo})
+		absPath := execRoot.Append(rel)
+		absPathRemote, err := absPath.ReplacePrefix(workingDir, remoteWorkingDir)
+		if err != nil {
+			return err
+		}
+		reqs = append(reqs, casng.UploadRequest{
+			Path:           absPath,
+			PathRemote:     absPathRemote,
+			SymlinkOptions: slo,
+		})
 	}
 	// TODO: return the root node
 	_, stats, err := ec.client.GrpcClient.NgUpload(ec.ctx, reqs...)

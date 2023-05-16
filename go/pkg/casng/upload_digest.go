@@ -20,6 +20,11 @@ import (
 )
 
 // digestSymlink follows the target and/or constructs a symlink node.
+//
+// The returned node doesn't include ancenstory information. The symlink name is just the base of path, while the target is relative to the symlink name.
+// For example: if the root is /a, the symlink is b/c and the target is /a/foo, the name will be c and the target will be ../foo.
+// Note that the target includes hierarchy information, without specific names.
+// Another example: if the root is /a, the symilnk is b/c and the target is foo, the name will be c, and the target will be foo.
 func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) (*repb.SymlinkNode, walker.SymlinkAction, error) {
 	if slo.Skip() {
 		return nil, walker.SkipSymlink, nil
@@ -79,6 +84,9 @@ func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) 
 }
 
 // digestDirectory constructs a hash-deterministic directory node and returns it along with the corresponding bytes of the directory proto.
+//
+// No syscalls are made in this method.
+// Only the base of path is used. No ancenstory information is included in the returned node.
 func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.DirectoryNode, []byte, error) {
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
@@ -114,6 +122,8 @@ func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.Dire
 }
 
 // digestFile constructs a file node and returns it along with the blob to be dispatched.
+//
+// No ancenstory information is included in the returned node. Only the base of path is used.
 //
 // One token of ioSem is acquired upon calling this function.
 // If the file size <= smallFileSizeThreshold, the token is released before returning.

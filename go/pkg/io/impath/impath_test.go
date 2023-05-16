@@ -217,3 +217,17 @@ func Test_Descendant(t *testing.T) {
 		})
 	}
 }
+
+func Test_ReplacePrefix(t *testing.T) {
+	p := impath.MustAbs(impath.Root, "foo", "bar", "baz")
+	old := impath.MustAbs(impath.Root, "foo", "bar")
+	new := impath.MustAbs(impath.Root, "a", "b")
+	want := impath.MustAbs(impath.Root, "a", "b", "baz")
+	replaced, err := p.ReplacePrefix(old, new)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if replaced.String() != want.String() {
+		t.Errorf("path mismatch: want %q, got %q", want, replaced)
+	}
+}

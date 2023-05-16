@@ -37,6 +37,11 @@ type Relative struct {
 	path string
 }
 
+var (
+	zeroAbs = Absolute{}
+	zeroRel = Relative{}
+)
+
 // Dir is a convenient method that returns all path elements except the last.
 func (p Absolute) Dir() Absolute {
 	return Absolute{path: filepath.Dir(p.path)}
@@ -92,10 +97,18 @@ func (p Relative) Append(elements ...Relative) Relative {
 	return Relative{path: filepath.Join(paths...)}
 }
 
-var (
-	zeroAbs = Absolute{}
-	zeroRel = Relative{}
-)
+// ReplacePrefix is a convenient method to make the path relative to new.
+// If the path does not have the old prefix, it's an error.
+func (p Absolute) ReplacePrefix(old, new Absolute) (Absolute, error) {
+	if old.String() == new.String() {
+		return p, nil
+	}
+	rel, err := filepath.Rel(old.String(), p.String())
+	if err != nil {
+		return zeroAbs, errors.Join(ErrNotRelative, err)
+	}
+	return Absolute{path: filepath.Join(new.String(), rel)}, nil
+}
 
 // Abs creates a new absolute and clean path from the specified elements.
 //
