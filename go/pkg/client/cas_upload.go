@@ -653,3 +653,7 @@ func (c *Client) NgUpload(ctx context.Context, reqs ...casng.UploadRequest) ([]d
 func (c *Client) NgNode(path impath.Absolute, exclude walker.Filter) proto.Message {
 	return c.casUploaderNg.Node(path, exclude)
 }
+
+func (c *Client) IsCasNG() bool {
+	return c.useCasNg
+}

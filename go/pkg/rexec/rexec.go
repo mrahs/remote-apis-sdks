@@ -209,7 +209,7 @@ func (ec *Context) computeInputs() error {
 	return nil
 }
 
-func (ec *Context) computeInputsNg() error {
+func (ec *Context) ngComputeInputs() error {
 	if ec.Metadata.ActionDigest.Size > 0 {
 		// Already computed inputs.
 		return nil
@@ -249,13 +249,16 @@ func (ec *Context) computeInputsNg() error {
 			SymlinkOptions: slo,
 		})
 	}
-	_, stats, err := ec.client.GrpcClient.NgUpload(ec.ctx, reqs...)
+	missing, stats, err := ec.client.GrpcClient.NgUpload(ec.ctx, reqs...)
 	if err != nil {
 		return err
 	}
 	ec.Metadata.InputFiles = int(stats.InputFileCount)
 	ec.Metadata.InputDirectories = int(stats.InputDirCount)
 	ec.Metadata.TotalInputBytes = stats.BytesRequested
+	ec.Metadata.LogicalBytesUploaded = stats.LogicalBytesMoved
+	ec.Metadata.RealBytesUploaded = stats.TotalBytesMoved
+	ec.Metadata.MissingDigests = missing
 
 	// Construct the merkle tree root.
 	root := &repb.Directory{}
@@ -304,12 +307,16 @@ func (ec *Context) computeInputsNg() error {
 	}
 	acDg := digest.NewFromBlob(blob)
 	log.V(1).Infof("%s %s> Action digest: %s", cmdID, executionID, acDg)
-	_, _, err = ec.client.GrpcClient.NgUpload(ec.ctx, casng.UploadRequest{Bytes: blob, Digest: acDg})
+	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx, casng.UploadRequest{Bytes: blob, Digest: acDg})
 	if err != nil {
 		return err
 	}
 	ec.Metadata.ActionDigest = acDg
 	ec.Metadata.TotalInputBytes += cmdDg.Size + acDg.Size
+	ec.Metadata.MissingDigests = append(ec.Metadata.MissingDigests, missing...)
+	ec.Metadata.TotalInputBytes += stats.BytesRequested
+	ec.Metadata.LogicalBytesUploaded += stats.LogicalBytesMoved
+	ec.Metadata.RealBytesUploaded += stats.TotalBytesMoved
 	return nil
 }
 
@@ -473,25 +480,38 @@ func (ec *Context) UpdateCachedResult() {
 // ExecuteRemotely tries to execute the command remotely and download the results. It uploads any
 // missing inputs first.
 func (ec *Context) ExecuteRemotely() {
-	if err := ec.computeInputs(); err != nil {
-		ec.Result = command.NewLocalErrorResult(err)
-		return
-	}
 	cmdID, executionID := ec.cmd.Identifiers.ExecutionID, ec.cmd.Identifiers.CommandID
-	log.V(1).Infof("%s %s> Checking inputs to upload...", cmdID, executionID)
-	// TODO(olaola): compute input cache hit stats.
-	ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
-	missing, bytesMoved, err := ec.client.GrpcClient.UploadIfMissing(ec.ctx, ec.inputBlobs...)
-	ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now()
-	if err != nil {
-		ec.Result = command.NewRemoteErrorResult(err)
-		return
+	if ec.client.GrpcClient.IsCasNG() {
+		log.V(1).Infof("%s %s> Uploading inputs...", cmdID, executionID)
+		ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
+		err := ec.ngComputeInputs()
+		ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now()
+		if err != nil {
+			ec.Result = command.NewLocalErrorResult(err)
+			return
+		}
+	} else {
+
+		if err := ec.computeInputs(); err != nil {
+			ec.Result = command.NewLocalErrorResult(err)
+			return
+		}
+		log.V(1).Infof("%s %s> Checking inputs to upload...", cmdID, executionID)
+		// TODO(olaola): compute input cache hit stats.
+		ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
+		missing, bytesMoved, err := ec.client.GrpcClient.UploadIfMissing(ec.ctx, ec.inputBlobs...)
+		ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now()
+		if err != nil {
+			ec.Result = command.NewRemoteErrorResult(err)
+			return
+		}
+		ec.Metadata.MissingDigests = missing
+		for _, d := range missing {
+			ec.Metadata.LogicalBytesUploaded += d.Size
+		}
+		ec.Metadata.RealBytesUploaded = bytesMoved
 	}
-	ec.Metadata.MissingDigests = missing
-	for _, d := range missing {
-		ec.Metadata.LogicalBytesUploaded += d.Size
-	}
-	ec.Metadata.RealBytesUploaded = bytesMoved
+
 	log.V(1).Infof("%s %s> Executing remotely...\n%s", cmdID, executionID, strings.Join(ec.cmd.Args, " "))
 	ec.Metadata.EventTimes[command.EventExecuteRemotely] = &command.TimeInterval{From: time.Now()}
 	op, err := ec.client.GrpcClient.ExecuteAndWait(ec.ctx, &repb.ExecuteRequest{
