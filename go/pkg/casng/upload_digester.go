@@ -156,6 +156,7 @@ func (u *uploader) digest(req UploadRequest) {
 				}
 				log.V(3).Infof("[casng] upload.digest.visit.defer.wait: realPath=%s, desiredPath=%s, tag=%s", realPath, path, req.tag)
 				wg.Wait()
+				log.V(3).Infof("[casng] upload.digest.visit.defer.wait.done: realPath=%s, desiredPath=%s, tag=%s", realPath, path, req.tag)
 				delete(deferredWg, key)
 				return walker.Defer, true
 			}
@@ -174,12 +175,6 @@ func (u *uploader) digest(req UploadRequest) {
 				node, b, errDigest := digestDirectory(realPath, u.dirChildren.load(key))
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
-					return walker.SkipPath, false
-				}
-				// Ensure the correct path is set on the node.
-				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-				if errPath != nil {
-					err = errors.Join(errPath, err)
 					return walker.SkipPath, false
 				}
 				node.Name = p.Base().String()
@@ -232,12 +227,6 @@ func (u *uploader) digest(req UploadRequest) {
 					err = errors.Join(errDigest, err)
 					return false
 				}
-				// Ensure the correct path is set on the node.
-				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-				if errPath != nil {
-					err = errors.Join(errPath, err)
-					return false
-				}
 				node.Name = p.Base().String()
 				u.dirChildren.append(parentKey, node)
 				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
@@ -251,12 +240,6 @@ func (u *uploader) digest(req UploadRequest) {
 				node, blb, errDigest := digestFile(u.ctx, realPath, info, u.ioSem, u.ioLargeSem, u.ioCfg.SmallFileSizeThreshold, u.ioCfg.LargeFileSizeThreshold)
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
-					return false
-				}
-				// Ensure the correct path is set on the node.
-				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-				if errPath != nil {
-					err = errors.Join(errPath, err)
 					return false
 				}
 				node.Name = p.Base().String()
@@ -314,12 +297,6 @@ func (u *uploader) digest(req UploadRequest) {
 				return walker.SkipSymlink, false
 			}
 			if node != nil {
-				// Ensure the correct path is set on the node.
-				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-				if errPath != nil {
-					err = errors.Join(errPath, err)
-					return walker.SkipSymlink, false
-				}
 				node.Name = p.Base().String()
 				u.dirChildren.append(parentKey, node)
 				u.nodeCache.Store(key, node)
