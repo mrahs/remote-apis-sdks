@@ -79,7 +79,7 @@ func TestQuery_Batching(t *testing.T) {
 			t.Parallel()
 			log.Infof("test: %s", test.name)
 			ctx, ctxCancel := context.WithCancel(context.Background())
-			u, err := casng.NewBatchingUploader(ctx, test.cas, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
+			u, err := casng.NewBatchingUploader(ctx, test.cas, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}

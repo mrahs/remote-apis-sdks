@@ -481,7 +481,7 @@ func TestUpload_Batching(t *testing.T) {
 
 func TestUpload_BatchingAbort(t *testing.T) {
 	ctx, ctxCancel := context.WithCancel(context.Background())
-	u, err := casng.NewBatchingUploader(ctx, &fakeCAS{}, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
+	u, err := casng.NewBatchingUploader(ctx, &fakeCAS{}, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}

@@ -248,7 +248,7 @@ func (u *uploader) batcher() {
 		ctx = u.ctx
 	}
 
-	bundleTicker := time.NewTicker(u.batchRpcCfg.BundleTimeout)
+	bundleTicker := time.NewTicker(u.batchRPCCfg.BundleTimeout)
 	defer bundleTicker.Stop()
 	for {
 		select {
@@ -322,7 +322,7 @@ func (u *uploader) batcher() {
 
 			// If the blob doesn't fit in the current bundle, cycle it.
 			rSize := u.uploadRequestItemBaseSize + len(b.bytes)
-			if bundleSize+rSize >= u.batchRpcCfg.BytesLimit {
+			if bundleSize+rSize >= u.batchRPCCfg.BytesLimit {
 				handle()
 			}
 
@@ -337,7 +337,7 @@ func (u *uploader) batcher() {
 			ctx, _ = contextmd.FromContexts(ctx, b.ctx) // ignore non-essential error.
 
 			// If the bundle is full, cycle it.
-			if len(bundle) >= u.batchRpcCfg.ItemsLimit {
+			if len(bundle) >= u.batchRPCCfg.ItemsLimit {
 				handle()
 				continue
 			}
@@ -361,8 +361,8 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 	failed := make(map[digest.Digest]error)
 	digestRetryCount := make(map[digest.Digest]int64)
 	ctxGrpc, ctxGrpcCancel := context.WithCancel(ctx)
-	err := u.withTimeout(u.queryRpcCfg.Timeout, ctxGrpcCancel, func() error {
-		return u.withRetry(ctxGrpc, u.batchRpcCfg.RetryPredicate, u.batchRpcCfg.RetryPolicy, func() error {
+	err := u.withTimeout(u.queryRPCCfg.Timeout, ctxGrpcCancel, func() error {
+		return u.withRetry(ctxGrpc, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
 			// This call can have partial failures. Only retry retryable failed requests.
 			res, errCall := u.cas.BatchUpdateBlobs(ctxGrpc, req)
 			reqErr := errCall // return this error if nothing is retryable.

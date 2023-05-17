@@ -37,7 +37,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 		}
 		dgSet[d] = struct{}{}
 		batch = append(batch, d.ToProto())
-		if len(batch) >= u.queryRpcCfg.ItemsLimit {
+		if len(batch) >= u.queryRPCCfg.ItemsLimit {
 			batches = append(batches, batch)
 			batch = nil
 		}
@@ -59,8 +59,8 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	for _, batch := range batches {
 		req.BlobDigests = batch
 		ctx, ctxCancel := context.WithCancel(ctx)
-		errRes = u.withTimeout(u.queryRpcCfg.Timeout, ctxCancel, func() error {
-			return u.withRetry(ctx, u.queryRpcCfg.RetryPredicate, u.queryRpcCfg.RetryPolicy, func() error {
+		errRes = u.withTimeout(u.queryRPCCfg.Timeout, ctxCancel, func() error {
+			return u.withRetry(ctx, u.queryRPCCfg.RetryPredicate, u.queryRPCCfg.RetryPolicy, func() error {
 				res, errRes = u.cas.FindMissingBlobs(ctx, req)
 				return errRes
 			})
@@ -188,8 +188,8 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 
 		req.Data = buf[:n]
 		req.FinishWrite = finish && errRead == io.EOF
-		errStream := u.withTimeout(u.streamRpcCfg.Timeout, ctxCancel, func() error {
-			return u.withRetry(ctx, u.streamRpcCfg.RetryPredicate, u.streamRpcCfg.RetryPolicy, func() error {
+		errStream := u.withTimeout(u.streamRPCCfg.Timeout, ctxCancel, func() error {
+			return u.withRetry(ctx, u.streamRPCCfg.RetryPredicate, u.streamRPCCfg.RetryPolicy, func() error {
 				stats.TotalBytesMoved += n64
 				return stream.Send(req)
 			})

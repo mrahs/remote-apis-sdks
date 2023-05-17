@@ -102,12 +102,12 @@ func MakeCompressedWriteResourceName(instanceName, hash string, size int64) stri
 	return fmt.Sprintf("%s/uploads/%s/compressed-blobs/zstd/%s/%d", instanceName, uuid.New(), hash, size)
 }
 
-// batchingUplodaer implements the corresponding interface.
+// BatchingUplodaer provides a blocking interface to query and upload to the CAS.
 type BatchingUploader struct {
 	*uploader
 }
 
-// streamingUploader implements the corresponding interface.
+// StreamingUploader provides an non-blocking interface to query and upload to the CAS
 type StreamingUploader struct {
 	*uploader
 }
@@ -118,9 +118,9 @@ type uploader struct {
 	byteStream   bspb.ByteStreamClient
 	instanceName string
 
-	queryRpcCfg  GRPCConfig
-	batchRpcCfg  GRPCConfig
-	streamRpcCfg GRPCConfig
+	queryRPCCfg  GRPCConfig
+	batchRPCCfg  GRPCConfig
+	streamRPCCfg GRPCConfig
 
 	// gRPC throttling controls.
 	querySem  *semaphore.Weighted // Controls concurrent calls to the query API.
@@ -249,9 +249,9 @@ func newUploaderv2(
 		byteStream:   byteStream,
 		instanceName: instanceName,
 
-		queryRpcCfg:  queryCfg,
-		batchRpcCfg:  uploadCfg,
-		streamRpcCfg: streamCfg,
+		queryRPCCfg:  queryCfg,
+		batchRPCCfg:  uploadCfg,
+		streamRPCCfg: streamCfg,
 
 		querySem:  semaphore.NewWeighted(int64(queryCfg.ConcurrentCallsLimit)),
 		uploadSem: semaphore.NewWeighted(int64(uploadCfg.ConcurrentCallsLimit)),

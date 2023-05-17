@@ -16,7 +16,7 @@ func TestMissingBlobs_StreamingAbort(t *testing.T) {
 	}}
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	ctxCancel()
-	u, err := casng.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
+	u, err := casng.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestMissingBlobs_Streaming(t *testing.T) {
 		return &repb.FindMissingBlobsResponse{}, nil
 	}}
 	ctx, ctxCancel := context.WithCancel(context.Background())
-	u, err := casng.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", defaultRpcCfg, defaultRpcCfg, defaultRpcCfg, defaultIoCfg)
+	u, err := casng.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}

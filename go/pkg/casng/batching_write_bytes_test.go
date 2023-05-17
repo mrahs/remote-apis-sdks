@@ -267,11 +267,11 @@ func TestUpload_WriteBytes(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			testRpcCfg := defaultRpcCfg
+			testRpcCfg := defaultRPCCfg
 			if test.retryPolicy != nil {
 				testRpcCfg.RetryPolicy = *test.retryPolicy
 			}
-			u, err := casng.NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", testRpcCfg, testRpcCfg, testRpcCfg, defaultIoCfg)
+			u, err := casng.NewBatchingUploader(context.Background(), &fakeCAS{}, test.bs, "", testRpcCfg, testRpcCfg, testRpcCfg, defaultIOCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}

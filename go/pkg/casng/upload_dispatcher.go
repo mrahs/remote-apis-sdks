@@ -63,7 +63,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 		defer log.V(1).Info("[casng] upload.dispatcher.pipe.stop")
 
 		done := false
-		batchItemSizeLimit := int64(u.batchRpcCfg.BytesLimit - u.uploadRequestBaseSize - u.uploadRequestItemBaseSize)
+		batchItemSizeLimit := int64(u.batchRPCCfg.BytesLimit - u.uploadRequestBaseSize - u.uploadRequestItemBaseSize)
 		// Keep track of blobs that are associated with a digest since the query API only accepts digests.
 		// Each blob may have a different tag and context so all must be dispathced.
 		digestBlobs := make(map[digest.Digest][]blob)

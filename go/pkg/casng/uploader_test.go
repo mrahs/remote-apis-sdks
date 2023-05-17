@@ -21,7 +21,7 @@ var (
 	retryNever     = retry.Immediately(retry.Attempts(1))
 	retryTwice     = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
 	retryAllErrors = func(error) bool { return true }
-	defaultRpcCfg  = casng.GRPCConfig{
+	defaultRPCCfg  = casng.GRPCConfig{
 		ConcurrentCallsLimit: 5,
 		ItemsLimit:           2,
 		BytesLimit:           1024,
@@ -30,7 +30,7 @@ var (
 		RetryPolicy:          retryNever,
 		RetryPredicate:       retry.TransientOnly,
 	}
-	defaultIoCfg = casng.IOConfig{
+	defaultIOCfg = casng.IOConfig{
 		ConcurrentWalksLimit:     1,
 		OpenFilesLimit:           1,
 		OpenLargeFilesLimit:      1,

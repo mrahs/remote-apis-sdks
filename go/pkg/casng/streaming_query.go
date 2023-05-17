@@ -177,7 +177,7 @@ func (u *uploader) queryProcessor() {
 		ctx = u.ctx
 	}
 
-	bundleTicker := time.NewTicker(u.queryRpcCfg.BundleTimeout)
+	bundleTicker := time.NewTicker(u.queryRPCCfg.BundleTimeout)
 	defer bundleTicker.Stop()
 	for {
 		select {
@@ -189,7 +189,7 @@ func (u *uploader) queryProcessor() {
 			dSize := proto.Size(req.digest.ToProto())
 
 			// Check oversized items.
-			if u.queryRequestBaseSize+dSize > u.queryRpcCfg.BytesLimit {
+			if u.queryRequestBaseSize+dSize > u.queryRPCCfg.BytesLimit {
 				u.queryPubSub.pub(MissingBlobsResponse{
 					Digest: req.digest,
 					Err:    ErrOversizedItem,
@@ -198,7 +198,7 @@ func (u *uploader) queryProcessor() {
 			}
 
 			// Check size threshold.
-			if bundleSize+dSize >= u.queryRpcCfg.BytesLimit {
+			if bundleSize+dSize >= u.queryRPCCfg.BytesLimit {
 				handle()
 			}
 
@@ -208,7 +208,7 @@ func (u *uploader) queryProcessor() {
 			ctx, _ = contextmd.FromContexts(ctx, req.ctx) // ignore non-essential error.
 
 			// Check length threshold.
-			if len(bundle) >= u.queryRpcCfg.ItemsLimit {
+			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
 				handle()
 			}
 		case <-bundleTicker.C:
@@ -242,8 +242,8 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 	var res *repb.FindMissingBlobsResponse
 	var err error
 	ctx, ctxCancel := context.WithCancel(ctx)
-	err = u.withTimeout(u.queryRpcCfg.Timeout, ctxCancel, func() error {
-		return u.withRetry(ctx, u.queryRpcCfg.RetryPredicate, u.queryRpcCfg.RetryPolicy, func() error {
+	err = u.withTimeout(u.queryRPCCfg.Timeout, ctxCancel, func() error {
+		return u.withRetry(ctx, u.queryRPCCfg.RetryPredicate, u.queryRPCCfg.RetryPolicy, func() error {
 			res, err = u.cas.FindMissingBlobs(ctx, req)
 			return err
 		})
