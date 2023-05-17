@@ -10,6 +10,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
@@ -25,10 +26,10 @@ func TestUpload_Batching(t *testing.T) {
 		fs           map[string][]byte
 		root         string
 		ioCfg        casng.IOConfig
-		rpcCfg       *casng.GRPCConfig
+		batchRPCCfg  *casng.GRPCConfig
 		bsc          *fakeByteStreamClient
 		cc           *fakeCAS
-		wantStats    *casng.Stats
+		wantStats    casng.Stats
 		wantUploaded []digest.Digest
 	}{
 		{
@@ -36,12 +37,8 @@ func TestUpload_Batching(t *testing.T) {
 			fs: map[string][]byte{
 				"foo.c": []byte("int c;"),
 			},
-			root: "foo.c",
-			ioCfg: casng.IOConfig{
-				CompressionSizeThreshold: 100, // disable compression.
-				BufferSize:               1,
-				SmallFileSizeThreshold:   1, // ensure the blob gets streamed.
-			},
+			root:  "foo.c",
+			ioCfg: casng.IOConfig{BufferSize: 1},
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					return &fakeByteStream_WriteClient{
@@ -64,15 +61,10 @@ func TestUpload_Batching(t *testing.T) {
 					}, nil
 				},
 			},
-			wantStats: &casng.Stats{
-				BytesRequested:       6,
-				LogicalBytesMoved:    1, // matches a single buffer size
-				TotalBytesMoved:      1,
-				EffectiveBytesMoved:  1,
-				LogicalBytesCached:   6,
-				LogicalBytesStreamed: 1,
-				CacheHitCount:        1,
-				StreamedCount:        1,
+			wantStats: casng.Stats{
+				BytesRequested:     6,
+				LogicalBytesCached: 6,
+				CacheHitCount:      1,
 			},
 			wantUploaded: nil,
 		},
@@ -81,10 +73,16 @@ func TestUpload_Batching(t *testing.T) {
 			fs: map[string][]byte{
 				"foo.c": []byte("int c;"), // 6 bytes
 			},
-			root: "foo.c",
-			ioCfg: casng.IOConfig{
-				SmallFileSizeThreshold: 10, // larger than the blob to ensure it gets batched.
-				LargeFileSizeThreshold: 1000,
+			root:  "foo.c",
+			ioCfg: casng.IOConfig{CompressionSizeThreshold: 1024},
+			batchRPCCfg: &casng.GRPCConfig{
+				ConcurrentCallsLimit: 1,
+				ItemsLimit:           1,
+				BytesLimit:           1024,
+				Timeout:              time.Second,
+				BundleTimeout:        time.Millisecond,
+				RetryPolicy:          retryNever,
+				RetryPredicate:       retry.TransientOnly,
 			},
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
@@ -110,7 +108,7 @@ func TestUpload_Batching(t *testing.T) {
 					}, nil
 				},
 			},
-			wantStats: &casng.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:      6,
 				LogicalBytesMoved:   6,
 				TotalBytesMoved:     6,
@@ -126,11 +124,16 @@ func TestUpload_Batching(t *testing.T) {
 			fs: map[string][]byte{
 				"foo.c": []byte("int c;"), // 6 bytes
 			},
-			root: "foo.c",
-			ioCfg: casng.IOConfig{
-				CompressionSizeThreshold: 10, // larger than the blob to avoid compression.
-				SmallFileSizeThreshold:   1,  // smaller than the blob to ensure it gets streamed.
-				LargeFileSizeThreshold:   2,
+			root:  "foo.c",
+			ioCfg: casng.IOConfig{CompressionSizeThreshold: 1024},
+			batchRPCCfg: &casng.GRPCConfig{
+				ConcurrentCallsLimit: 1,
+				ItemsLimit:           1,
+				BytesLimit:           1,
+				Timeout:              time.Second,
+				BundleTimeout:        time.Millisecond,
+				RetryPolicy:          retryNever,
+				RetryPredicate:       retry.TransientOnly,
 			},
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
@@ -156,7 +159,7 @@ func TestUpload_Batching(t *testing.T) {
 					}, nil
 				},
 			},
-			wantStats: &casng.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:       6,
 				LogicalBytesMoved:    6,
 				TotalBytesMoved:      6,
@@ -174,11 +177,16 @@ func TestUpload_Batching(t *testing.T) {
 				"foo/baz.c":   []byte("int baz;"),
 				"foo/a/b/c.c": []byte("int c;"),
 			},
-			root: "foo",
-			ioCfg: casng.IOConfig{
-				CompressionSizeThreshold: 10000, // large enough to disable compression.
-				SmallFileSizeThreshold:   1000,  // large enough to ensure all blobs are batched.
-				LargeFileSizeThreshold:   1000,
+			root:  "foo",
+			ioCfg: casng.IOConfig{CompressionSizeThreshold: 1024},
+			batchRPCCfg: &casng.GRPCConfig{
+				ConcurrentCallsLimit: 1,
+				ItemsLimit:           1,
+				BytesLimit:           1024,
+				Timeout:              time.Second,
+				BundleTimeout:        time.Millisecond,
+				RetryPolicy:          retryNever,
+				RetryPredicate:       retry.TransientOnly,
 			},
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
@@ -208,7 +216,7 @@ func TestUpload_Batching(t *testing.T) {
 					}, nil
 				},
 			},
-			wantStats: &casng.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:      407,
 				LogicalBytesMoved:   407,
 				TotalBytesMoved:     407,
@@ -233,11 +241,16 @@ func TestUpload_Batching(t *testing.T) {
 				"foo/baz.c":   []byte("int baz;"),
 				"foo/a/b/c.c": []byte("int c;"),
 			},
-			root: "foo",
-			ioCfg: casng.IOConfig{
-				CompressionSizeThreshold: 10000, // large enough to disable compression.
-				SmallFileSizeThreshold:   1,
-				LargeFileSizeThreshold:   2,
+			root:  "foo",
+			ioCfg: casng.IOConfig{CompressionSizeThreshold: 1024},
+			batchRPCCfg: &casng.GRPCConfig{
+				ConcurrentCallsLimit: 1,
+				ItemsLimit:           1,
+				BytesLimit:           1,
+				Timeout:              time.Second,
+				BundleTimeout:        time.Millisecond,
+				RetryPolicy:          retryNever,
+				RetryPredicate:       retry.TransientOnly,
 			},
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
@@ -267,16 +280,14 @@ func TestUpload_Batching(t *testing.T) {
 					}, nil
 				},
 			},
-			wantStats: &casng.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:       407,
 				LogicalBytesMoved:    407,
 				TotalBytesMoved:      407,
 				EffectiveBytesMoved:  407,
-				LogicalBytesStreamed: 22,  // just the files
-				LogicalBytesBatched:  385, // the directories
+				LogicalBytesStreamed: 407,
 				CacheMissCount:       6,
-				StreamedCount:        3,
-				BatchedCount:         3,
+				StreamedCount:        6,
 			},
 			wantUploaded: []digest.Digest{
 				{Hash: "62f74d0e355efb6101ee13172d05e89592d4aef21ba0e4041584d8653e60c4c3", Size: 6},   // foo/a/b/c.c
@@ -295,11 +306,19 @@ func TestUpload_Batching(t *testing.T) {
 			},
 			root: "foo",
 			ioCfg: casng.IOConfig{
-				CompressionSizeThreshold: 10000, // large enough to disable compression.
-				SmallFileSizeThreshold:   1,
-				LargeFileSizeThreshold:   2,
-				OpenLargeFilesLimit:      2,
-				OpenFilesLimit:           2,
+				CompressionSizeThreshold: 1024,
+				OpenFilesLimit:           10,
+				OpenLargeFilesLimit:      10,
+				BufferSize:               1024,
+			},
+			batchRPCCfg: &casng.GRPCConfig{
+				ConcurrentCallsLimit: 1,
+				ItemsLimit:           1,
+				BytesLimit:           1,
+				Timeout:              time.Second,
+				BundleTimeout:        time.Millisecond,
+				RetryPolicy:          retryNever,
+				RetryPredicate:       retry.TransientOnly,
 			},
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
@@ -330,18 +349,16 @@ func TestUpload_Batching(t *testing.T) {
 					}, nil
 				},
 			},
-			wantStats: &casng.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:       176,
 				LogicalBytesMoved:    168,
 				TotalBytesMoved:      168,
 				EffectiveBytesMoved:  168,
-				LogicalBytesStreamed: 8,   // one copy
-				LogicalBytesCached:   8,   // the other copy
-				LogicalBytesBatched:  160, // the directory
+				LogicalBytesStreamed: 168,
+				LogicalBytesCached:   8, // the other copy
 				CacheMissCount:       2,
 				CacheHitCount:        1,
-				StreamedCount:        1,
-				BatchedCount:         1,
+				StreamedCount:        2,
 			},
 			wantUploaded: []digest.Digest{
 				{Hash: "9877358cfe402635019ce7bf591e9fd86d27953b0077e1f173b7875f0043d87a", Size: 8},   // the file
@@ -354,18 +371,13 @@ func TestUpload_Batching(t *testing.T) {
 				"foo/bar1.c": []byte("int bar;"),
 				"foo/bar2.c": []byte("int bar;"),
 			},
-			root: "foo",
-			ioCfg: casng.IOConfig{
-				CompressionSizeThreshold: 10000, // large enough to disable compression.
-				SmallFileSizeThreshold:   10,
-				LargeFileSizeThreshold:   20,
-				OpenFilesLimit:           2,
-			},
-			rpcCfg: &casng.GRPCConfig{
+			root:  "foo",
+			ioCfg: casng.IOConfig{CompressionSizeThreshold: 1024},
+			batchRPCCfg: &casng.GRPCConfig{
 				ConcurrentCallsLimit: 1,
 				BytesLimit:           1000,
-				ItemsLimit:           10,
-				BundleTimeout:        10 * time.Millisecond,
+				ItemsLimit:           3,                      // Matches the number of blobs in this test.
+				BundleTimeout:        100 * time.Millisecond, // Large to ensure the bundle gets dispatched by ItemsLimit.
 				Timeout:              time.Second,
 			},
 			bsc: &fakeByteStreamClient{
@@ -394,7 +406,7 @@ func TestUpload_Batching(t *testing.T) {
 					}, nil
 				},
 			},
-			wantStats: &casng.Stats{
+			wantStats: casng.Stats{
 				BytesRequested:      176,
 				LogicalBytesMoved:   168,
 				TotalBytesMoved:     168,
@@ -423,15 +435,12 @@ func TestUpload_Batching(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		if test.name != "batch_unified" {
-			continue
-		}
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			log.Infof("test: %s", test.name)
 			tmp := makeFs(t, test.fs)
-			if test.rpcCfg == nil {
-				test.rpcCfg = &rpcCfg
+			if test.batchRPCCfg == nil {
+				test.batchRPCCfg = &rpcCfg
 			}
 			if test.ioCfg.ConcurrentWalksLimit <= 0 {
 				test.ioCfg.ConcurrentWalksLimit = 1
@@ -446,11 +455,12 @@ func TestUpload_Batching(t *testing.T) {
 				test.ioCfg.OpenLargeFilesLimit = 1
 			}
 			ctx, ctxCancel := context.WithCancel(context.Background())
-			u, err := casng.NewBatchingUploader(ctx, test.cc, test.bsc, "", *test.rpcCfg, *test.rpcCfg, *test.rpcCfg, test.ioCfg)
+			u, err := casng.NewBatchingUploader(ctx, test.cc, test.bsc, "", rpcCfg, *test.batchRPCCfg, rpcCfg, test.ioCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
-			uploaded, stats, err := u.Upload(ctx, casng.UploadRequest{Path: impath.MustAbs(tmp, test.root), SymlinkOptions: symlinkopts.PreserveAllowDangling()})
+			root := impath.MustAbs(tmp, test.root)
+			uploaded, stats, err := u.Upload(ctx, casng.UploadRequest{Path: root, PathRemote: root, SymlinkOptions: symlinkopts.PreserveAllowDangling()})
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}

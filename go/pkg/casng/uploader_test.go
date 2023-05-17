@@ -18,17 +18,17 @@ import (
 )
 
 var (
-	retryNever    = retry.Immediately(retry.Attempts(1))
-	retryTwice    = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
-	retryAll      = func(error) bool { return true }
-	defaultRpcCfg = casng.GRPCConfig{
+	retryNever     = retry.Immediately(retry.Attempts(1))
+	retryTwice     = retry.ExponentialBackoff(time.Microsecond, time.Microsecond, retry.Attempts(2))
+	retryAllErrors = func(error) bool { return true }
+	defaultRpcCfg  = casng.GRPCConfig{
 		ConcurrentCallsLimit: 5,
 		ItemsLimit:           2,
 		BytesLimit:           1024,
 		Timeout:              time.Second,
 		BundleTimeout:        time.Millisecond,
 		RetryPolicy:          retryNever,
-		RetryPredicate:       retryAll,
+		RetryPredicate:       retry.TransientOnly,
 	}
 	defaultIoCfg = casng.IOConfig{
 		ConcurrentWalksLimit:     1,

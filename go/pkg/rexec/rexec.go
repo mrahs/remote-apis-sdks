@@ -491,7 +491,6 @@ func (ec *Context) ExecuteRemotely() {
 			return
 		}
 	} else {
-
 		if err := ec.computeInputs(); err != nil {
 			ec.Result = command.NewLocalErrorResult(err)
 			return

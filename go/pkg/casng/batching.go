@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
@@ -104,8 +105,11 @@ func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r
 }
 
 func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error) {
+	startTime := time.Now()
 	log.V(2).Infof("[casng] upload.write_bytes.start: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
-	defer log.V(2).Infof("[casng] upload.write_bytes.done: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
+	defer func() {
+		log.V(2).Infof("[casng] upload.write_bytes.done: duration=%v, name=%s, size=%d, offset=%d, finish=%t", time.Since(startTime), name, size, offset, finish)
+	}()
 
 	var stats Stats
 	if err := u.streamSem.Acquire(ctx, 1); err != nil {
@@ -295,7 +299,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	digested := make(map[digest.Digest]UploadRequest)
 	var digests []digest.Digest
 	for _, r := range reqs {
-		if r.Digest.IsEmpty() {
+		if r.Digest.IsEmpty() || r.Digest.Hash == "" {
 			undigested = append(undigested, r)
 			continue
 		}

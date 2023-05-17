@@ -1,29 +1,30 @@
 // This file includes the streaming implementation.
 // The overall streaming flow is as follows:
-//   digester   -> dispatcher
-//   dispatcher -> querier (not queried yet)
-//   querier    -> dispatcher
-//   dispatcher -> requester (cache hit)
-//   dispatcher -> batcher (small)
-//   dispatcher -> streamer (medium and large)
-//   batcher    -> dispatcher
-//   streamer   -> dispatcher
-//   dispatcher -> requester
+//   digester        -> dispatcher/blob
+//   dispatcher/blob -> dispatcher/pipe
+//   dispatcher/pipe -> dispatcher/res
+//   dispatcher/res  -> requester (cache hit)
+//   dispatcher/pipe -> batcher (small)
+//   dispatcher/pipe -> streamer (medium and large)
+//   batcher         -> dispatcher/res
+//   streamer        -> dispatcher/res
+//   dispatcher/res  -> requester
 //
 // The termination sequence is as follows:
-//   uploader's context is cancelled.
-//   client senders close their input channels and sender goroutines terminate.
-//   wait for all digester walks to complete, which will be aborted by the uploader's context.
+//   user closes input channels (streaming uploader).
+//   user waits for termination signal (return from batching uploader or channel closed from streaming uploader).
+//   user cancels uploader's context: cancel in-flight digestions and gRPC processors blocked on semaphores.
+//   client senders (top level) terminate.
 //   the digester channel is closed, and a termination signal is sent to the dispatcher.
-//   the dispatcher terminates its sender and propagates the signal to the querier.
-//   the querier terminates its pipe sender and propagates the signal to the pipe.
-//   the pipe flushes its output channel then closes it.
-//   the querier terminates its pipe receiver.
-//   up until this point, the dispatcher was still receiving and dispatching responses.
-//   the dispatcher drains the responses from the batcher and the streamer.
-//   the dispatcher's counter terminates and closes the receiver's channel which terminates.
-//   the dispatcher closes the batcher's channel which terminates.
-//   the dispatcher closes the streamer's channel which terminates.
+//   the dispatcher terminates its sender and propagates the signal to its piper.
+//   the dispatcher's piper propagtes the signal to the intermediate query streamer.
+//   the intermediate query streamer terimnates and propagates the signal to the query processor and dispatcher's piper.
+//   the query processor terminates.
+//   the dispatcher's piper terminates.
+//   the dispatcher's counter termiantes (after observing all the remaining blobs) and propagates the signal to the receiver.
+//   the dispatcher's receiver terminates.
+//   the dispatcher terminates and propagates the signal to the batcher and the streamer.
+//   the batcher and the streamer terminate.
 
 package casng
 
@@ -32,9 +33,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
@@ -47,7 +46,6 @@ import (
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 // UploadRequest represents a path to start uploading from.
@@ -66,7 +64,7 @@ type UploadRequest struct {
 	// Path is used to access and read files. It is ignored if Bytes is set.
 	Path impath.Absolute
 
-	// PathRemote is used when uploading files. It is ignored if Path is ignored.
+	// PathRemote is used when uploading files. It must be set to be identical to Path to avoid using the zero value unintentionally. It is ignored if Path is ignored.
 	PathRemote impath.Absolute
 
 	// SymlinkOptions is used when Path is set. It is ignored if Path is ignored.
@@ -87,9 +85,17 @@ type UploadRequest struct {
 
 // UploadResponse represents an upload result for a single blob (which may represent a tree of files).
 type UploadResponse struct {
+	// Digest identifies the blob associated with this response.
+	// May be empty (created from an empty byte slice or from a composite literal), in which case Err is set.
 	Digest digest.Digest
-	Stats  Stats
-	Err    error
+
+	// Stats may be zero if this response has not been updated yet. It should be ignored if Err is set.
+	// If this response has been processed, then either CacheHitCount or CacheHitMiss is not zero.
+	Stats Stats
+
+	// Err indicates the error encountered while processing the request associated with Digest.
+	// If set, Stats should be ignored.
+	Err error
 
 	// tags is used internally to identify the clients that are interested in this response.
 	tags []tag
@@ -120,8 +126,6 @@ type blob struct {
 	tag tag
 	// done is used internally to signal to the dispatcher that no further blobs are expected for the associated tag.
 	done bool
-	// queried is used to bypass the query pipe.
-	queried bool
 }
 
 // tagCount is a tuple used by the dispatcher to track the number of in-flight blobs for each client.
@@ -211,522 +215,6 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	return ch
 }
 
-// digester reveives upload requests from multiple concurrent requesters.
-// For each request, a file system walk is started concurrently to digest and forward blobs to the dispatcher.
-// If the request is for an already digested blob, it is forwarded to the dispatcher.
-// The number of concurrent requests is limited to the number of concurrent file system walks.
-func (u *uploader) digester() {
-	log.V(1).Info("[casng] upload.digester.start")
-	defer log.V(1).Info("[casng] upload.digester.stop")
-
-	// The digester receives requests from a stream pipe, and sends digested blobs to the dispatcher.
-	//
-	// Once the digester receives a done-tagged request from a requester, it will send a done-tagged blob to the dispatcher
-	// after all related walks are done.
-	//
-	// Once the uploader's context is cancelled, the digester will terminate after all the pending walks are done (implies all requesters are notified).
-
-	defer func() {
-		u.walkerWg.Wait()
-		// Let the dispatcher know that the digester has terminated by sending an untagged done blob.
-		u.dispatcherBlobCh <- blob{done: true}
-	}()
-
-	for req := range u.digesterCh {
-		// If the requester will not be sending any further requests, wait for in-flight walks from previous requests
-		// then tell the dispatcher to forward the signal once all dispatched blobs are done.
-		if req.done {
-			log.V(2).Infof("[casng] upload.digester.req.done: tag=%s", req.tag)
-			wg := u.requesterWalkWg[req.tag]
-			if wg == nil {
-				log.V(2).Infof("[casng] upload.digester.req.done: no pending walks for tag=%s", req.tag)
-				// Let the dispatcher know that this requester is done.
-				u.dispatcherBlobCh <- blob{tag: req.tag, done: true}
-				continue
-			}
-			// Remove the wg to ensure a new one is used if the requester decides to send more requests.
-			// Otherwise, races on the wg might happen.
-			u.requesterWalkWg[req.tag] = nil
-			u.workerWg.Add(1)
-			// Wait for the walkers to finish dispatching blobs then tell the dispatcher that no further blobs are expected from this requester.
-			go func() {
-				log.V(2).Infof("[casng] upload.digester.walk.wait.start: tag=%s", req.tag)
-				defer log.V(2).Infof("[casng] upload.digester.walk.wait.done: tag=%s", req.tag)
-				defer u.workerWg.Done()
-				wg.Wait()
-				u.dispatcherBlobCh <- blob{tag: req.tag, done: true}
-			}()
-			continue
-		}
-
-		if len(req.Bytes) > 0 && req.Digest.IsEmpty() {
-			req.Digest = digest.NewFromBlob(req.Bytes)
-		}
-
-		if !req.Digest.IsEmpty() {
-			u.dispatcherBlobCh <- blob{digest: req.Digest, bytes: req.Bytes, path: req.Path.String(), tag: req.tag, ctx: req.ctx}
-			continue
-		}
-
-		log.V(2).Infof("[casng] upload.digester.req: path=%s, slo=%s, filter=%s, tag=%s", req.Path, req.SymlinkOptions, req.Exclude, req.tag)
-		// Wait if too many walks are in-flight.
-		if err := u.walkSem.Acquire(u.ctx, 1); err != nil {
-			// err is always ctx.Err()
-			return
-		}
-		wg := u.requesterWalkWg[req.tag]
-		if wg == nil {
-			wg = &sync.WaitGroup{}
-			u.requesterWalkWg[req.tag] = wg
-		}
-		wg.Add(1)
-		u.walkerWg.Add(1)
-		go func(r UploadRequest) {
-			defer u.walkerWg.Done()
-			defer wg.Done()
-			defer u.walkSem.Release(1)
-			u.digest(r)
-		}(req)
-	}
-}
-
-// digest initiates a file system walk to digest files and dispatch them for uploading.
-func (u *uploader) digest(req UploadRequest) {
-	log.V(2).Infof("[casng] upload.digest.start: root=%s, tag=%s", req.Path, req.tag)
-	defer log.V(3).Infof("[casng] upload.digest.done: root=%s, tag=%s", req.Path, req.tag)
-
-	stats := Stats{}
-	var err error
-	deferredWg := make(map[string]*sync.WaitGroup)
-	walker.DepthFirst(req.Path, req.Exclude, walker.Callback{
-		Err: func(path impath.Absolute, realPath impath.Absolute, errVisit error) bool {
-			log.V(3).Infof("[casng] upload.digest.visit.err: realPath=%s, desiredPath=%s, err=%v", realPath, path, errVisit)
-			err = errors.Join(errVisit, err)
-			return false
-		},
-		Pre: func(path impath.Absolute, realPath impath.Absolute) (walker.PreAction, bool) {
-			log.V(3).Infof("[casng] upload.digest.visit.pre: realPath=%s, desiredPath=%s", realPath, path)
-			select {
-			case <-u.ctx.Done():
-				log.V(3).Info("upload.digest.cancel")
-				return walker.SkipPath, false
-			default:
-			}
-
-			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-			if errPath != nil {
-				err = errors.Join(errPath, err)
-				return walker.SkipPath, false
-			}
-			key := p.String() + req.Exclude.String()
-
-			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
-			// In both cases, deferring is the right call. Once the requset is processed, all requestters will revisit the path to get the digestion result.
-			// If the path was not cached before, claim it by makring it as in-flight.
-			wg := &sync.WaitGroup{}
-			wg.Add(1)
-			m, ok := u.nodeCache.LoadOrStore(key, wg)
-			if !ok {
-				// Claimed. Access it.
-				return walker.Access, true
-			}
-
-			// Defer if in-flight. Wait if already deferred since there is nothing else to do.
-			if wg, ok := m.(*sync.WaitGroup); ok {
-				if deferredWg[key] == nil {
-					deferredWg[key] = wg
-					log.V(3).Infof("[casng] upload.digest.visit.defer: realPath=%s, desiredPath=%s", realPath, path)
-					return walker.Defer, true
-				}
-				log.V(3).Infof("[casng] upload.digest.visit.defer.wait: realPath=%s, desiredPath=%s", realPath, path)
-				wg.Wait()
-				delete(deferredWg, key)
-				return walker.Defer, true
-			}
-
-			node, _ := m.(proto.Message) // Guaranteed assertion because the cache is an internal field.
-			log.V(3).Infof("[casng] upload.digest.visit.cached: realPath=%s, desiredPath=%s", realPath, path)
-
-			// Forward it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
-			switch node := node.(type) {
-			case *repb.FileNode:
-				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), path: realPath.String(), tag: req.tag, ctx: req.ctx}
-			case *repb.DirectoryNode:
-				// The blob of the directory node is the bytes of a repb.Directory message.
-				// Generate and forward it. If it was uploaded before, it'll be reported as a cache hit.
-				// Otherwise, it means the previous attempt to upload it failed and it is going to be retried.
-				node, b, errDigest := digestDirectory(realPath, u.dirChildren[key])
-				if errDigest != nil {
-					err = errors.Join(errDigest, err)
-					return walker.SkipPath, false
-				}
-				// Ensure the correct path is set on the node.
-				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-				if errPath != nil {
-					err = errors.Join(errPath, err)
-					return walker.SkipPath, false
-				}
-				node.Name = p.Base().String()
-				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
-			case *repb.SymlinkNode:
-				// It was already appended as a child to its parent. Nothing to forward.
-			}
-
-			return walker.SkipPath, true
-		},
-		Post: func(path impath.Absolute, realPath impath.Absolute, info fs.FileInfo) (ok bool) {
-			log.V(3).Infof("[casng] upload.digest.visit.post: realPath=%s, desiredPath=%s", realPath, path)
-			select {
-			case <-u.ctx.Done():
-				log.V(3).Info("upload.digest.cancel")
-				return false
-			default:
-			}
-
-			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-			if errPath != nil {
-				err = errors.Join(errPath, err)
-				return false
-			}
-			key := p.String() + req.Exclude.String()
-			parentKey := p.Dir().String() + req.Exclude.String()
-
-			// In post-access, the cache should have this walker's own wait group.
-			// Capture it here before it's overwritten with the actual result.
-			wg, pathClaimed := u.nodeCache.Load(key)
-			if !pathClaimed {
-				err = errors.Join(fmt.Errorf("attempted to post-access a non-claimed path %q", path), err)
-				return false
-			}
-			defer func() {
-				if !ok {
-					// Unclaim the path by deleting this walker's wait group.
-					u.nodeCache.Delete(key)
-				}
-				wg.(*sync.WaitGroup).Done()
-			}()
-
-			switch {
-			case info.Mode().IsDir():
-				stats.DigestCount += 1
-				stats.InputDirCount += 1
-				// All the descendants have already been visited (DFS).
-				node, b, errDigest := digestDirectory(realPath, u.dirChildren[key])
-				if errDigest != nil {
-					err = errors.Join(errDigest, err)
-					return false
-				}
-				// Ensure the correct path is set on the node.
-				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-				if errPath != nil {
-					err = errors.Join(errPath, err)
-					return false
-				}
-				node.Name = p.Base().String()
-				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
-				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
-				u.nodeCache.Store(key, node)
-				log.V(3).Infof("[casng] upload.digest.visit.dir: realPath=%s, desiredPath=%s, digset=%v, node=%v", realPath, path, node.Digest, node)
-				return true
-
-			case info.Mode().IsRegular():
-				stats.DigestCount += 1
-				stats.InputFileCount += 1
-				node, blb, errDigest := digestFile(u.ctx, realPath, info, u.ioSem, u.ioLargeSem, u.ioCfg.SmallFileSizeThreshold, u.ioCfg.LargeFileSizeThreshold)
-				if errDigest != nil {
-					err = errors.Join(errDigest, err)
-					return false
-				}
-				// Ensure the correct path is set on the node.
-				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-				if errPath != nil {
-					err = errors.Join(errPath, err)
-					return false
-				}
-				node.Name = p.Base().String()
-				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
-				blb.tag = req.tag
-				blb.ctx = req.ctx
-				u.dispatcherBlobCh <- blb
-				u.nodeCache.Store(key, node)
-				log.V(3).Infof("[casng] upload.digest.visit.file: realPath=%s, desiredPath=%s, digest=%v", realPath, path, node.Digest)
-				return true
-
-			default:
-				// Ignore everything else (e.g. sockets and pipes).
-				log.V(3).Infof("[casng] upload.digest.visit.other: realPath=%s, desiredPath=%s", realPath, path)
-			}
-			return true
-		},
-		Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (action walker.SymlinkAction, ok bool) {
-			log.V(3).Infof("[casng] upload.digest.visit.symlink: realPath=%s, desiredPath=%s", realPath, path)
-			select {
-			case <-u.ctx.Done():
-				log.V(3).Info("upload.digest.cancel")
-				return walker.SkipSymlink, false
-			default:
-			}
-
-			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-			if errPath != nil {
-				err = errors.Join(errPath, err)
-				return walker.SkipSymlink, false
-			}
-			key := p.String() + req.Exclude.String()
-			parentKey := p.Dir().String() + req.Exclude.String()
-
-			// In symlink post-access, the cache should have this walker's own wait group.
-			// Capture it here before it's overwritten with the actual result.
-			wg, pathClaimed := u.nodeCache.Load(key)
-			if !pathClaimed {
-				err = errors.Join(fmt.Errorf("attempted to post-access a non-claimed path %q", path), err)
-				return walker.SkipSymlink, false
-			}
-			defer func() {
-				// If there was a digestion error, unclaim the path.
-				if !ok {
-					u.nodeCache.Delete(key)
-				}
-				wg.(*sync.WaitGroup).Done()
-			}()
-
-			stats.DigestCount += 1
-			log.V(3).Infof("[casng] upload.digest.visit.symlink: realPath=%s, desiredPath=%s", realPath, path)
-			stats.InputSymlinkCount += 1
-			node, nextStep, errDigest := digestSymlink(req.Path, realPath, req.SymlinkOptions)
-			if errDigest != nil {
-				err = errors.Join(errDigest, err)
-				return walker.SkipSymlink, false
-			}
-			if node != nil {
-				// Ensure the correct path is set on the node.
-				p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-				if errPath != nil {
-					err = errors.Join(errPath, err)
-					return walker.SkipSymlink, false
-				}
-				node.Name = p.Base().String()
-				u.dirChildren[parentKey] = append(u.dirChildren[parentKey], node)
-				u.nodeCache.Store(key, node)
-			}
-			return nextStep, true
-		},
-	})
-
-	// err includes any IO errors that happened during the walk.
-	if err != nil {
-		// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
-		u.dispatcherResCh <- UploadResponse{tags: []tag{req.tag}, Err: err}
-	}
-}
-
-// dispatcher receives digested blobs and forwards them to the uploader or back to the requester in case of a cache hit or error.
-// The dispatcher handles counting in-flight requests per requester and notifying requesters when all of their requests are completed.
-func (u *uploader) dispatcher() {
-	log.V(1).Info("[casng] upload.dispatcher.start")
-	defer log.V(1).Info("[casng] upload.dispatcher.stop")
-
-	defer func() {
-		// Let the batcher and the streamer know we're done dispatching blobs.
-		close(u.batcherCh)
-		close(u.streamerCh)
-	}()
-
-	// Maintain a count of in-flight uploads per requester.
-	pendingCh := make(chan tagCount)
-	// Wait until all requests have been fully dispatched before terminating.
-	wg := sync.WaitGroup{}
-
-	// This sender dispatches digested blobs to the query processor or to the streaming processor.
-	// It is the first to terminate among the three in this block.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer func() {
-			// Let the query pipe know that the dispatcher will not be sending any more blobs.
-			u.queryPipeCh <- blob{done: true}
-		}()
-		log.V(1).Info("[casng] upload.dispatcher.sender.start")
-		defer log.V(1).Info("[casng] upload.dispatcher.sender.stop")
-
-		batchItemSizeLimit := int64(u.batchRpcCfg.BytesLimit - u.uploadRequestBaseSize - u.uploadRequestItemBaseSize)
-		for b := range u.dispatcherBlobCh {
-			if b.done { // The requester will not be sending any further requests.
-				pendingCh <- tagCount{b.tag, 0}
-				if b.tag == "" { // In fact, the digester (and all requesters) have terminated.
-					return
-				}
-				continue
-			}
-			if b.digest.IsEmpty() {
-				log.Errorf("[casng] upload.dispatcher: received a blob with an empty digest for tag=%s; ignoring", b.tag)
-				continue
-			}
-			log.V(2).Infof("[casng] upload.dispatcher.blob: digest=%s, tag=%s", b.digest, b.tag)
-			switch {
-			case !b.queried:
-				u.queryPipeCh <- b
-			case b.digest.Size <= batchItemSizeLimit:
-				u.batcherCh <- b
-			default:
-				u.streamerCh <- b
-			}
-			pendingCh <- tagCount{b.tag, 1}
-		}
-	}()
-
-	// This receiver forwards upload responses to requesters.
-	// It is the last to terminate among the three in this block.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		log.V(1).Info("[casng] upload.dispatcher.receiver.start")
-		defer log.V(1).Info("[casng] upload.dispatcher.receiver.stop")
-
-		// Messages delivered here are either went through the sender above (dispatched for upload), bypassed (digestion error), or piped back from the querier.
-		for r := range u.dispatcherResCh {
-			log.V(2).Infof("[casng] upload.dispatcher.res: digest=%s, cache_hit=%d, err=%v", r.Digest, r.Stats.CacheHitCount, r.Err)
-			// Cache miss; the querier will resend the blobs to be dispatched.
-			// Update the counter, but do not dispatch the response.
-			if r.Err == nil && r.Stats.CacheHitCount == 0 {
-				for _, t := range r.tags {
-					pendingCh <- tagCount{t, -1}
-				}
-				continue
-			}
-
-			// If multiple requesters are interested in this response, ensure stats are not double-counted.
-			if len(r.tags) == 1 {
-				u.uploadPubSub.pub(r, r.tags[0])
-			} else {
-				rCached := r
-				rCached.Stats = r.Stats.ToCacheHit()
-				u.uploadPubSub.mpub(r, rCached, r.tags...)
-			}
-
-			for _, t := range r.tags {
-				// Special case: do not decrement if the response was from a digestion error.
-				if !r.Digest.IsEmpty() {
-					pendingCh <- tagCount{t, -1}
-				}
-			}
-		}
-	}()
-
-	// This counter keeps track of in-flight blobs and notifies requesters when they have no more responses.
-	// It terminates after the sender, but before the receiver.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		log.V(1).Info("[casng] upload.dispatcher.counter.start")
-		defer log.V(1).Info("[casng] upload.dispatcher.counter.stop")
-		defer close(u.dispatcherResCh) // Let the receiver know we're done.
-
-		tagReqCount := make(map[tag]int)
-		tagDone := make(map[tag]bool)
-		allDone := false
-		for tc := range pendingCh {
-			if tc.c == 0 { // There will be no more blobs from this requester.
-				if tc.t == "" { // In fact, no more blobs for any requester.
-					if len(tagReqCount) == 0 {
-						return
-					}
-					allDone = true
-					continue
-				}
-				tagDone[tc.t] = true
-				log.V(2).Infof("[casng] upload.dispatcher.blob.done: tag=%s", tc.t)
-			}
-			tagReqCount[tc.t] += tc.c
-			log.V(2).Infof("[casng] upload.dispatcher.count: tag=%s, count=%d", tc.t, tagReqCount[tc.t])
-			if tagReqCount[tc.t] <= 0 && tagDone[tc.t] {
-				delete(tagDone, tc.t)
-				delete(tagReqCount, tc.t)
-				// Signal to the requester that all of its requests are done.
-				log.V(2).Infof("[casng] upload.dispatcher.done: tag=%s", tc.t)
-				u.uploadPubSub.pub(UploadResponse{done: true}, tc.t)
-			}
-			if len(tagReqCount) == 0 && allDone {
-				return
-			}
-		}
-	}()
-
-	wg.Wait()
-}
-
-// querier pipes the digest of a blob to the internal query processor to determine if it needs uploading.
-// Cache hits and errors are piped back to the dispatcher while cache misses are piped to the uploader.
-func (u *uploader) querier(queryCh chan<- missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
-	log.V(1).Info("[casng] upload.pipe.start")
-	defer log.V(1).Info("[casng] upload.pipe.stop")
-
-	// Keep track of the associated blobs since the query API accepts a digest only.
-	digestBlobs := make(map[digest.Digest][]blob)
-	done := false
-	for {
-		select {
-		// The dispatcher sends blobs on this channel, but never closes it.
-		case b := <-u.queryPipeCh:
-			// In the off chance that a request is received after a done signal, ignore it to avoid sending on a closed channel.
-			if done {
-				log.Errorf("[casng] upload.pipe: received a request after a done signal from tag=%s; ignoring", b.tag)
-				continue
-			}
-			// If the dispatcher has terminated, tell the streamer we're done and continue draining the response channel.
-			if b.done {
-				done = true
-				close(queryCh)
-				log.V(2).Info("upload.pipe.done")
-				continue
-			}
-
-			digestBlobs[b.digest] = append(digestBlobs[b.digest], b)
-			queryCh <- missingBlobRequest{digest: b.digest, ctx: b.ctx}
-
-		// This channel is closed by the query pipe when queryCh is closed, which happens when the dispatcher
-		// sends a done signal. This ensures all responses are forwarded to the dispatcher.
-		case r, ok := <-queryResCh:
-			if !ok {
-				return
-			}
-			log.V(2).Infof("[casng] upload.pipe.res: digest=%s, missing=%t, err=%v", r.Digest, r.Missing, r.Err)
-
-			blobs := digestBlobs[r.Digest]
-			delete(digestBlobs, r.Digest)
-			res := UploadResponse{Digest: r.Digest, Err: r.Err}
-			res.tags = make([]tag, len(blobs))
-
-			if res.Err == nil && r.Missing {
-				for i, b := range blobs {
-					res.tags[i] = b.tag
-					b.queried = true
-					u.dispatcherBlobCh <- b
-				}
-				u.dispatcherResCh <- res
-				continue
-			}
-
-			for i, b := range blobs {
-				res.tags[i] = b.tag
-			}
-
-			if res.Err != nil {
-				u.dispatcherResCh <- res
-				continue
-			}
-
-			// Cache hit.
-			res.Stats = Stats{
-				BytesRequested:     r.Digest.Size,
-				LogicalBytesCached: r.Digest.Size,
-				CacheHitCount:      1,
-			}
-			u.dispatcherResCh <- res
-		}
-	}
-}
-
 // uploadBatcher handles files below the small threshold which are buffered in-memory.
 func (u *uploader) batcher() {
 	log.V(1).Info("[casng] upload.batch.start")
@@ -741,10 +229,12 @@ func (u *uploader) batcher() {
 			return
 		}
 		// Block the bundler if the concurrency limit is reached.
+		startTime := time.Now()
 		if err := u.uploadSem.Acquire(u.ctx, 1); err != nil {
 			// err is always ctx.Err(), so abort immediately.
 			return
 		}
+		log.V(2).Infof("[casng] upload.batch.sem: duration=%v", time.Since(startTime))
 		defer u.uploadSem.Release(1)
 
 		u.workerWg.Add(1)
@@ -779,8 +269,10 @@ func (u *uploader) batcher() {
 				continue
 			}
 
+			// It's possible for files to be considered medium and large, but still fit into a batch request.
 			// Load the bytes without blocking the batcher by deferring the blob.
 			if len(b.bytes) == 0 {
+				log.V(2).Infof("[casng] upload.batch.file: digest=%s, path=%s", b.digest, b.path)
 				u.workerWg.Add(1)
 				go func(b blob) (err error) {
 					defer u.workerWg.Done()
@@ -792,18 +284,34 @@ func (u *uploader) batcher() {
 								tags:   []tag{b.tag},
 							}
 						}
+						// If this blob was from a large file, ensure IO holds are released.
+						if b.reader != nil {
+							u.ioSem.Release(1)
+							u.ioLargeSem.Release(1)
+						}
 					}()
-					if err := u.ioSem.Acquire(u.ctx, 1); err != nil {
-						return err
+					r := b.reader
+					if r == nil {
+						startTime := time.Now()
+						if err := u.ioSem.Acquire(b.ctx, 1); err != nil {
+							return err
+						}
+						log.V(2).Infof("[casng] upload.batch.file.io_sem: duration=%v", time.Since(startTime))
+						defer u.ioSem.Release(1)
+						f, err := os.Open(b.path)
+						if err != nil {
+							return errors.Join(ErrIO, err)
+						}
+						r = f
 					}
-					f, err := os.Open(b.path)
+					defer func() {
+						if errClose := r.Close(); err != nil {
+							err = errors.Join(ErrIO, errClose, err)
+						}
+					}()
+					bytes, err := io.ReadAll(r)
 					if err != nil {
-						return err
-					}
-					defer f.Close()
-					bytes, err := io.ReadAll(f)
-					if err != nil {
-						return err
+						return errors.Join(ErrIO, err)
 					}
 					b.bytes = bytes
 					u.batcherCh <- b
@@ -994,6 +502,7 @@ func (u *uploader) streamer() {
 			}
 
 			// Block the streamer if the gRPC call is being throttled.
+			startTime := time.Now()
 			if err := u.streamSem.Acquire(u.ctx, 1); err != nil {
 				// err is always ctx.Err()
 				if isLargeFile {
@@ -1002,6 +511,7 @@ func (u *uploader) streamer() {
 				}
 				return
 			}
+			log.V(2).Infof("[casng] upload.stream.sem: duration=%v", time.Since(startTime))
 
 			var name string
 			if b.digest.Size >= u.ioCfg.CompressionSizeThreshold {
@@ -1044,19 +554,21 @@ func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats S
 	case b.reader != nil:
 		reader = b.reader
 		defer func() {
+			// IO holds were acquired during digestion for large files and are expected to be released here.
+			u.ioSem.Release(1)
+			u.ioLargeSem.Release(1)
 			if errClose := b.reader.Close(); err != nil {
 				err = errors.Join(ErrIO, errClose, err)
 			}
 		}()
-		// IO holds were acquired during digestion for large files and are expected to be released here.
-		defer u.ioSem.Release(1)
-		defer u.ioLargeSem.Release(1)
 
 	// Medium file.
 	case len(b.path) > 0:
+		startTime := time.Now()
 		if errSem := u.ioSem.Acquire(ctx, 1); errSem != nil {
 			return
 		}
+		log.V(2).Infof("[casng] upload.stream.io_sem: duration=%v", time.Since(startTime))
 		defer u.ioSem.Release(1)
 
 		f, errOpen := os.Open(b.path)

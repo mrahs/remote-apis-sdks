@@ -157,7 +157,7 @@ type uploader struct {
 	queryCh          chan missingBlobRequest // Fan-in channel for query requests.
 	digesterCh       chan UploadRequest      // Fan-in channel for upload requests.
 	dispatcherBlobCh chan blob               // Fan-in channel for dispatched blobs.
-	queryPipeCh      chan blob               // A pipe channel for presence checking before uploading.
+	dispatcherPipeCh chan blob               // A pipe channel for presence checking before uploading.
 	dispatcherResCh  chan UploadResponse     // Fan-in channel for responses.
 	batcherCh        chan blob               // Fan-in channel for unified requests to the batching API.
 	streamerCh       chan blob               // Fan-in channel for unified requests to the byte streaming API.
@@ -282,7 +282,7 @@ func newUploaderv2(
 		queryPubSub:      newPubSub(),
 		digesterCh:       make(chan UploadRequest),
 		dispatcherBlobCh: make(chan blob),
-		queryPipeCh:      make(chan blob),
+		dispatcherPipeCh: make(chan blob),
 		dispatcherResCh:  make(chan UploadResponse),
 		batcherCh:        make(chan blob),
 		streamerCh:       make(chan blob),
@@ -305,18 +305,12 @@ func newUploaderv2(
 		u.processorWg.Done()
 	}()
 
-	u.processorWg.Add(1)
-	go func() {
-		u.dispatcher()
-		u.processorWg.Done()
-	}()
-
 	// Initializing the query streamer here to ensure wait groups are initialized before returning from this constructor call.
 	queryCh := make(chan missingBlobRequest)
 	queryResCh := u.missingBlobsPipe(queryCh)
 	u.processorWg.Add(1)
 	go func() {
-		u.querier(queryCh, queryResCh)
+		u.dispatcher(queryCh, queryResCh)
 		u.processorWg.Done()
 	}()
 
