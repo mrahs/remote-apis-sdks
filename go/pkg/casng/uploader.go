@@ -140,7 +140,7 @@ type uploader struct {
 	nodeCache sync.Map
 	// dirChildren is shared between all callers. However, since a directory is owned by a single
 	// walker at a time, there is no concurrent read/write to this map, but there might be concurrent reads.
-	dirChildren               map[string][]proto.Message
+	dirChildren               nodeSliceMap
 	queryRequestBaseSize      int
 	uploadRequestBaseSize     int
 	uploadRequestItemBaseSize int
@@ -275,7 +275,7 @@ func newUploaderv2(
 		walkSem:     semaphore.NewWeighted(int64(ioCfg.ConcurrentWalksLimit)),
 		ioSem:       semaphore.NewWeighted(int64(ioCfg.OpenFilesLimit)),
 		ioLargeSem:  semaphore.NewWeighted(int64(ioCfg.OpenLargeFilesLimit)),
-		dirChildren: make(map[string][]proto.Message),
+		dirChildren: initSliceCache(),
 
 		requesterWalkWg:  make(map[tag]*sync.WaitGroup),
 		queryCh:          make(chan missingBlobRequest),

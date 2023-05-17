@@ -85,6 +85,9 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 				}
 
 				digestBlobs[b.digest] = append(digestBlobs[b.digest], b)
+				if len(digestBlobs[b.digest]) > 1 {
+					continue
+				}
 				queryCh <- missingBlobRequest{digest: b.digest, ctx: b.ctx}
 
 			// This channel is closed by the query pipe when queryCh is closed, which happens when the sender
@@ -112,6 +115,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 					for i, b := range blobs {
 						res.tags[i] = b.tag
 					}
+					log.V(2).Infof("[casng] upload.dispatcher.pipe.res.hit: digest=%s, tags=%d", r.Digest, len(res.tags))
 					u.dispatcherResCh <- res
 					continue
 				}
@@ -137,7 +141,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 
 		// Messages delivered here are either went through the sender above (dispatched for upload), bypassed (digestion error), or piped back from the querier.
 		for r := range u.dispatcherResCh {
-			log.V(2).Infof("[casng] upload.dispatcher.res: digest=%s, cache_hit=%d, cache_miss=%d, err=%v", r.Digest, r.Stats.CacheHitCount, r.Stats.CacheMissCount, r.Err)
+			log.V(2).Infof("[casng] upload.dispatcher.res: digest=%s, cache_hit=%d, cache_miss=%d, tags=%d, err=%v", r.Digest, r.Stats.CacheHitCount, r.Stats.CacheMissCount, len(r.tags), r.Err)
 			// If multiple requesters are interested in this response, ensure stats are not double-counted.
 			if len(r.tags) == 1 {
 				u.uploadPubSub.pub(r, r.tags[0])

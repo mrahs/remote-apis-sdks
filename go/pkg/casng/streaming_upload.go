@@ -182,8 +182,8 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	// Forward the requests to the internal processor.
 	u.uploadSenderWg.Add(1)
 	go func() {
-		log.V(1).Info("[casng] upload.stream_pipe.sender.start")
-		defer log.V(1).Info("[casng] upload.stream_pipe.sender.stop")
+		log.V(1).Infof("[casng] upload.stream_pipe.sender.start: tag=%s", tag)
+		defer log.V(1).Infof("[casng] upload.stream_pipe.sender.stop: tag=%s", tag)
 		defer u.uploadSenderWg.Done()
 		for r := range in {
 			r.tag = tag
@@ -198,8 +198,8 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	// Once the sender above sends a done-tagged request, the processor will send a done-tagged response.
 	u.receiverWg.Add(1)
 	go func() {
-		log.V(1).Info("[casng] upload.stream_pipe.receiver.start")
-		defer log.V(1).Info("[casng] upload.stream_pipe.receiver.stop")
+		log.V(1).Infof("[casng] upload.stream_pipe.receiver.start: tag=%s", tag)
+		defer log.V(1).Infof("[casng] upload.stream_pipe.receiver.stop: tag=%s", tag)
 		defer u.receiverWg.Done()
 		defer close(ch)
 		for rawR := range resChan {
@@ -272,7 +272,7 @@ func (u *uploader) batcher() {
 			// It's possible for files to be considered medium and large, but still fit into a batch request.
 			// Load the bytes without blocking the batcher by deferring the blob.
 			if len(b.bytes) == 0 {
-				log.V(2).Infof("[casng] upload.batch.file: digest=%s, path=%s", b.digest, b.path)
+				log.V(2).Infof("[casng] upload.batch.file: digest=%s, path=%s, tag=%s", b.digest, b.path, b.tag)
 				u.workerWg.Add(1)
 				go func(b blob) (err error) {
 					defer u.workerWg.Done()
@@ -296,7 +296,7 @@ func (u *uploader) batcher() {
 						if err := u.ioSem.Acquire(b.ctx, 1); err != nil {
 							return err
 						}
-						log.V(2).Infof("[casng] upload.batch.file.io_sem: duration=%v", time.Since(startTime))
+						log.V(2).Infof("[casng] upload.batch.file.io_sem: duration=%v, tag=%s", time.Since(startTime), b.tag)
 						defer u.ioSem.Release(1)
 						f, err := os.Open(b.path)
 						if err != nil {
@@ -511,7 +511,7 @@ func (u *uploader) streamer() {
 				}
 				return
 			}
-			log.V(2).Infof("[casng] upload.stream.sem: duration=%v", time.Since(startTime))
+			log.V(2).Infof("[casng] upload.stream.sem: duration=%v, tag=%s", time.Since(startTime), b.tag)
 
 			var name string
 			if b.digest.Size >= u.ioCfg.CompressionSizeThreshold {
@@ -527,7 +527,7 @@ func (u *uploader) streamer() {
 				defer u.workerWg.Done()
 				defer u.streamSem.Release(1)
 				s, err := u.callStream(b.ctx, name, b)
-				streamResCh <- UploadResponse{Digest: b.digest, Stats: s, Err: err}
+				streamResCh <- UploadResponse{Digest: b.digest, Stats: s, Err: err, tags: []tag{b.tag}}
 			}()
 			log.V(2).Infof("[casng] upload.stream.req: pending=%d", pending)
 
@@ -568,7 +568,7 @@ func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats S
 		if errSem := u.ioSem.Acquire(ctx, 1); errSem != nil {
 			return
 		}
-		log.V(2).Infof("[casng] upload.stream.io_sem: duration=%v", time.Since(startTime))
+		log.V(2).Infof("[casng] upload.stream.io_sem: duration=%v, tag=%s", time.Since(startTime), b.tag)
 		defer u.ioSem.Release(1)
 
 		f, errOpen := os.Open(b.path)

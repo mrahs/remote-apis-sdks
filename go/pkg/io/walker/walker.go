@@ -231,14 +231,17 @@ func visit(e elem, exclude Filter, cb Callback) (*elem, int) {
 	}
 
 	// If the symlink content is a relative path, append it to the symlink's directory to make it absolute.
-	target, errIm := impath.Abs(content)
+	realTarget, errIm := impath.Abs(content)
+	target := realTarget
 	if errIm != nil {
-		target = e.realPath.Dir().Append(impath.MustRel(content))
+		rel := impath.MustRel(content)
+		realTarget = e.realPath.Dir().Append(rel)
+		target = e.path.Dir().Append(rel)
 	}
 
-	deferredElem := &elem{realPath: target, path: target}
+	deferredElem := &elem{realPath: realTarget, path: target}
 	if action == Replace {
-		deferredElem.path = e.realPath
+		deferredElem.path = e.path
 	}
 
 	return deferredElem, aRead

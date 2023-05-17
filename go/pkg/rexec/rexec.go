@@ -157,6 +157,9 @@ func (ec *Context) downloadOutputs(outDir string) (*rc.MovedBytesMetadata, *comm
 }
 
 func (ec *Context) computeInputs() error {
+	if ec.client.GrpcClient.IsCasNG() {
+		return ec.ngUploadInputs()
+	}
 	if ec.Metadata.ActionDigest.Size > 0 {
 		// Already computed inputs.
 		return nil
@@ -209,28 +212,29 @@ func (ec *Context) computeInputs() error {
 	return nil
 }
 
-func (ec *Context) ngComputeInputs() error {
+func (ec *Context) ngUploadInputs() error {
+	cmdID, executionID := ec.cmd.Identifiers.ExecutionID, ec.cmd.Identifiers.CommandID
 	if ec.Metadata.ActionDigest.Size > 0 {
 		// Already computed inputs.
+		log.V(2).Infof("%s %s> inputs already uploaded", cmdID, executionID)
 		return nil
 	}
-	cmdID, executionID := ec.cmd.Identifiers.ExecutionID, ec.cmd.Identifiers.CommandID
 	commandHasOutputPathsField := ec.client.GrpcClient.SupportsCommandOutputPaths()
 	cmdPb := ec.cmd.ToREProto(commandHasOutputPathsField)
-	log.V(2).Infof("%s %s> Command: \n%s\n", cmdID, executionID, prototext.Format(cmdPb))
+	log.V(2).Infof("%s %s> command: \n%s\n", cmdID, executionID, prototext.Format(cmdPb))
 	blob, err := proto.Marshal(cmdPb)
 	if err != nil {
 		return err
 	}
 	cmdDg := digest.NewFromBlob(blob)
 	ec.Metadata.CommandDigest = cmdDg
-	log.V(1).Infof("%s %s> Command digest: %s", cmdID, executionID, cmdDg)
-	log.V(1).Infof("%s %s> Computing input Merkle tree...", cmdID, executionID)
+	log.V(1).Infof("%s %s> command digest: %s", cmdID, executionID, cmdDg)
 	execRoot, workingDir, remoteWorkingDir, err := cmdDirs(ec.cmd)
 	if err != nil {
 		return err
 	}
 	slo := symlinkOpts(ec.client.GrpcClient.TreeSymlinkOpts, ec.cmd.InputSpec.SymlinkBehavior)
+	log.V(1).Infof("%s %s> exec_root=%s, work_dir=%s, remote_work_dir=%s, symlink_opts=%s", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, slo)
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+1)
 	reqs = append(reqs, casng.UploadRequest{Bytes: blob, Digest: cmdDg})
 	for _, p := range ec.cmd.InputSpec.Inputs {
@@ -249,6 +253,7 @@ func (ec *Context) ngComputeInputs() error {
 			SymlinkOptions: slo,
 		})
 	}
+	log.V(1).Infof("%s %s> uploading %d inputs", cmdID, executionID, len(reqs))
 	missing, stats, err := ec.client.GrpcClient.NgUpload(ec.ctx, reqs...)
 	if err != nil {
 		return err
@@ -261,6 +266,7 @@ func (ec *Context) ngComputeInputs() error {
 	ec.Metadata.MissingDigests = missing
 
 	// Construct the merkle tree root.
+	log.V(1).Infof("%s %s> constructing merkle tree root...", cmdID, executionID)
 	root := &repb.Directory{}
 	topLevel := topLevelReqs(reqs)
 	for _, r := range topLevel {
@@ -301,12 +307,12 @@ func (ec *Context) ngComputeInputs() error {
 	if ec.cmd.Timeout > 0 {
 		acPb.Timeout = dpb.New(ec.cmd.Timeout)
 	}
-	blob, err = proto.Marshal(cmdPb)
+	blob, err = proto.Marshal(acPb)
 	if err != nil {
 		return err
 	}
 	acDg := digest.NewFromBlob(blob)
-	log.V(1).Infof("%s %s> Action digest: %s", cmdID, executionID, acDg)
+	log.V(1).Infof("%s %s> action digest: %s", cmdID, executionID, acDg)
 	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx, casng.UploadRequest{Bytes: blob, Digest: acDg})
 	if err != nil {
 		return err
@@ -480,37 +486,25 @@ func (ec *Context) UpdateCachedResult() {
 // ExecuteRemotely tries to execute the command remotely and download the results. It uploads any
 // missing inputs first.
 func (ec *Context) ExecuteRemotely() {
-	cmdID, executionID := ec.cmd.Identifiers.ExecutionID, ec.cmd.Identifiers.CommandID
-	if ec.client.GrpcClient.IsCasNG() {
-		log.V(1).Infof("%s %s> Uploading inputs...", cmdID, executionID)
-		ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
-		err := ec.ngComputeInputs()
-		ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now()
-		if err != nil {
-			ec.Result = command.NewLocalErrorResult(err)
-			return
-		}
-	} else {
-		if err := ec.computeInputs(); err != nil {
-			ec.Result = command.NewLocalErrorResult(err)
-			return
-		}
-		log.V(1).Infof("%s %s> Checking inputs to upload...", cmdID, executionID)
-		// TODO(olaola): compute input cache hit stats.
-		ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
-		missing, bytesMoved, err := ec.client.GrpcClient.UploadIfMissing(ec.ctx, ec.inputBlobs...)
-		ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now()
-		if err != nil {
-			ec.Result = command.NewRemoteErrorResult(err)
-			return
-		}
-		ec.Metadata.MissingDigests = missing
-		for _, d := range missing {
-			ec.Metadata.LogicalBytesUploaded += d.Size
-		}
-		ec.Metadata.RealBytesUploaded = bytesMoved
+	if err := ec.computeInputs(); err != nil {
+		ec.Result = command.NewLocalErrorResult(err)
+		return
 	}
-
+	cmdID, executionID := ec.cmd.Identifiers.ExecutionID, ec.cmd.Identifiers.CommandID
+	log.V(1).Infof("%s %s> Checking inputs to upload...", cmdID, executionID)
+	// TODO(olaola): compute input cache hit stats.
+	ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
+	missing, bytesMoved, err := ec.client.GrpcClient.UploadIfMissing(ec.ctx, ec.inputBlobs...)
+	ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now()
+	if err != nil {
+		ec.Result = command.NewRemoteErrorResult(err)
+		return
+	}
+	ec.Metadata.MissingDigests = missing
+	for _, d := range missing {
+		ec.Metadata.LogicalBytesUploaded += d.Size
+	}
+	ec.Metadata.RealBytesUploaded = bytesMoved
 	log.V(1).Infof("%s %s> Executing remotely...\n%s", cmdID, executionID, strings.Join(ec.cmd.Args, " "))
 	ec.Metadata.EventTimes[command.EventExecuteRemotely] = &command.TimeInterval{From: time.Now()}
 	op, err := ec.client.GrpcClient.ExecuteAndWait(ec.ctx, &repb.ExecuteRequest{
