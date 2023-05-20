@@ -84,7 +84,7 @@ func (u *uploader) digester() {
 		if !u.walkThrottler.acquire(req.ctx) {
 			continue
 		}
-		log.V(2).Infof("[casng] upload.digester.req.walk_sem: duration=%v, tag=%s", time.Since(startTime), req.tag)
+		log.V(2).Infof("[casng] upload.digester.req.walk_throttle: duration=%v, tag=%s", time.Since(startTime), req.tag)
 		wg := u.requesterWalkWg[req.tag]
 		if wg == nil {
 			wg = &sync.WaitGroup{}
@@ -421,24 +421,24 @@ func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.Dire
 //
 // No ancenstory information is included in the returned node. Only the base of path is used.
 //
-// One token of ioSem is acquired upon calling this function.
+// One token of ioThrottler is acquired upon calling this function.
 // If the file size <= smallFileSizeThreshold, the token is released before returning.
 // Otherwise, the caller must assume ownership of the token and release it.
 //
-// If the file size >= largeFileSizeThreshold, one token of ioLargeSem is acquired.
+// If the file size >= largeFileSizeThreshold, one token of ioLargeThrottler is acquired.
 // The caller must assume ownership of that token and release it.
 //
 // If the returned err is not nil, both tokens are released before returning.
-func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioSem, ioLargeSem *throttler, smallFileSizeThreshold, largeFileSizeThreshold int64) (node *repb.FileNode, blb blob, err error) {
+func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioThrottler, ioLargeThrottler *throttler, smallFileSizeThreshold, largeFileSizeThreshold int64) (node *repb.FileNode, blb blob, err error) {
 	startTime := time.Now()
-	if !ioSem.acquire(ctx) {
+	if !ioThrottler.acquire(ctx) {
 		return nil, blb, ctx.Err()
 	}
-	log.V(2).Infof("[casng] upload.digest.file.io_sem: duration=%v", time.Since(startTime))
+	log.V(2).Infof("[casng] upload.digest.file.io_throttle: duration=%v", time.Since(startTime))
 	defer func() {
 		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 		if blb.reader == nil {
-			ioSem.release()
+			ioThrottler.release()
 		}
 	}()
 
@@ -482,14 +482,14 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioS
 
 	log.V(2).Infof("[casng] upload.digest.file.large: path=%s, size=%d", path, info.Size())
 	startTime = time.Now()
-	if !ioLargeSem.acquire(ctx) {
+	if !ioLargeThrottler.acquire(ctx) {
 		return nil, blb, ctx.Err()
 	}
-	log.V(2).Infof("[casng] upload.digest.file.io_large_sem: duration=%v", time.Since(startTime))
+	log.V(2).Infof("[casng] upload.digest.file.io_large_throttle: duration=%v", time.Since(startTime))
 	defer func() {
 		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 		if blb.reader == nil {
-			ioLargeSem.release()
+			ioLargeThrottler.release()
 		}
 	}()
 
@@ -518,7 +518,7 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioS
 	}
 
 	node.Digest = d.ToProto()
-	// The streamer is responsible for closing the file and releasing both ioSem and ioLargeSem.
+	// The streamer is responsible for closing the file and releasing both ioThrottler and ioLargeThrottler.
 	blb.digest = digest.NewFromProtoUnvalidated(node.Digest)
 	blb.reader = f
 	return node, blb, nil

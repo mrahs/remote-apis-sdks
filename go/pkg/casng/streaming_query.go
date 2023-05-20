@@ -160,9 +160,11 @@ func (u *uploader) queryProcessor() {
 			return
 		}
 		// Block the entire processor if the concurrency limit is reached.
+		startTime := time.Now()
 		if u.queryThrottler.acquire(u.ctx) {
 			return
 		}
+		log.V(2).Infof("[casng] query.processor.throttle: duration=%v", time.Since(startTime))
 		defer u.queryThrottler.release()
 
 		u.workerWg.Add(1)
@@ -185,6 +187,7 @@ func (u *uploader) queryProcessor() {
 				return
 			}
 
+			log.V(2).Infof("[casng] query.processor.req: digest=%s, tag=%s", req.digest, req.tag)
 			dSize := proto.Size(req.digest.ToProto())
 
 			// Check oversized items.
@@ -220,10 +223,13 @@ func (u *uploader) queryProcessor() {
 // It assumes ownership of the bundle argument.
 func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
 	log.V(2).Infof("[casng] query.call: len=%d", len(bundle))
-
 	if len(bundle) < 1 {
 		return
 	}
+	startTime := time.Now()
+	defer func(){
+		log.V(2).Infof("[casng] query.call: duration=%v", time.Since(startTime))
+	}()
 
 	digests := make([]*repb.Digest, 0, len(bundle))
 	for d := range bundle {
@@ -256,7 +262,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 		err = errors.Join(ErrGRPC, err)
 		missing = digests
 	}
-	log.V(2).Infof("[casng] query.call.done: missing=%d", len(missing))
+	log.V(2).Infof("[casng] query.call.grpc_done: duration%v, missing=%d", time.Since(startTime), len(missing))
 
 	// Report missing.
 	for _, dpb := range missing {

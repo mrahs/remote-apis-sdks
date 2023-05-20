@@ -73,7 +73,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 			case b := <-u.dispatcherPipeCh:
 				// In the off chance that a request is received after a done signal, ignore it to avoid sending on a closed channel.
 				if done {
-					log.Errorf("[casng] upload.pipe: received a request after a done signal from tag=%s; ignoring", b.tag)
+					log.Errorf("[casng] upload.dispatcher.pipe: received a request after a done signal from tag=%s; ignoring", b.tag)
 					continue
 				}
 				// If the dispatcher has terminated, tell the streamer we're done and continue draining the response channel.
@@ -84,6 +84,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 					continue
 				}
 
+				log.V(2).Infof("[casng] upload.dispatcher.pipe.blob: digest=%s, tag=%s", b.digest, b.tag)
 				digestBlobs[b.digest] = append(digestBlobs[b.digest], b)
 				if len(digestBlobs[b.digest]) > 1 {
 					continue

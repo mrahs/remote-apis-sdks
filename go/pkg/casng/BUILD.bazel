@@ -9,6 +9,7 @@ go_library(
         "slice_cache.go",
         "streaming_query.go",
         "streaming_upload.go",
+        "throttler.go",
         "upload_digester.go",
         "upload_dispatcher.go",
         "uploader.go",
