@@ -230,12 +230,11 @@ func (u *uploader) batcher() {
 		}
 		// Block the bundler if the concurrency limit is reached.
 		startTime := time.Now()
-		if err := u.uploadSem.Acquire(u.ctx, 1); err != nil {
-			// err is always ctx.Err(), so abort immediately.
+		if !u.uploadThrottler.acquire(u.ctx) {
 			return
 		}
 		log.V(2).Infof("[casng] upload.batch.sem: duration=%v", time.Since(startTime))
-		defer u.uploadSem.Release(1)
+		defer u.uploadThrottler.release()
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b uploadRequestBundle) {
@@ -286,18 +285,18 @@ func (u *uploader) batcher() {
 						}
 						// If this blob was from a large file, ensure IO holds are released.
 						if b.reader != nil {
-							u.ioSem.Release(1)
-							u.ioLargeSem.Release(1)
+							u.ioThrottler.release()
+							u.ioLargeThrottler.release()
 						}
 					}()
 					r := b.reader
 					if r == nil {
 						startTime := time.Now()
-						if err := u.ioSem.Acquire(b.ctx, 1); err != nil {
-							return err
+						if !u.ioThrottler.acquire(b.ctx) {
+							return b.ctx.Err()
 						}
 						log.V(2).Infof("[casng] upload.batch.file.io_sem: duration=%v, tag=%s", time.Since(startTime), b.tag)
-						defer u.ioSem.Release(1)
+						defer u.ioThrottler.release()
 						f, err := os.Open(b.path)
 						if err != nil {
 							return errors.Join(ErrIO, err)
@@ -495,19 +494,19 @@ func (u *uploader) streamer() {
 				// Already in-flight. Release duplicate resources if it's a large file.
 				log.V(2).Infof("[casng] upload.stream.unified: digest=%s, tag=%s", b.digest, b.tag)
 				if isLargeFile {
-					u.ioSem.Release(1)
-					u.ioLargeSem.Release(1)
+					u.ioThrottler.release()
+					u.ioLargeThrottler.release()
 				}
 				continue
 			}
 
 			// Block the streamer if the gRPC call is being throttled.
 			startTime := time.Now()
-			if err := u.streamSem.Acquire(u.ctx, 1); err != nil {
+			if u.streamThrottle.acquire(u.ctx) {
 				// err is always ctx.Err()
 				if isLargeFile {
-					u.ioSem.Release(1)
-					u.ioLargeSem.Release(1)
+					u.ioThrottler.release()
+					u.ioLargeThrottler.release()
 				}
 				return
 			}
@@ -525,7 +524,7 @@ func (u *uploader) streamer() {
 			u.workerWg.Add(1)
 			go func() {
 				defer u.workerWg.Done()
-				defer u.streamSem.Release(1)
+				defer u.streamThrottle.release()
 				s, err := u.callStream(b.ctx, name, b)
 				streamResCh <- UploadResponse{Digest: b.digest, Stats: s, Err: err, tags: []tag{b.tag}}
 			}()
@@ -555,8 +554,8 @@ func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats S
 		reader = b.reader
 		defer func() {
 			// IO holds were acquired during digestion for large files and are expected to be released here.
-			u.ioSem.Release(1)
-			u.ioLargeSem.Release(1)
+			u.ioThrottler.release()
+			u.ioLargeThrottler.release()
 			if errClose := b.reader.Close(); err != nil {
 				err = errors.Join(ErrIO, errClose, err)
 			}
@@ -565,11 +564,11 @@ func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats S
 	// Medium file.
 	case len(b.path) > 0:
 		startTime := time.Now()
-		if errSem := u.ioSem.Acquire(ctx, 1); errSem != nil {
+		if u.ioThrottler.acquire(ctx) {
 			return
 		}
 		log.V(2).Infof("[casng] upload.stream.io_sem: duration=%v, tag=%s", time.Since(startTime), b.tag)
-		defer u.ioSem.Release(1)
+		defer u.ioThrottler.release()
 
 		f, errOpen := os.Open(b.path)
 		if errOpen != nil {

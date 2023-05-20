@@ -112,11 +112,10 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	}()
 
 	var stats Stats
-	if err := u.streamSem.Acquire(ctx, 1); err != nil {
-		// err is always ctx.Err()
-		return stats, err
+	if u.streamThrottle.acquire(ctx) {
+		return stats, ctx.Err()
 	}
-	defer u.streamSem.Release(1)
+	defer u.streamThrottle.release()
 
 	// Read raw bytes if compression is disabled.
 	src := r

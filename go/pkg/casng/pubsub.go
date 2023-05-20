@@ -151,6 +151,12 @@ func (ps *pubsub) wait() {
 	ps.wg.Wait()
 }
 
+func (ps *pubsub) len() int {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return len(ps.subs)
+}
+
 func newPubSub() *pubsub {
 	return &pubsub{subs: make(map[tag]chan any)}
 }

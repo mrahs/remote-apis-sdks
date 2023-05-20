@@ -67,7 +67,6 @@ import (
 	log "github.com/golang/glog"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pborman/uuid"
-	"golang.org/x/sync/semaphore"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/protobuf/proto"
 )
@@ -123,17 +122,17 @@ type uploader struct {
 	streamRPCCfg GRPCConfig
 
 	// gRPC throttling controls.
-	querySem  *semaphore.Weighted // Controls concurrent calls to the query API.
-	uploadSem *semaphore.Weighted // Controls concurrent calls to the batch API.
-	streamSem *semaphore.Weighted // Controls concurrent calls to the byte streaming API.
+	queryThrottler  *throttler // Controls concurrent calls to the query API.
+	uploadThrottler *throttler // Controls concurrent calls to the batch API.
+	streamThrottle  *throttler // Controls concurrent calls to the byte streaming API.
 
 	// IO controls.
-	ioCfg        IOConfig
-	buffers      sync.Pool
-	zstdEncoders sync.Pool
-	walkSem      *semaphore.Weighted // Controls concurrent file system walks.
-	ioSem        *semaphore.Weighted // Controls total number of open files.
-	ioLargeSem   *semaphore.Weighted // Controls total number of open large files.
+	ioCfg            IOConfig
+	buffers          sync.Pool
+	zstdEncoders     sync.Pool
+	walkThrottler    *throttler // Controls concurrent file system walks.
+	ioThrottler      *throttler // Controls total number of open files.
+	ioLargeThrottler *throttler // Controls total number of open large files.
 	// nodeCache allows digesting each path only once.
 	// Concurrent walkers claim a path by storing a sync.WaitGroup reference, which allows other walkers to defer
 	// digesting that path until the first walker stores the digest once it's computed.
@@ -168,6 +167,8 @@ type uploader struct {
 	ctx context.Context
 	// wg is used to wait for the uploader to fully shutdown.
 	wg sync.WaitGroup
+
+	logBeatDoneCh chan struct{}
 }
 
 // Wait blocks until the context is cancelled and all resources held by the uploader are released.
@@ -253,9 +254,9 @@ func newUploaderv2(
 		batchRPCCfg:  uploadCfg,
 		streamRPCCfg: streamCfg,
 
-		querySem:  semaphore.NewWeighted(int64(queryCfg.ConcurrentCallsLimit)),
-		uploadSem: semaphore.NewWeighted(int64(uploadCfg.ConcurrentCallsLimit)),
-		streamSem: semaphore.NewWeighted(int64(streamCfg.ConcurrentCallsLimit)),
+		queryThrottler:  newThrottler(int64(queryCfg.ConcurrentCallsLimit)),
+		uploadThrottler: newThrottler(int64(uploadCfg.ConcurrentCallsLimit)),
+		streamThrottle:  newThrottler(int64(streamCfg.ConcurrentCallsLimit)),
 
 		ioCfg: ioCfg,
 		buffers: sync.Pool{
@@ -272,10 +273,10 @@ func newUploaderv2(
 				return enc
 			},
 		},
-		walkSem:     semaphore.NewWeighted(int64(ioCfg.ConcurrentWalksLimit)),
-		ioSem:       semaphore.NewWeighted(int64(ioCfg.OpenFilesLimit)),
-		ioLargeSem:  semaphore.NewWeighted(int64(ioCfg.OpenLargeFilesLimit)),
-		dirChildren: initSliceCache(),
+		walkThrottler:    newThrottler(int64(ioCfg.ConcurrentWalksLimit)),
+		ioThrottler:      newThrottler(int64(ioCfg.OpenFilesLimit)),
+		ioLargeThrottler: newThrottler(int64(ioCfg.OpenLargeFilesLimit)),
+		dirChildren:      initSliceCache(),
 
 		requesterWalkWg:  make(map[tag]*sync.WaitGroup),
 		queryCh:          make(chan missingBlobRequest),
@@ -291,6 +292,8 @@ func newUploaderv2(
 		queryRequestBaseSize:      proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),
 		uploadRequestBaseSize:     proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),
 		uploadRequestItemBaseSize: proto.Size(&repb.BatchUpdateBlobsRequest_Request{Digest: digest.NewFromBlob([]byte("abc")).ToProto(), Data: []byte{}}),
+
+		logBeatDoneCh: make(chan struct{}),
 	}
 
 	u.processorWg.Add(1)
@@ -327,6 +330,7 @@ func newUploaderv2(
 	}()
 
 	go u.close()
+	go u.logBeat()
 	return u, nil
 }
 
@@ -367,6 +371,23 @@ func (u *uploader) close() {
 	// 7th, workers should have terminated by now.
 	log.V(1).Infof("[casng] uploader: waiting for workers")
 	u.workerWg.Wait()
+
+	close(u.logBeatDoneCh)
+}
+
+func (u *uploader) logBeat() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-u.logBeatDoneCh:
+			return
+		case <-ticker.C:
+		}
+
+		log.V(1).Infof("[casng] beat: uploaders=%d, queriers=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
+			u.uploadPubSub.len(), u.queryPubSub.len(), u.walkThrottler.len(), u.uploadThrottler.len(), u.streamThrottle.len(), u.queryThrottler.len(), u.ioThrottler.len(), u.ioLargeThrottler.len())
+	}
 }
 
 func (u *uploader) withRetry(ctx context.Context, predicate retry.ShouldRetry, policy retry.BackoffPolicy, fn func() error) error {

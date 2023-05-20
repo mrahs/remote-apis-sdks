@@ -160,11 +160,10 @@ func (u *uploader) queryProcessor() {
 			return
 		}
 		// Block the entire processor if the concurrency limit is reached.
-		if err := u.querySem.Acquire(u.ctx, 1); err != nil {
-			// err is always ctx.Err(), so abort immediately.
+		if u.queryThrottler.acquire(u.ctx) {
 			return
 		}
-		defer u.querySem.Release(1)
+		defer u.queryThrottler.release()
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b missingBlobRequestBundle) {
