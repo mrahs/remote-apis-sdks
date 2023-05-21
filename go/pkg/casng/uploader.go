@@ -177,8 +177,9 @@ func (u *uploader) Wait() {
 // Node looks up a node from the node cache which is populated during digestion.
 // The node is either an repb.FileNode, repb.DirectoryNode, or repb.SymlinkNode.
 //
-// Returns nil if no node corresponds to the key which must be derived from the path and filter.
-func (u *uploader) Node(key string) proto.Message {
+// Returns nil if no node corresponds to req.
+func (u *uploader) Node(req UploadRequest) proto.Message {
+	key := req.Path.String()+req.Exclude.String()
 	n, ok := u.nodeCache.Load(key)
 	if !ok {
 		return nil

@@ -216,27 +216,16 @@ func (ec *Context) ngUploadInputs() error {
 	cmdID, executionID := ec.cmd.Identifiers.ExecutionID, ec.cmd.Identifiers.CommandID
 	if ec.Metadata.ActionDigest.Size > 0 {
 		// Already computed inputs.
-		log.V(2).Infof("%s %s> inputs already uploaded", cmdID, executionID)
+		log.V(1).Infof("[casng] %s %s> inputs already uploaded", cmdID, executionID)
 		return nil
 	}
-	commandHasOutputPathsField := ec.client.GrpcClient.SupportsCommandOutputPaths()
-	cmdPb := ec.cmd.ToREProto(commandHasOutputPathsField)
-	log.V(2).Infof("%s %s> command: \n%s\n", cmdID, executionID, prototext.Format(cmdPb))
-	blob, err := proto.Marshal(cmdPb)
-	if err != nil {
-		return err
-	}
-	cmdDg := digest.NewFromBlob(blob)
-	ec.Metadata.CommandDigest = cmdDg
-	log.V(1).Infof("%s %s> command digest: %s", cmdID, executionID, cmdDg)
 	execRoot, workingDir, remoteWorkingDir, err := cmdDirs(ec.cmd)
 	if err != nil {
 		return err
 	}
 	slo := symlinkOpts(ec.client.GrpcClient.TreeSymlinkOpts, ec.cmd.InputSpec.SymlinkBehavior)
-	log.V(1).Infof("%s %s> exec_root=%s, work_dir=%s, remote_work_dir=%s, symlink_opts=%s", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, slo)
-	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+1)
-	reqs = append(reqs, casng.UploadRequest{Bytes: blob, Digest: cmdDg})
+	log.V(2).Infof("[casng] %s %s> exec_root=%s, work_dir=%s, remote_work_dir=%s, symlink_opts=%s", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, slo)
+	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs))
 	for _, p := range ec.cmd.InputSpec.Inputs {
 		rel, err := impath.Rel(p)
 		if err != nil {
@@ -253,7 +242,7 @@ func (ec *Context) ngUploadInputs() error {
 			SymlinkOptions: slo,
 		})
 	}
-	log.V(1).Infof("%s %s> uploading %d inputs", cmdID, executionID, len(reqs))
+	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
 	missing, stats, err := ec.client.GrpcClient.NgUpload(ec.ctx, reqs...)
 	if err != nil {
 		return err
@@ -267,13 +256,13 @@ func (ec *Context) ngUploadInputs() error {
 
 	// Construct the merkle tree root.
 	root := &repb.Directory{}
-	topLevelKeys := topLevelKeys(reqs)
-	log.V(1).Infof("%s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, reqs=%d, top_level_keys=%d", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, len(reqs), len(topLevelKeys))
-	log.V(4).Infof("%s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, top_level_keys=%v", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, topLevelKeys)
-	for _, key := range topLevelKeys {
-		node := ec.client.GrpcClient.NgNode(key)
+	topLevelKeys := topLevelReqs(reqs)
+	log.V(1).Infof("[casng] %s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, reqs=%d, top_level_reqs=%d", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, len(reqs), len(topLevelKeys))
+	log.V(4).Infof("[casng] %s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, top_level_reqs=%v", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, topLevelKeys)
+	for _, r := range topLevelKeys {
+		node := ec.client.GrpcClient.NgNode(r)
 		if node == nil {
-			return fmt.Errorf("cannot construct a merkle tree with a missing node for key %q", key)
+			return fmt.Errorf("cannot construct a merkle tree with a missing node for %v", r)
 		}
 		switch n := node.(type) {
 		case *repb.FileNode:
@@ -290,11 +279,22 @@ func (ec *Context) ngUploadInputs() error {
 	// sort.Slice(root.Files, func(i, j int) bool { return root.Files[i].Name < root.Files[j].Name })
 	// sort.Slice(root.Directories, func(i, j int) bool { return root.Directories[i].Name < root.Directories[j].Name })
 	// sort.Slice(root.Symlinks, func(i, j int) bool { return root.Symlinks[i].Name < root.Symlinks[j].Name })
+	log.V(4).Infof("[casng] %s %s> merkle tree root:\n%s", prototext.Format(root))
 	rootBytes, err := proto.Marshal(root)
 	if err != nil {
 		return err
 	}
 
+	commandHasOutputPathsField := ec.client.GrpcClient.SupportsCommandOutputPaths()
+	cmdPb := ec.cmd.ToREProto(commandHasOutputPathsField)
+	log.V(4).Infof("[casng] %s %s> command:\n%s", cmdID, executionID, prototext.Format(cmdPb))
+	cmdBlb, err := proto.Marshal(cmdPb)
+	if err != nil {
+		return err
+	}
+	cmdDg := digest.NewFromBlob(cmdBlb)
+	ec.Metadata.CommandDigest = cmdDg
+	log.V(1).Infof("[casng] %s %s> command digest: %s", cmdID, executionID, cmdDg)
 	acPb := &repb.Action{
 		CommandDigest:   cmdDg.ToProto(),
 		InputRootDigest: digest.NewFromBlob(rootBytes).ToProto(),
@@ -308,13 +308,13 @@ func (ec *Context) ngUploadInputs() error {
 	if ec.cmd.Timeout > 0 {
 		acPb.Timeout = dpb.New(ec.cmd.Timeout)
 	}
-	blob, err = proto.Marshal(acPb)
+	acBlb, err := proto.Marshal(acPb)
 	if err != nil {
 		return err
 	}
-	acDg := digest.NewFromBlob(blob)
-	log.V(1).Infof("%s %s> action digest: %s", cmdID, executionID, acDg)
-	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx, casng.UploadRequest{Bytes: blob, Digest: acDg})
+	acDg := digest.NewFromBlob(acBlb)
+	log.V(1).Infof("[casng] %s %s> action digest: %s", cmdID, executionID, acDg)
+	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx, casng.UploadRequest{Bytes: acBlb, Digest: acDg}, casng.UploadRequest{Bytes: cmdBlb, Digest: cmdDg})
 	if err != nil {
 		return err
 	}
@@ -370,32 +370,24 @@ func cmdDirs(cmd *command.Command) (execRoot impath.Absolute, workingDir impath.
 	return
 }
 
-// topLevelKeys returns a subset of reqs that corresponds to the top level paths.
-func topLevelKeys(reqs []casng.UploadRequest) []string {
+// topLevelReqs returns a subset of reqs that corresponds to the top level paths.
+func topLevelReqs(reqs []casng.UploadRequest) []casng.UploadRequest {
 	if len(reqs) == 0 {
 		return nil
 	}
+	// Let shorter paths be seen first, then skip over subsequent descendants.
 	sort.Slice(reqs, func(i, j int) bool { return reqs[i].Path.String() < reqs[j].Path.String() })
-	var keys []string
-	var lastReq *casng.UploadRequest
-	for _, r := range reqs {
-		if len(r.Bytes) > 0 {
+	top := []casng.UploadRequest{reqs[0]}
+	lastReq := reqs[0]
+	for i:=1;i<len(reqs);i++{
+		r := reqs[i]
+		if _, err := impath.Descendant(lastReq.Path, r.Path); err == nil {
 			continue
 		}
-		// TODO: simplify
-		if lastReq == nil {
-			keys = append(keys, r.Path.String()+r.Exclude.String())
-			r := r
-			lastReq = &r
-			continue
-		}
-		if _, err := impath.Descendant(lastReq.Path, r.Path); err != nil {
-			keys = append(keys, r.Path.String()+r.Exclude.String())
-			r := r
-			lastReq = &r
-		}
+		top = append(top, r)
+		lastReq = r
 	}
-	return keys
+	return top
 }
 
 // GetCachedResult tries to get the command result from the cache. The Result will be nil on a

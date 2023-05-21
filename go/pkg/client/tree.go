@@ -14,6 +14,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/encoding/prototext"
 
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
@@ -393,6 +394,7 @@ func packageTree(t *treeNode, stats *TreeStats) (root digest.Digest, blobs map[d
 	}
 	sort.Slice(dir.Symlinks, func(i, j int) bool { return dir.Symlinks[i].Name < dir.Symlinks[j].Name })
 
+	log.V(4).Infof("%s %s> Merkle tree root:\n%s", prototext.Format(dir))
 	ue, err := uploadinfo.EntryFromProto(dir)
 	if err != nil {
 		return digest.Empty, nil, err

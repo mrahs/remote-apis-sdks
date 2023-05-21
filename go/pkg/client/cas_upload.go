@@ -649,8 +649,8 @@ func (c *Client) NgUpload(ctx context.Context, reqs ...casng.UploadRequest) ([]d
 	return c.ngCasUploader.Upload(ctx, reqs...)
 }
 
-func (c *Client) NgNode(key string) proto.Message {
-	return c.ngCasUploader.Node(key)
+func (c *Client) NgNode(req casng.UploadRequest) proto.Message {
+	return c.ngCasUploader.Node(req)
 }
 
 func (c *Client) IsCasNG() bool {
