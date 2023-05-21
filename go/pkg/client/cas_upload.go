@@ -12,7 +12,6 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
@@ -650,8 +649,8 @@ func (c *Client) NgUpload(ctx context.Context, reqs ...casng.UploadRequest) ([]d
 	return c.ngCasUploader.Upload(ctx, reqs...)
 }
 
-func (c *Client) NgNode(path impath.Absolute, exclude walker.Filter) proto.Message {
-	return c.ngCasUploader.Node(path, exclude)
+func (c *Client) NgNode(key string) proto.Message {
+	return c.ngCasUploader.Node(key)
 }
 
 func (c *Client) IsCasNG() bool {

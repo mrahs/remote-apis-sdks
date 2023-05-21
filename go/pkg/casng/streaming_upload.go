@@ -13,7 +13,7 @@
 // The termination sequence is as follows:
 //   user closes input channels (streaming uploader).
 //   user waits for termination signal (return from batching uploader or channel closed from streaming uploader).
-//   user cancels uploader's context: cancel in-flight digestions and gRPC processors blocked on semaphores.
+//   user cancels uploader's context: cancel in-flight digestions and gRPC processors blocked on throttlers.
 //   client senders (top level) terminate.
 //   the digester channel is closed, and a termination signal is sent to the dispatcher.
 //   the dispatcher terminates its sender and propagates the signal to its piper.

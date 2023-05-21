@@ -61,8 +61,6 @@ import (
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
@@ -179,9 +177,8 @@ func (u *uploader) Wait() {
 // Node looks up a node from the node cache which is populated during digestion.
 // The node is either an repb.FileNode, repb.DirectoryNode, or repb.SymlinkNode.
 //
-// Returns nil if no node corresponds to the key that is derived from the given path and filter.
-func (u *uploader) Node(path impath.Absolute, exclude walker.Filter) proto.Message {
-	key := path.String() + exclude.String()
+// Returns nil if no node corresponds to the key which must be derived from the path and filter.
+func (u *uploader) Node(key string) proto.Message {
 	n, ok := u.nodeCache.Load(key)
 	if !ok {
 		return nil

@@ -121,7 +121,14 @@ func (u *uploader) digest(req UploadRequest) {
 			return false
 		},
 		Pre: func(path impath.Absolute, realPath impath.Absolute) (walker.PreAction, bool) {
-			log.V(3).Infof("[casng] upload.digest.visit.pre: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
+			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
+			if errPath != nil {
+				err = errors.Join(errPath, err)
+				return walker.SkipPath, false
+			}
+
+			log.V(3).Infof("[casng] upload.digest.visit.pre: path=%s, remote_path=%s, real_path=%s, tag=%s, walk_id=%s", path, p, realPath, req.tag, walkId)
+
 			select {
 			case <-u.ctx.Done():
 				log.V(3).Info("upload.digest.cancel: %tag=%s, walk_id=%s", req.tag, walkId)
@@ -129,16 +136,10 @@ func (u *uploader) digest(req UploadRequest) {
 			default:
 			}
 
-			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-			if errPath != nil {
-				err = errors.Join(errPath, err)
-				return walker.SkipPath, false
-			}
-			key := p.String() + req.Exclude.String()
-
 			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
 			// In both cases, deferring is the right call. Once the requset is processed, all requestters will revisit the path to get the digestion result.
 			// If the path was not cached before, claim it by makring it as in-flight.
+			key := path.String() + req.Exclude.String()
 			wg := &sync.WaitGroup{}
 			wg.Add(1)
 			m, ok := u.nodeCache.LoadOrStore(key, wg)
@@ -187,7 +188,14 @@ func (u *uploader) digest(req UploadRequest) {
 			return walker.SkipPath, true
 		},
 		Post: func(path impath.Absolute, realPath impath.Absolute, info fs.FileInfo) (ok bool) {
-			log.V(3).Infof("[casng] upload.digest.visit.post: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
+			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
+			if errPath != nil {
+				err = errors.Join(errPath, err)
+				return false
+			}
+
+			log.V(3).Infof("[casng] upload.digest.visit.post: path=%s, remote_path=%s, real_path=%s, tag=%s, walk_id=%s", path, p, realPath, req.tag, walkId)
+
 			select {
 			case <-u.ctx.Done():
 				log.V(3).Infof("upload.digest.cancel: tag=%s, walk_id=%s", req.tag, walkId)
@@ -195,13 +203,8 @@ func (u *uploader) digest(req UploadRequest) {
 			default:
 			}
 
-			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-			if errPath != nil {
-				err = errors.Join(errPath, err)
-				return false
-			}
-			key := p.String() + req.Exclude.String()
-			parentKey := p.Dir().String() + req.Exclude.String()
+			key := path.String() + req.Exclude.String()
+			parentKey := path.Dir().String() + req.Exclude.String()
 
 			// In post-access, the cache should have this walker's own wait group.
 			// Capture it here before it's overwritten with the actual result.
@@ -259,7 +262,14 @@ func (u *uploader) digest(req UploadRequest) {
 			return true
 		},
 		Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (action walker.SymlinkAction, ok bool) {
-			log.V(3).Infof("[casng] upload.digest.visit.symlink: path=%s, real_path=%s, slo=%s, tag=%s, walk_id=%s", path, realPath, req.SymlinkOptions, req.tag, walkId)
+			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
+			if errPath != nil {
+				err = errors.Join(errPath, err)
+				return walker.SkipSymlink, false
+			}
+
+			log.V(3).Infof("[casng] upload.digest.visit.symlink: path=%s, remote_path=%s, real_path=%s, slo=%s, tag=%s, walk_id=%s", path, p, realPath, req.SymlinkOptions, req.tag, walkId)
+
 			select {
 			case <-u.ctx.Done():
 				log.V(3).Infof("upload.digest.cancel: tag=%s, walk_id=%s", req.tag, walkId)
@@ -267,13 +277,8 @@ func (u *uploader) digest(req UploadRequest) {
 			default:
 			}
 
-			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-			if errPath != nil {
-				err = errors.Join(errPath, err)
-				return walker.SkipSymlink, false
-			}
-			key := p.String() + req.Exclude.String()
-			parentKey := p.Dir().String() + req.Exclude.String()
+			key := path.String() + req.Exclude.String()
+			parentKey := path.Dir().String() + req.Exclude.String()
 
 			// In symlink post-access, the cache should have this walker's own wait group.
 			// Capture it here before it's overwritten with the actual result.

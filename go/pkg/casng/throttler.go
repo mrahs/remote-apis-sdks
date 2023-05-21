@@ -3,27 +3,32 @@ package casng
 import (
 	"context"
 	"sync/atomic"
-
-	"golang.org/x/sync/semaphore"
 )
 
+// throttler provides a simple interface to limit in-flight goroutines.
 type throttler struct {
-	s *semaphore.Weighted
-	n atomic.Int32
+	ch chan struct{}
+	n  atomic.Int32
 }
 
+// acquire blocks until there is slot for a goroutine to be in-flight.
+//
+// Returns false if ctx expires before a slot is available. Otherwise returns true.
 func (t *throttler) acquire(ctx context.Context) bool {
-	// err is always ctx.Err()
-	err := t.s.Acquire(ctx, 1)
-	if err != nil {
-		return false
+	for {
+		select {
+		case t.ch <- struct{}{}:
+			t.n.Add(1)
+			return true
+		case <-ctx.Done():
+			return false
+		}
 	}
-	t.n.Add(1)
-	return true
 }
 
+// release must be called after acquire. Otherwise, it will block until acquire is called.
 func (t *throttler) release() {
-	t.s.Release(1)
+	<-t.ch
 	t.n.Add(-1)
 }
 
@@ -32,6 +37,7 @@ func (t *throttler) len() int {
 	return int(t.n.Load())
 }
 
+// newThrottler creates a new instance that allows up to n goroutines to be in-flight.
 func newThrottler(n int64) *throttler {
-	return &throttler{s: semaphore.NewWeighted(n)}
+	return &throttler{ch: make(chan struct{}, n)}
 }
