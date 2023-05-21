@@ -120,7 +120,7 @@ type Client struct {
 	byteStream    bsgrpc.ByteStreamClient
 	cas           regrpc.ContentAddressableStorageClient
 	useCasNg      bool
-	casUploaderNg *casng.BatchingUploader
+	ngCasUploader *casng.BatchingUploader
 	execution     regrpc.ExecutionClient
 	operations    opgrpc.OperationsClient
 	// Retrier is the Retrier that is used for RPCs made by this client.
@@ -217,6 +217,9 @@ func (c *Client) Close() error {
 	}
 	if c.CASConnection != c.Connection {
 		return c.CASConnection.Close()
+	}
+	if c.useCasNg {
+		c.ngCasUploader.Wait()
 	}
 	return nil
 }
@@ -799,7 +802,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			ioCfg.CompressionSizeThreshold = math.MaxInt64
 		}
 		var err error
-		client.casUploaderNg, err = casng.NewBatchingUploader(ctx, client.cas, client.byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
+		client.ngCasUploader, err = casng.NewBatchingUploader(ctx, client.cas, client.byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
 		if err != nil {
 			return nil, fmt.Errorf("error initializing CASNG: %w", err)
 		}

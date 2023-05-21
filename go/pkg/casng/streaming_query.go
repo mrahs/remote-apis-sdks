@@ -93,9 +93,11 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 	// Sender.
 	u.querySenderWg.Add(1)
 	go func() {
+		defer u.querySenderWg.Done()
+
 		log.V(1).Info("[casng] query.streamer.sender.start")
 		defer log.V(1).Info("[casng] query.streamer.sender.stop")
-		defer u.querySenderWg.Done()
+
 		for r := range in {
 			r.tag = tag
 			u.queryCh <- r
@@ -107,10 +109,12 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 	// Receiver.
 	u.receiverWg.Add(1)
 	go func() {
-		log.V(1).Info("[casng] query.streamer.receiver.start")
-		defer log.V(1).Info("[casng] query.streamer.receiver.stop")
 		defer u.receiverWg.Done()
 		defer close(ch)
+
+		log.V(1).Info("[casng] query.streamer.receiver.start")
+		defer log.V(1).Info("[casng] query.streamer.receiver.stop")
+
 		// Continue to drain until the broker closes the channel.
 		for {
 			r, ok := <-resCh
@@ -125,10 +129,12 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 	// Counter.
 	u.workerWg.Add(1)
 	go func() {
-		log.V(1).Info("[casng] query.streamer.counter.start")
-		defer log.V(1).Info("[casng] query.streamer.counter.stop")
 		defer u.workerWg.Done()
 		defer ctxSubCancel() // let the broker and the receiver terminate.
+
+		log.V(1).Info("[casng] query.streamer.counter.start")
+		defer log.V(1).Info("[casng] query.streamer.counter.stop")
+
 		pending := 0
 		done := false
 		for x := range pendingCh {
@@ -161,14 +167,14 @@ func (u *uploader) queryProcessor() {
 		}
 		// Block the entire processor if the concurrency limit is reached.
 		startTime := time.Now()
-		if u.queryThrottler.acquire(u.ctx) {
+		if !u.queryThrottler.acquire(u.ctx) {
 			return
 		}
-		log.V(2).Infof("[casng] query.processor.throttle: duration=%v", time.Since(startTime))
-		defer u.queryThrottler.release()
+		log.V(3).Infof("[casng] query.processor.throttle: duration=%v", time.Since(startTime))
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b missingBlobRequestBundle) {
+			defer u.queryThrottler.release()
 			defer u.workerWg.Done()
 			u.callMissingBlobs(ctx, b)
 		}(ctx, bundle)
@@ -187,7 +193,7 @@ func (u *uploader) queryProcessor() {
 				return
 			}
 
-			log.V(2).Infof("[casng] query.processor.req: digest=%s, tag=%s", req.digest, req.tag)
+			log.V(3).Infof("[casng] query.processor.req: digest=%s, tag=%s, bundle=%d", req.digest, req.tag, len(bundle))
 			dSize := proto.Size(req.digest.ToProto())
 
 			// Check oversized items.
@@ -222,13 +228,10 @@ func (u *uploader) queryProcessor() {
 // callMissingBlobs calls the gRPC endpoint and notifies requesters of the results.
 // It assumes ownership of the bundle argument.
 func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
-	log.V(2).Infof("[casng] query.call: len=%d", len(bundle))
-	if len(bundle) < 1 {
-		return
-	}
+	log.V(3).Infof("[casng] query.call: len=%d", len(bundle))
 	startTime := time.Now()
-	defer func(){
-		log.V(2).Infof("[casng] query.call: duration=%v", time.Since(startTime))
+	defer func() {
+		log.V(3).Infof("[casng] query.call: duration=%v", time.Since(startTime))
 	}()
 
 	digests := make([]*repb.Digest, 0, len(bundle))
@@ -240,9 +243,6 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 		InstanceName: u.instanceName,
 		BlobDigests:  digests,
 	}
-
-	u.workerWg.Add(1)
-	defer u.workerWg.Done()
 
 	var res *repb.FindMissingBlobsResponse
 	var err error
@@ -262,7 +262,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 		err = errors.Join(ErrGRPC, err)
 		missing = digests
 	}
-	log.V(2).Infof("[casng] query.call.grpc_done: duration%v, missing=%d", time.Since(startTime), len(missing))
+	log.V(3).Infof("[casng] query.call.grpc_done: duration%v, missing=%d", time.Since(startTime), len(missing))
 
 	// Report missing.
 	for _, dpb := range missing {

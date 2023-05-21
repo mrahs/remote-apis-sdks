@@ -38,7 +38,7 @@ type pubsub struct {
 // A slow subscriber affects all other subscribers that are waiting for the same message.
 func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 	t := tag(uuid.New())
-	log.V(2).Infof("[casng] pubsub.sub: tag=%s", t)
+	log.V(3).Infof("[casng] pubsub.sub: tag=%s", t)
 
 	// Serialize this block to avoid concurrent map-read-write errors.
 	ps.mu.Lock()
@@ -54,13 +54,14 @@ func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 		defer ps.wg.Done()
 		<-ctx.Done()
 
+		log.V(3).Infof("[casng] pubsub.unsub: tag=%s", t)
+
 		// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
 		ps.mu.Lock()
 		delete(ps.subs, t)
 		ps.mu.Unlock()
 
 		close(subscriber)
-		log.V(2).Infof("[casng] pubsub.unsub: tag=%s", t)
 	}()
 
 	return t, subscriber
@@ -103,7 +104,7 @@ func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
 func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 	if len(tags) == 0 {
 		log.Warning("[casng] pubsub.pub: called without tags")
-		log.V(3).Infof("[casng] pubsub.pub: called without tags: msg=%v", m)
+		log.V(4).Infof("[casng] pubsub.pub: called without tags: msg=%v", m)
 	}
 	if n <= 0 {
 		log.Warningf("[casng] pubsub.pub: nothing published because n=%d", n)
@@ -112,7 +113,7 @@ func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	log.V(3).Infof("[casng] pubsub.pub.msg: type=%[1]T, value=%[1]v", m)
+	log.V(4).Infof("[casng] pubsub.pub.msg: type=%[1]T, value=%[1]v", m)
 	var toRetry []tag
 	var received []tag
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -121,13 +122,13 @@ func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 		for _, t := range tags {
 			subscriber, ok := ps.subs[t]
 			if !ok {
-				log.V(2).Infof("[casng] pubsub.pub.drop: tag=%s", t)
+				log.V(3).Infof("[casng] pubsub.pub.drop: tag=%s", t)
 				continue
 			}
 			// Send now or reschedule if the subscriber is not ready.
 			select {
 			case subscriber <- m:
-				log.V(2).Infof("[casng] pubsub.pub.send: tag=%s", t)
+				log.V(3).Infof("[casng] pubsub.pub.send: tag=%s", t)
 				received = append(received, t)
 				if len(received) >= n {
 					return received

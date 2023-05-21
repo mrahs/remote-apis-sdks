@@ -49,7 +49,8 @@
 //
 //	Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
 //	Level 2 is used for internal functions that may be called per request.
-//	Level 3 is used for messages that contain large objects.
+//	Level 3 is used for internal functions that may be called multiple times per request.
+//  Level 4 is used for messages with large objects.
 package casng
 
 import (
@@ -151,7 +152,6 @@ type uploader struct {
 	processorWg      sync.WaitGroup          // Internal routers.
 	receiverWg       sync.WaitGroup          // Consumers.
 	workerWg         sync.WaitGroup          // Short-lived intermediate producers/consumers.
-	requesterWalkWg  map[tag]*sync.WaitGroup // Tracks file system walks per caller.
 	walkerWg         sync.WaitGroup          // Tracks all walkers.
 	queryCh          chan missingBlobRequest // Fan-in channel for query requests.
 	digesterCh       chan UploadRequest      // Fan-in channel for upload requests.
@@ -278,7 +278,6 @@ func newUploaderv2(
 		ioLargeThrottler: newThrottler(int64(ioCfg.OpenLargeFilesLimit)),
 		dirChildren:      initSliceCache(),
 
-		requesterWalkWg:  make(map[tag]*sync.WaitGroup),
 		queryCh:          make(chan missingBlobRequest),
 		queryPubSub:      newPubSub(),
 		digesterCh:       make(chan UploadRequest),

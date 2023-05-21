@@ -642,16 +642,16 @@ func (c *Client) ngUploadPredigested(ctx context.Context, entries []*uploadinfo.
 		}
 		reqs = append(reqs, r)
 	}
-	uploaded, stats, err := c.casUploaderNg.Upload(ctx, reqs...)
+	uploaded, stats, err := c.ngCasUploader.Upload(ctx, reqs...)
 	return uploaded, stats.TotalBytesMoved, err
 }
 
 func (c *Client) NgUpload(ctx context.Context, reqs ...casng.UploadRequest) ([]digest.Digest, casng.Stats, error) {
-	return c.casUploaderNg.Upload(ctx, reqs...)
+	return c.ngCasUploader.Upload(ctx, reqs...)
 }
 
 func (c *Client) NgNode(path impath.Absolute, exclude walker.Filter) proto.Message {
-	return c.casUploaderNg.Node(path, exclude)
+	return c.ngCasUploader.Node(path, exclude)
 }
 
 func (c *Client) IsCasNG() bool {

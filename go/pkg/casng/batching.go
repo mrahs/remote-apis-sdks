@@ -25,7 +25,7 @@ import (
 // In other words, if an error is returned, any digest that is not in the returned slice is not missing.
 // If no error is returned, the returned slice contains all the missing digests.
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
-	log.V(2).Infof("[casng] batch.query: len=%d", len(digests))
+	log.V(1).Infof("[casng] batch.query: len=%d", len(digests))
 
 	// Deduplicate and split into batches.
 	var batches [][]*repb.Digest
@@ -48,7 +48,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	if len(batches) == 0 {
 		return nil, nil
 	}
-	log.V(2).Infof("[casng] batch.query.deduped: len=%d", len(dgSet))
+	log.V(1).Infof("[casng] batch.query.deduped: len=%d", len(dgSet))
 
 	// Call remote.
 	missing := make([]digest.Digest, 0, len(dgSet))
@@ -76,7 +76,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			missing = append(missing, digest.NewFromProtoUnvalidated(d))
 		}
 	}
-	log.V(2).Infof("[casng] batch.query.done: missing=%d", len(missing))
+	log.V(1).Infof("[casng] batch.query.done: missing=%d", len(missing))
 
 	if err != nil {
 		err = errors.Join(ErrGRPC, err)
@@ -96,17 +96,19 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
 // If an error was returned, the returned stats may indicate that all the bytes were sent, but that does not guarantee that the server committed all of them.
 func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64) (Stats, error) {
+	log.V(1).Infof("[casng] upload.write_bytes: name=%s, size=%d, offset=%d, finish=%t", name, size, offset)
 	return u.writeBytes(ctx, name, r, size, offset, true)
 }
 
 // WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
 func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size int64, offset int64) (Stats, error) {
+	log.V(1).Infof("[casng] upload.write_bytes_partial: name=%s, size=%d, offset=%d, finish=%t", name, size, offset)
 	return u.writeBytes(ctx, name, r, size, offset, false)
 }
 
 func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error) {
-	startTime := time.Now()
 	log.V(2).Infof("[casng] upload.write_bytes.start: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
+	startTime := time.Now()
 	defer func() {
 		log.V(2).Infof("[casng] upload.write_bytes.done: duration=%v, name=%s, size=%d, offset=%d, finish=%t", time.Since(startTime), name, size, offset, finish)
 	}()
@@ -333,10 +335,12 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 
 	u.clientSenderWg.Add(1)
 	go func() {
-		log.V(1).Info("[casng] upload.sender.start")
-		defer log.V(1).Info("[casng] upload.sender.stop")
 		defer close(ch) // let the streamer terminate.
 		defer u.clientSenderWg.Done()
+
+		log.V(1).Info("[casng] upload.sender.start")
+		defer log.V(1).Info("[casng] upload.sender.stop")
+
 		for _, r := range reqs {
 			r.ctx = ctx
 			select {
