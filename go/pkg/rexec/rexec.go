@@ -267,9 +267,9 @@ func (ec *Context) ngUploadInputs() error {
 
 	// Construct the merkle tree root.
 	root := &repb.Directory{}
-	paths, topLevelKeys := topLevelKeys(reqs)
-	log.V(1).Infof("%s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, paths=%d, top_level_keys=%d", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, len(paths), len(topLevelKeys))
-	log.V(4).Infof("%s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, paths=%v, top_level_keys=%v", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, paths, topLevelKeys)
+	topLevelKeys := topLevelKeys(reqs)
+	log.V(1).Infof("%s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, reqs=%d, top_level_keys=%d", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, len(reqs), len(topLevelKeys))
+	log.V(4).Infof("%s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, top_level_keys=%v", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, topLevelKeys)
 	for _, key := range topLevelKeys {
 		node := ec.client.GrpcClient.NgNode(key)
 		if node == nil {
@@ -371,24 +371,31 @@ func cmdDirs(cmd *command.Command) (execRoot impath.Absolute, workingDir impath.
 }
 
 // topLevelKeys returns a subset of reqs that corresponds to the top level paths.
-func topLevelKeys(reqs []casng.UploadRequest) ([]string, []string) {
+func topLevelKeys(reqs []casng.UploadRequest) []string {
 	if len(reqs) == 0 {
-		return nil, nil
+		return nil
 	}
 	sort.Slice(reqs, func(i, j int) bool { return reqs[i].Path.String() < reqs[j].Path.String() })
-	paths := make([]string, len(reqs))
-	paths[0] = reqs[0].Path.String()
-	keys := []string{reqs[0].Path.String()}
-	lastReq := reqs[0]
-	for i := 1; i < len(reqs); i++ {
-		r := reqs[i]
-		paths[i] = r.Path.String()
+	var keys []string
+	var lastReq *casng.UploadRequest
+	for _, r := range reqs {
+		if len(r.Bytes) > 0 {
+			continue
+		}
+		// TODO: simplify
+		if lastReq == nil {
+			keys = append(keys, r.Path.String()+r.Exclude.String())
+			r := r
+			lastReq = &r
+			continue
+		}
 		if _, err := impath.Descendant(lastReq.Path, r.Path); err != nil {
 			keys = append(keys, r.Path.String()+r.Exclude.String())
-			lastReq = r
+			r := r
+			lastReq = &r
 		}
 	}
-	return paths, keys
+	return keys
 }
 
 // GetCachedResult tries to get the command result from the cache. The Result will be nil on a
