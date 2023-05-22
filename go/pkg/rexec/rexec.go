@@ -243,6 +243,7 @@ func (ec *Context) ngUploadInputs() error {
 		})
 	}
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
+	// TODO: create an NgUploadTree(ctx, reqs...) where all the reqs share a common ancestor that is the root or the tree and upload intermediate directory nodes.
 	missing, stats, err := ec.client.GrpcClient.NgUpload(ec.ctx, reqs...)
 	if err != nil {
 		return err
@@ -256,10 +257,9 @@ func (ec *Context) ngUploadInputs() error {
 
 	// Construct the merkle tree root.
 	root := &repb.Directory{}
-	topLevelKeys := topLevelReqs(reqs)
-	log.V(1).Infof("[casng] %s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, reqs=%d, top_level_reqs=%d", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, len(reqs), len(topLevelKeys))
-	log.V(4).Infof("[casng] %s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, top_level_reqs=%v", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, topLevelKeys)
-	for _, r := range topLevelKeys {
+	topLevelReqs := topLevelReqs(reqs)
+	log.V(1).Infof("[casng] %s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, reqs=%d, top_level_reqs=%d", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, len(reqs), len(topLevelReqs))
+	for _, r := range topLevelReqs {
 		node := ec.client.GrpcClient.NgNode(r)
 		if node == nil {
 			return fmt.Errorf("cannot construct a merkle tree with a missing node for %v", r)
@@ -275,15 +275,16 @@ func (ec *Context) ngUploadInputs() error {
 			return fmt.Errorf("unexpeced node type %[1]T for path %[1]q while constructing merkle tree root", node)
 		}
 	}
-	// Children are already sorted as a side effect of topLevelReqs.
-	// sort.Slice(root.Files, func(i, j int) bool { return root.Files[i].Name < root.Files[j].Name })
-	// sort.Slice(root.Directories, func(i, j int) bool { return root.Directories[i].Name < root.Directories[j].Name })
-	// sort.Slice(root.Symlinks, func(i, j int) bool { return root.Symlinks[i].Name < root.Symlinks[j].Name })
-	log.V(4).Infof("[casng] %s %s> merkle tree root:\n%s", prototext.Format(root))
+	// Even though the paths are sorted (as a side effect of topLevelReqs), the directory needs its children sorted by name for hash-determinism.
+	sort.Slice(root.Files, func(i, j int) bool { return root.Files[i].Name < root.Files[j].Name })
+	sort.Slice(root.Directories, func(i, j int) bool { return root.Directories[i].Name < root.Directories[j].Name })
+	sort.Slice(root.Symlinks, func(i, j int) bool { return root.Symlinks[i].Name < root.Symlinks[j].Name })
+	// log.V(4).Infof("[casng] %s %s> merkle tree root:\n%s", cmdID, executionID, prototext.Format(root))
 	rootBytes, err := proto.Marshal(root)
 	if err != nil {
 		return err
 	}
+	rootDg := digest.NewFromBlob(rootBytes)
 
 	commandHasOutputPathsField := ec.client.GrpcClient.SupportsCommandOutputPaths()
 	cmdPb := ec.cmd.ToREProto(commandHasOutputPathsField)
@@ -297,7 +298,7 @@ func (ec *Context) ngUploadInputs() error {
 	log.V(1).Infof("[casng] %s %s> command digest: %s", cmdID, executionID, cmdDg)
 	acPb := &repb.Action{
 		CommandDigest:   cmdDg.ToProto(),
-		InputRootDigest: digest.NewFromBlob(rootBytes).ToProto(),
+		InputRootDigest: rootDg.ToProto(),
 		DoNotCache:      ec.opt.DoNotCache,
 	}
 	// If supported, we attach a copy of the platform properties list to the Action.
@@ -314,7 +315,12 @@ func (ec *Context) ngUploadInputs() error {
 	}
 	acDg := digest.NewFromBlob(acBlb)
 	log.V(1).Infof("[casng] %s %s> action digest: %s", cmdID, executionID, acDg)
-	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx, casng.UploadRequest{Bytes: acBlb, Digest: acDg}, casng.UploadRequest{Bytes: cmdBlb, Digest: cmdDg})
+	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx)// TODO: confirm those are cache hits in a fully cached build which would verify that the digestion is correct.
+
+	// casng.UploadRequest{Bytes: rootBytes, Digest: rootDg},
+	// casng.UploadRequest{Bytes: acBlb, Digest: acDg},
+	// casng.UploadRequest{Bytes: cmdBlb, Digest: cmdDg},
+
 	if err != nil {
 		return err
 	}
@@ -379,7 +385,7 @@ func topLevelReqs(reqs []casng.UploadRequest) []casng.UploadRequest {
 	sort.Slice(reqs, func(i, j int) bool { return reqs[i].Path.String() < reqs[j].Path.String() })
 	top := []casng.UploadRequest{reqs[0]}
 	lastReq := reqs[0]
-	for i:=1;i<len(reqs);i++{
+	for i := 1; i < len(reqs); i++ {
 		r := reqs[i]
 		if _, err := impath.Descendant(lastReq.Path, r.Path); err == nil {
 			continue
