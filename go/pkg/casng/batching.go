@@ -305,7 +305,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	digested := make(map[digest.Digest]UploadRequest)
 	var digests []digest.Digest
 	for _, r := range reqs {
-		if r.Digest.IsEmpty() || r.Digest.Hash == "" {
+		if r.Digest.Hash == "" {
 			undigested = append(undigested, r)
 			continue
 		}
@@ -396,7 +396,8 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	//   dirNodes{/a/b/c: [node], /a/b: [node], /e/f: [node]}
 	var remotePath impath.Absolute
 	for _, req := range reqs {
-		if len(req.Bytes) > 0 {
+		// TODO: should handle path instead of ignoring.
+		if !req.Bytes.Empty() {
 			continue
 		}
 
@@ -407,7 +408,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		}
 
 		// Every path must be relative to the execution root, which means the remote working directory is included in the merkle tree.
-		remotePath, err = req.Path.ReplacePrefix(localPrefix, remotePrefix)
+		remotePath, err = req.Path.Root.ReplacePrefix(localPrefix, remotePrefix)
 		if err != nil {
 			return
 		}
@@ -477,7 +478,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 			// Attach the node to the parent.
 			dirNodes[parent] = append(dirNodes[parent], node)
 			// Also uploaded its blob.
-			moreReqs = append(moreReqs, UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest)})
+			moreReqs = append(moreReqs, UploadRequest{Bytes: UploadRequest_Bytes{Content: b}, Digest: digest.NewFromProtoUnvalidated(node.Digest)})
 			continue
 		}
 
@@ -494,7 +495,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		return
 	}
 	rootDigest = digest.NewFromProtoUnvalidated(rootNode.Digest)
-	moreReqs = append(moreReqs, UploadRequest{Bytes: b, Digest: rootDigest})
+	moreReqs = append(moreReqs, UploadRequest{Bytes: UploadRequest_Bytes{Content: b}, Digest: rootDigest})
 
 	// Upload the blobs of the directories.
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, moreReqs...)

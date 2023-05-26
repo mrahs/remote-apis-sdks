@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -237,8 +236,7 @@ func (ec *Context) ngUploadInputs() error {
 			return err
 		}
 		reqs = append(reqs, casng.UploadRequest{
-			Path:           absPath,
-			SymlinkOptions: slo,
+			Path:           casng.UploadRequest_Path{Root: absPath, SymlinkOptions: slo},
 		})
 	}
 	// TODO: handle virtual inputs properly.
@@ -255,8 +253,7 @@ func (ec *Context) ngUploadInputs() error {
 			return err
 		}
 		reqs = append(reqs, casng.UploadRequest{
-			Path:  absPath,
-			Bytes: p.Contents,
+			Bytes: casng.UploadRequest_Bytes{Content: p.Contents, Path: absPath},
 		})
 	}
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
@@ -359,26 +356,6 @@ func cmdDirs(cmd *command.Command) (execRoot impath.Absolute, workingDir impath.
 		return
 	}
 	return
-}
-
-// topLevelReqs returns a subset of reqs that corresponds to the top level paths.
-func topLevelReqs(reqs []casng.UploadRequest) []casng.UploadRequest {
-	if len(reqs) == 0 {
-		return nil
-	}
-	// Let shorter paths be seen first, then skip over subsequent descendants.
-	sort.Slice(reqs, func(i, j int) bool { return reqs[i].Path.String() < reqs[j].Path.String() })
-	top := []casng.UploadRequest{reqs[0]}
-	lastReq := reqs[0]
-	for i := 1; i < len(reqs); i++ {
-		r := reqs[i]
-		if _, err := impath.Descendant(lastReq.Path, r.Path); err == nil {
-			continue
-		}
-		top = append(top, r)
-		lastReq = r
-	}
-	return top
 }
 
 // GetCachedResult tries to get the command result from the cache. The Result will be nil on a

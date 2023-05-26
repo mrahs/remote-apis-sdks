@@ -633,11 +633,11 @@ func (c *Client) ngUploadPredigested(ctx context.Context, entries []*uploadinfo.
 		}
 		r := casng.UploadRequest{Digest: entry.Digest}
 		if entry.Path == "" {
-			r.Bytes = entry.Contents
+			r.Bytes.Content = entry.Contents
 		} else if abs, err := impath.Abs(entry.Path); err != nil {
 			return nil, 0, err
 		} else {
-			r.Path = abs
+			r.Path.Root = abs
 		}
 		reqs = append(reqs, r)
 	}

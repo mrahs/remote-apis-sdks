@@ -179,7 +179,7 @@ func (u *uploader) Wait() {
 //
 // Returns nil if no node corresponds to req.
 func (u *uploader) Node(req UploadRequest) proto.Message {
-	key := req.Path.String() + req.Exclude.String()
+	key := req.Path.Root.String() + req.Path.Exclude.String()
 	n, ok := u.nodeCache.Load(key)
 	if !ok {
 		return nil
