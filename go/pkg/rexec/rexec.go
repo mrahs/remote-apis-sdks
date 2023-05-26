@@ -219,12 +219,12 @@ func (ec *Context) ngUploadInputs() error {
 		log.V(1).Infof("[casng] %s %s> inputs already uploaded", cmdID, executionID)
 		return nil
 	}
-	execRoot, workingDir, remoteWorkingDir, err := cmdDirs(ec.cmd)
+	execRoot, localPrefix, remotePrefix, err := cmdDirs(ec.cmd)
 	if err != nil {
 		return err
 	}
 	slo := symlinkOpts(ec.client.GrpcClient.TreeSymlinkOpts, ec.cmd.InputSpec.SymlinkBehavior)
-	log.V(2).Infof("[casng] %s %s> exec_root=%s, work_dir=%s, remote_work_dir=%s, symlink_opts=%s", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, slo)
+	log.V(2).Infof("[casng] %s %s> exec_root=%s, local_prefix=%s, remote_prefix=%s, symlink_opts=%s", cmdID, executionID, execRoot, localPrefix, remotePrefix, slo)
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs))
 	for _, p := range ec.cmd.InputSpec.Inputs {
 		rel, err := impath.Rel(p)
@@ -232,19 +232,16 @@ func (ec *Context) ngUploadInputs() error {
 			return err
 		}
 		absPath := execRoot.Append(rel)
-		absPathRemote, err := absPath.ReplacePrefix(workingDir, remoteWorkingDir)
 		if err != nil {
 			return err
 		}
 		reqs = append(reqs, casng.UploadRequest{
 			Path:           absPath,
-			PathRemote:     absPathRemote,
 			SymlinkOptions: slo,
 		})
 	}
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
-	// TODO: create an NgUploadTree(ctx, reqs...) where all the reqs share a common ancestor that is the root or the tree and upload intermediate directory nodes.
-	missing, stats, err := ec.client.GrpcClient.NgUpload(ec.ctx, reqs...)
+	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs...)
 	if err != nil {
 		return err
 	}
@@ -254,37 +251,6 @@ func (ec *Context) ngUploadInputs() error {
 	ec.Metadata.LogicalBytesUploaded = stats.LogicalBytesMoved
 	ec.Metadata.RealBytesUploaded = stats.TotalBytesMoved
 	ec.Metadata.MissingDigests = missing
-
-	// Construct the merkle tree root.
-	root := &repb.Directory{}
-	topLevelReqs := topLevelReqs(reqs)
-	log.V(1).Infof("[casng] %s %s> constructing merkle tree root: exec_root=%s, work_dir=%s, remote_work_dir=%s, reqs=%d, top_level_reqs=%d", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, len(reqs), len(topLevelReqs))
-	for _, r := range topLevelReqs {
-		node := ec.client.GrpcClient.NgNode(r)
-		if node == nil {
-			return fmt.Errorf("cannot construct a merkle tree with a missing node for %v", r)
-		}
-		switch n := node.(type) {
-		case *repb.FileNode:
-			root.Files = append(root.Files, n)
-		case *repb.DirectoryNode:
-			root.Directories = append(root.Directories, n)
-		case *repb.SymlinkNode:
-			root.Symlinks = append(root.Symlinks, n)
-		default:
-			return fmt.Errorf("unexpeced node type %[1]T for path %[1]q while constructing merkle tree root", node)
-		}
-	}
-	// Even though the paths are sorted (as a side effect of topLevelReqs), the directory needs its children sorted by name for hash-determinism.
-	sort.Slice(root.Files, func(i, j int) bool { return root.Files[i].Name < root.Files[j].Name })
-	sort.Slice(root.Directories, func(i, j int) bool { return root.Directories[i].Name < root.Directories[j].Name })
-	sort.Slice(root.Symlinks, func(i, j int) bool { return root.Symlinks[i].Name < root.Symlinks[j].Name })
-	// log.V(4).Infof("[casng] %s %s> merkle tree root:\n%s", cmdID, executionID, prototext.Format(root))
-	rootBytes, err := proto.Marshal(root)
-	if err != nil {
-		return err
-	}
-	rootDg := digest.NewFromBlob(rootBytes)
 
 	commandHasOutputPathsField := ec.client.GrpcClient.SupportsCommandOutputPaths()
 	cmdPb := ec.cmd.ToREProto(commandHasOutputPathsField)
@@ -315,7 +281,7 @@ func (ec *Context) ngUploadInputs() error {
 	}
 	acDg := digest.NewFromBlob(acBlb)
 	log.V(1).Infof("[casng] %s %s> action digest: %s", cmdID, executionID, acDg)
-	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx)// TODO: confirm those are cache hits in a fully cached build which would verify that the digestion is correct.
+	// missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx)// TODO: confirm those are cache hits in a fully cached build which would verify that the digestion is correct.
 
 	// casng.UploadRequest{Bytes: rootBytes, Digest: rootDg},
 	// casng.UploadRequest{Bytes: acBlb, Digest: acDg},

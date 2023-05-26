@@ -9,10 +9,12 @@ import (
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
 	"github.com/klauspost/compress/zstd"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
+	"google.golang.org/protobuf/proto"
 )
 
 // MissingBlobs queries the CAS for digests and returns a slice of the missing ones.
@@ -363,4 +365,117 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	}
 
 	return uploaded, stats, err
+}
+
+func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix, remotePrefix impath.Absolute, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
+	// First, upload the requests. Then, upload additional directories.
+	uploaded, stats, err = u.Upload(ctx, reqs...)
+	if err != nil {
+		return
+	}
+
+	// dirPaths associates a remote directory with a list of its children (also remote directories).
+	dirPaths := make(map[impath.Absolute]map[impath.Absolute]struct{})
+	// direNodes associates ad remote directory with a list of digested children (nodes).
+	dirNodes := make(map[impath.Absolute][]proto.Message)
+	// nodeSeen helps avoid duplicated node children in case of a duplicated request.
+	nodeSeen := make(map[impath.Absolute]bool)
+
+	// This loop flattens out intermeidate directories in a the maps above.
+	// dirPaths will hold children that need to be converted into directory nodes.
+	// dirNodes will hold already digested nodes from the previous upload above.
+	var remotePath impath.Absolute
+	for _, req := range reqs {
+		node := u.Node(req)
+		if node == nil {
+			err = fmt.Errorf("cannot construct the merkle tree with a missing node for path %q", req.Path)
+			return
+		}
+
+		// Every path must be relative to the execution root, which means the remote working directory is included in the merkle tree.
+		remotePath, err = req.Path.ReplacePrefix(localPrefix, remotePrefix)
+		if err != nil {
+			return
+		}
+
+		// Avoid duplicate nodes.
+		if _, ok := nodeSeen[remotePath]; ok {
+			continue
+		}
+		nodeSeen[remotePath] = true
+
+		parent := remotePath.Dir()
+		dirNodes[parent] = append(dirNodes[parent], node)
+		// Do not go beyond the root. Also stop if the ancestors are already processed.
+		if parent.String() == execRoot.String() || len(dirNodes[parent]) > 1 || len(dirPaths[parent]) > 0 {
+			continue
+		}
+
+		// Add ancestors to the maps.
+		for {
+			remotePath = parent
+			parent = parent.Dir()
+			dirPaths[parent][remotePath] = struct{}{}
+
+			if parent.String() == execRoot.String() {
+				break
+			}
+		}
+	}
+
+	// This stack loop starts processing intermediate directories top to bottom.
+	var moreReqs []UploadRequest
+	stack := make([]impath.Absolute, 0, len(dirPaths))
+	// First, add all the root's children to the stack.
+	for child := range dirPaths[execRoot] {
+		stack = append(stack, child)
+	}
+	for len(stack) > 0 {
+		// Peek.
+		dir := stack[len(stack)-1]
+
+		children := dirPaths[dir]
+		// If all path children have been processed, there are only nodes. Construct a directory node and attach it to the parent.
+		if len(children) == 0 {
+			// Pop.
+			stack = stack[:len(stack)-1]
+			// Construct the directory node.
+			node, b, errDigest := digestDirectory(dir, dirNodes[dir])
+			if errDigest != nil {
+				err = errDigest
+				return
+			}
+			parent := dir.Dir()
+			// Delete this path from its parent so the parent can itself be converted into a node once it's processed.
+			delete(dirPaths[parent], dir)
+			// Attach the node to the parent.
+			dirNodes[parent] = append(dirNodes[parent], node)
+			// Also uploaded its blob.
+			moreReqs = append(moreReqs, UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest)})
+			continue
+		}
+
+		// There are children to be processed first.
+		for child := range children {
+			stack = append(stack, child)
+		}
+	}
+
+	// Construct the tree node. Only the blob is needed. Passing any path to the function works since we are not interested in the path name or the returned node.
+	rootNode, b, errDigest := digestDirectory(execRoot, dirNodes[execRoot])
+	if errDigest != nil {
+		err = errDigest
+		return
+	}
+	rootDigest = digest.NewFromProtoUnvalidated(rootNode.Digest)
+	moreReqs = append(moreReqs, UploadRequest{Bytes: b, Digest: rootDigest})
+
+	// Upload the blobs of the directories.
+	moreUploaded, moreStats, moreErr := u.Upload(ctx, moreReqs...)
+	if moreErr != nil {
+		err = moreErr
+	}
+	stats.Add(moreStats)
+	uploaded = append(uploaded, moreUploaded...)
+	return
 }

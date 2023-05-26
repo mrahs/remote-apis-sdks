@@ -460,7 +460,7 @@ func TestUpload_Batching(t *testing.T) {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
 			root := impath.MustAbs(tmp, test.root)
-			uploaded, stats, err := u.Upload(ctx, casng.UploadRequest{Path: root, PathRemote: root, SymlinkOptions: symlinkopts.PreserveAllowDangling()})
+			uploaded, stats, err := u.Upload(ctx, casng.UploadRequest{Path: root, SymlinkOptions: symlinkopts.PreserveAllowDangling()})
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}

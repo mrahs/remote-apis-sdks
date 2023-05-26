@@ -121,13 +121,7 @@ func (u *uploader) digest(req UploadRequest) {
 			return false
 		},
 		Pre: func(path impath.Absolute, realPath impath.Absolute) (walker.PreAction, bool) {
-			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-			if errPath != nil {
-				err = errors.Join(errPath, err)
-				return walker.SkipPath, false
-			}
-
-			log.V(3).Infof("[casng] upload.digest.visit.pre: path=%s, remote_path=%s, real_path=%s, tag=%s, walk_id=%s", path, p, realPath, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digest.visit.pre: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
 
 			select {
 			case <-u.ctx.Done():
@@ -174,12 +168,11 @@ func (u *uploader) digest(req UploadRequest) {
 				// The blob of the directory node is the bytes of a repb.Directory message.
 				// Generate and forward it. If it was uploaded before, it'll be reported as a cache hit.
 				// Otherwise, it means the previous attempt to upload it failed and it is going to be retried.
-				node, b, errDigest := digestDirectory(realPath, u.dirChildren.load(key))
+				node, b, errDigest := digestDirectory(path, u.dirChildren.load(key))
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
 					return walker.SkipPath, false
 				}
-				node.Name = p.Base().String()
 				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
@@ -188,13 +181,7 @@ func (u *uploader) digest(req UploadRequest) {
 			return walker.SkipPath, true
 		},
 		Post: func(path impath.Absolute, realPath impath.Absolute, info fs.FileInfo) (ok bool) {
-			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-			if errPath != nil {
-				err = errors.Join(errPath, err)
-				return false
-			}
-
-			log.V(3).Infof("[casng] upload.digest.visit.post: path=%s, remote_path=%s, real_path=%s, tag=%s, walk_id=%s", path, p, realPath, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digest.visit.post: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
 
 			select {
 			case <-u.ctx.Done():
@@ -226,12 +213,11 @@ func (u *uploader) digest(req UploadRequest) {
 				stats.DigestCount += 1
 				stats.InputDirCount += 1
 				// All the descendants have already been visited (DFS).
-				node, b, errDigest := digestDirectory(realPath, u.dirChildren.load(key))
+				node, b, errDigest := digestDirectory(path, u.dirChildren.load(key))
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
 					return false
 				}
-				node.Name = p.Base().String()
 				u.dirChildren.append(parentKey, node)
 				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
 				u.nodeCache.Store(key, node)
@@ -246,7 +232,7 @@ func (u *uploader) digest(req UploadRequest) {
 					err = errors.Join(errDigest, err)
 					return false
 				}
-				node.Name = p.Base().String()
+				node.Name = path.Base().String()
 				u.dirChildren.append(parentKey, node)
 				blb.tag = req.tag
 				blb.ctx = req.ctx
@@ -262,13 +248,7 @@ func (u *uploader) digest(req UploadRequest) {
 			return true
 		},
 		Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (action walker.SymlinkAction, ok bool) {
-			p, errPath := path.ReplacePrefix(req.Path, req.PathRemote)
-			if errPath != nil {
-				err = errors.Join(errPath, err)
-				return walker.SkipSymlink, false
-			}
-
-			log.V(3).Infof("[casng] upload.digest.visit.symlink: path=%s, remote_path=%s, real_path=%s, slo=%s, tag=%s, walk_id=%s", path, p, realPath, req.SymlinkOptions, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digest.visit.symlink: path=%s, real_path=%s, slo=%s, tag=%s, walk_id=%s", path, realPath, req.SymlinkOptions, req.tag, walkId)
 
 			select {
 			case <-u.ctx.Done():
@@ -303,7 +283,7 @@ func (u *uploader) digest(req UploadRequest) {
 				return walker.SkipSymlink, false
 			}
 			if node != nil {
-				node.Name = p.Base().String()
+				node.Name = path.Base().String()
 				u.dirChildren.append(parentKey, node)
 				u.nodeCache.Store(key, node)
 			} else {

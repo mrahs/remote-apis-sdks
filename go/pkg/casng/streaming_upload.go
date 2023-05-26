@@ -64,9 +64,6 @@ type UploadRequest struct {
 	// Path is used to access and read files. It is ignored if Bytes is set.
 	Path impath.Absolute
 
-	// PathRemote is used when uploading files. It must be set to be identical to Path to avoid using the zero value unintentionally. It is ignored if Path is ignored.
-	PathRemote impath.Absolute
-
 	// SymlinkOptions is used when Path is set. It is ignored if Path is ignored.
 	SymlinkOptions slo.Options
 
