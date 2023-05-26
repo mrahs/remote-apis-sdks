@@ -251,6 +251,7 @@ func (u *uploader) batcher() {
 		// Block the bundler if the concurrency limit is reached.
 		startTime := time.Now()
 		if !u.uploadThrottler.acquire(u.ctx) {
+			// TODO: must send results to the dispatcher here.
 			return
 		}
 		log.V(3).Infof("[casng] upload.batch.throttle: duration=%v", time.Since(startTime))
@@ -526,13 +527,13 @@ func (u *uploader) streamer() {
 
 			// Block the streamer if the gRPC call is being throttled.
 			startTime := time.Now()
-			if u.streamThrottle.acquire(u.ctx) {
-				// err is always ctx.Err()
+			if !u.streamThrottle.acquire(u.ctx) {
 				if isLargeFile {
 					u.ioThrottler.release()
 					u.ioLargeThrottler.release()
 				}
-				return
+				// TODO: must send a message to the dispatcher here.
+				continue
 			}
 			log.V(3).Infof("[casng] upload.stream.throttle: duration=%v, tag=%s", time.Since(startTime), b.tag)
 

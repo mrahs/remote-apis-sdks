@@ -168,6 +168,7 @@ func (u *uploader) queryProcessor() {
 		// Block the entire processor if the concurrency limit is reached.
 		startTime := time.Now()
 		if !u.queryThrottler.acquire(u.ctx) {
+			// TODO: must send results before returning.
 			return
 		}
 		log.V(3).Infof("[casng] query.processor.throttle: duration=%v", time.Since(startTime))

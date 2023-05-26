@@ -489,7 +489,7 @@ func TestUpload_BatchingAbort(t *testing.T) {
 	u.Wait()
 }
 
-func Test_UploadTree(t *testing.T) {
+func TestUpload_BatchingTree(t *testing.T) {
 	bsc := &fakeByteStreamClient{}
 	cc := &fakeCAS{
 		findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
