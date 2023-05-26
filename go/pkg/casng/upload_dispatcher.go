@@ -116,6 +116,10 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 					res.tags = make([]tag, len(blobs))
 					for i, b := range blobs {
 						res.tags[i] = b.tag
+						if b.reader != nil {
+							u.ioThrottler.release()
+							u.ioLargeThrottler.release()
+						}
 					}
 					log.V(3).Infof("[casng] upload.dispatcher.pipe.res.hit: digest=%s, tags=%d", r.Digest, len(res.tags))
 					u.dispatcherResCh <- res

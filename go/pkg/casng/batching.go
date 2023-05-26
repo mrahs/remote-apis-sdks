@@ -28,6 +28,9 @@ import (
 // If no error is returned, the returned slice contains all the missing digests.
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
 	log.V(1).Infof("[casng] batch.query: len=%d", len(digests))
+	if len(digests) == 0 {
+		return nil, nil
+	}
 
 	// Deduplicate and split into batches.
 	var batches [][]*repb.Digest
@@ -367,6 +370,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	return uploaded, stats, err
 }
 
+// UploadTree assumes reqs share the localPrefix and adds to them any intermediate directories
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix, remotePrefix impath.Absolute, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
 	// First, upload the requests. Then, upload additional directories.
 	uploaded, stats, err = u.Upload(ctx, reqs...)
@@ -381,11 +385,19 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	// nodeSeen helps avoid duplicated node children in case of a duplicated request.
 	nodeSeen := make(map[impath.Absolute]bool)
 
-	// This loop flattens out intermeidate directories in a the maps above.
+	// This loop flattens out intermediate directories in a the maps above.
 	// dirPaths will hold children that need to be converted into directory nodes.
 	// dirNodes will hold already digested nodes from the previous upload above.
+	// For example:
+	//   reqs=[/a/b/c/foo.go /a/b/bar.go /e/f/baz.go]
+	//   dirPaths{/: [/a /e], /a: [/a/b], /a/b: [/a/b/c], /e: [/e/f]]
+	//   dirNodes{/a/b/c: [node], /a/b: [node], /e/f: [node]}
 	var remotePath impath.Absolute
 	for _, req := range reqs {
+		if len(req.Bytes) > 0 {
+			continue
+		}
+
 		node := u.Node(req)
 		if node == nil {
 			err = fmt.Errorf("cannot construct the merkle tree with a missing node for path %q", req.Path)
@@ -405,17 +417,29 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		nodeSeen[remotePath] = true
 
 		parent := remotePath.Dir()
-		dirNodes[parent] = append(dirNodes[parent], node)
+		nodes := dirNodes[parent]
+		paths := dirPaths[parent]
+		parentSeen := len(nodes) > 0 || len(paths) > 0
+		dirNodes[parent] = append(nodes, node)
+		// Do not reconstruct the node if it's already available.
+		// For example: remotePath=/a/b was added to dirPaths while processing /a/b/c, but now we have the node so remove it from the pending paths of /a
+		delete(paths, remotePath)
+
 		// Do not go beyond the root. Also stop if the ancestors are already processed.
-		if parent.String() == execRoot.String() || len(dirNodes[parent]) > 1 || len(dirPaths[parent]) > 0 {
+		if parent.String() == execRoot.String() || parentSeen {
 			continue
 		}
 
-		// Add ancestors to the maps.
-		for {
+		// Add ancestors to the tree.
+		if paths == nil {
 			remotePath = parent
 			parent = parent.Dir()
-			dirPaths[parent][remotePath] = struct{}{}
+			paths := dirPaths[parent]
+			if paths == nil {
+				paths = make(map[impath.Absolute]struct{})
+				dirPaths[parent] = paths
+			}
+			paths[remotePath] = struct{}{}
 
 			if parent.String() == execRoot.String() {
 				break
@@ -423,6 +447,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		}
 	}
 
+	log.V(4).Infof("dirPaths=%v, dirNodes=%v", dirPaths, dirNodes)
 	// This stack loop starts processing intermediate directories top to bottom.
 	var moreReqs []UploadRequest
 	stack := make([]impath.Absolute, 0, len(dirPaths))
@@ -461,7 +486,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		}
 	}
 
-	// Construct the tree node. Only the blob is needed. Passing any path to the function works since we are not interested in the path name or the returned node.
+	// Construct the root node. Only the blob is needed. Passing any path to the function works since we are not interested in the path name or the returned node.
 	rootNode, b, errDigest := digestDirectory(execRoot, dirNodes[execRoot])
 	if errDigest != nil {
 		err = errDigest
@@ -469,6 +494,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	}
 	rootDigest = digest.NewFromProtoUnvalidated(rootNode.Digest)
 	moreReqs = append(moreReqs, UploadRequest{Bytes: b, Digest: rootDigest})
+	log.V(4).Infof("more_reqs=%v", moreReqs)
 
 	// Upload the blobs of the directories.
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, moreReqs...)

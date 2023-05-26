@@ -76,6 +76,7 @@ func (u *uploader) digester() {
 		}
 
 		if !req.Digest.IsEmpty() && req.Digest.Hash != "" {
+			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, tag=%s", len(req.Bytes), req.tag)
 			u.dispatcherBlobCh <- blob{digest: req.Digest, bytes: req.Bytes, path: req.Path.String(), tag: req.tag, ctx: req.ctx}
 			continue
 		}
@@ -418,6 +419,23 @@ func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.Dire
 //
 // If the returned err is not nil, both tokens are released before returning.
 func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioThrottler, ioLargeThrottler *throttler, smallFileSizeThreshold, largeFileSizeThreshold int64) (node *repb.FileNode, blb blob, err error) {
+	// Start by acquiring a token for the large file.
+	// This avoids consuming too many tokens from ioThrottler only to get blocked waiting for ioLargeThrottler which would starve non-large files.
+	// This assumes ioThrottler has more tokens than ioLargeThrottler.
+	if info.Size() > largeFileSizeThreshold {
+		startTime := time.Now()
+		if !ioLargeThrottler.acquire(ctx) {
+			return nil, blb, ctx.Err()
+		}
+		log.V(3).Infof("[casng] upload.digest.file.io_large_throttle: duration=%v", time.Since(startTime))
+		defer func() {
+			// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
+			if blb.reader == nil {
+				ioLargeThrottler.release()
+			}
+		}()
+	}
+
 	startTime := time.Now()
 	if !ioThrottler.acquire(ctx) {
 		return nil, blb, ctx.Err()
@@ -434,6 +452,7 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioT
 		Name:         path.Base().String(),
 		IsExecutable: info.Mode()&0100 != 0,
 	}
+	// Small: in-memory blob.
 	if info.Size() <= smallFileSizeThreshold {
 		log.V(3).Infof("[casng] upload.digest.file.small: path=%s, size=%d", path, info.Size())
 		f, err := os.Open(path.String())
@@ -456,6 +475,7 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioT
 		return node, blb, nil
 	}
 
+	// Medium: blob with path.
 	if info.Size() < largeFileSizeThreshold {
 		log.V(3).Infof("[casng] upload.digest.file.medium: path=%s, size=%d", path, info.Size())
 		d, err := digest.NewFromFile(path.String())
@@ -468,19 +488,8 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioT
 		return node, blb, nil
 	}
 
+	// Large: blob with a reader.
 	log.V(3).Infof("[casng] upload.digest.file.large: path=%s, size=%d", path, info.Size())
-	startTime = time.Now()
-	if !ioLargeThrottler.acquire(ctx) {
-		return nil, blb, ctx.Err()
-	}
-	log.V(3).Infof("[casng] upload.digest.file.io_large_throttle: duration=%v", time.Since(startTime))
-	defer func() {
-		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
-		if blb.reader == nil {
-			ioLargeThrottler.release()
-		}
-	}()
-
 	f, err := os.Open(path.String())
 	if err != nil {
 		return nil, blb, err

@@ -488,3 +488,34 @@ func TestUpload_BatchingAbort(t *testing.T) {
 	ctxCancel()
 	u.Wait()
 }
+
+func Test_UploadTree(t *testing.T) {
+	bsc := &fakeByteStreamClient{}
+	cc := &fakeCAS{
+		findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+			return &repb.FindMissingBlobsResponse{}, nil
+		},
+	}
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	u, err := casng.NewBatchingUploader(ctx, cc, bsc, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
+	if err != nil {
+		t.Fatalf("error creating batching uploader: %v", err)
+	}
+	tmp := makeFs(t, map[string][]byte{"wd/a/b/c/foo.go": []byte("foo"), "wd/a/b/bar.go": []byte("bar"), "wd/e/f/baz.go": []byte("baz")})
+	rootDigest, uploaded, _, err := u.UploadTree(ctx, impath.MustAbs(tmp), impath.MustAbs(tmp, "wd"), impath.MustAbs(tmp, "rwd"),
+		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/c/foo.go")},
+		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/bar.go")},
+		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/e/f/baz.go")},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rootDigest.Hash != "" {
+		t.Errorf("rootDigest=%v", rootDigest)
+	}
+	if diff := cmp.Diff([]digest.Digest{}, uploaded); diff != "" {
+		t.Errorf("uploaded mismatch, (-want _got): %s", diff)
+	}
+	ctxCancel()
+	u.Wait()
+}
