@@ -309,6 +309,12 @@ func (c *Client) ComputeMerkleTree(execRoot, workingDir, remoteWorkingDir string
 	}
 	var blobs map[digest.Digest]*uploadinfo.Entry
 	root, blobs, err = packageTree(ft, stats)
+	// TODO: remove debug logs
+	// paths := make([]string, 0, len(fs))
+	// for p := range fs {
+		// paths = append(paths, p)
+	// }
+	// log.V(4).Infof("The Tree:\n  root=%v\n  paths=%v", root, paths)
 	if err != nil {
 		return digest.Empty, nil, nil, err
 	}

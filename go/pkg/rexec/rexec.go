@@ -223,9 +223,10 @@ func (ec *Context) ngUploadInputs() error {
 	if err != nil {
 		return err
 	}
+	// TODO: use ec.cmd.InputSpec.InputExclusions
 	slo := symlinkOpts(ec.client.GrpcClient.TreeSymlinkOpts, ec.cmd.InputSpec.SymlinkBehavior)
 	log.V(2).Infof("[casng] %s %s> exec_root=%s, local_prefix=%s, remote_prefix=%s, symlink_opts=%s", cmdID, executionID, execRoot, localPrefix, remotePrefix, slo)
-	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs))
+	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+len(ec.cmd.InputSpec.VirtualInputs))
 	for _, p := range ec.cmd.InputSpec.Inputs {
 		rel, err := impath.Rel(p)
 		if err != nil {
@@ -240,8 +241,26 @@ func (ec *Context) ngUploadInputs() error {
 			SymlinkOptions: slo,
 		})
 	}
+	// TODO: handle virtual inputs properly.
+	for _, p := range ec.cmd.InputSpec.VirtualInputs {
+		if p.Path == "" {
+			return fmt.Errorf("[casng] %s %s> empty virtual path", cmdID, executionID)
+		}
+		rel, err := impath.Rel(p.Path)
+		if err != nil {
+			return err
+		}
+		absPath := execRoot.Append(rel)
+		if err != nil {
+			return err
+		}
+		reqs = append(reqs, casng.UploadRequest{
+			Path:  absPath,
+			Bytes: p.Contents,
+		})
+	}
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
-	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs...)
+	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs[0])
 	if err != nil {
 		return err
 	}
@@ -465,21 +484,25 @@ func (ec *Context) ExecuteRemotely() {
 		ec.Result = command.NewLocalErrorResult(err)
 		return
 	}
+
 	cmdID, executionID := ec.cmd.Identifiers.ExecutionID, ec.cmd.Identifiers.CommandID
-	log.V(1).Infof("%s %s> Checking inputs to upload...", cmdID, executionID)
-	// TODO(olaola): compute input cache hit stats.
-	ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
-	missing, bytesMoved, err := ec.client.GrpcClient.UploadIfMissing(ec.ctx, ec.inputBlobs...)
-	ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now()
-	if err != nil {
-		ec.Result = command.NewRemoteErrorResult(err)
-		return
+	if !ec.client.GrpcClient.IsCasNG() {
+		log.V(1).Infof("%s %s> Checking inputs to upload...", cmdID, executionID)
+		// TODO(olaola): compute input cache hit stats.
+		ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
+		missing, bytesMoved, err := ec.client.GrpcClient.UploadIfMissing(ec.ctx, ec.inputBlobs...)
+		ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now()
+		if err != nil {
+			ec.Result = command.NewRemoteErrorResult(err)
+			return
+		}
+		ec.Metadata.MissingDigests = missing
+		for _, d := range missing {
+			ec.Metadata.LogicalBytesUploaded += d.Size
+		}
+		ec.Metadata.RealBytesUploaded = bytesMoved
 	}
-	ec.Metadata.MissingDigests = missing
-	for _, d := range missing {
-		ec.Metadata.LogicalBytesUploaded += d.Size
-	}
-	ec.Metadata.RealBytesUploaded = bytesMoved
+
 	log.V(1).Infof("%s %s> Executing remotely...\n%s", cmdID, executionID, strings.Join(ec.cmd.Args, " "))
 	ec.Metadata.EventTimes[command.EventExecuteRemotely] = &command.TimeInterval{From: time.Now()}
 	op, err := ec.client.GrpcClient.ExecuteAndWait(ec.ctx, &repb.ExecuteRequest{

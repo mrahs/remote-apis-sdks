@@ -503,5 +503,16 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	}
 	stats.Add(moreStats)
 	uploaded = append(uploaded, moreUploaded...)
+
+	// TODO: remove debug logs.
+	// paths := make([]string, 0, len(reqs))
+	// for _, r := range reqs {
+		// paths = append(paths, r.Path.String())
+	// }
+	// morePaths := make([]string, 0, len(dirNodes))
+	// for p := range dirNodes {
+		// morePaths = append(morePaths, p.String())
+	// }
+	// log.V(4).Infof("[casng] tree: \n  root=%v\n  paths=%v\n  more_paths=%v", rootDigest, paths, morePaths)
 	return
 }
