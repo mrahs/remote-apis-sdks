@@ -370,7 +370,9 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	return uploaded, stats, err
 }
 
-// UploadTree assumes reqs share the localPrefix and adds to them any intermediate directories
+// UploadTree assumes reqs share localPrefix and appends to them any intermediate directories up to and excluding execRoot.
+//
+// remotePrefix replaces localPrefix when handling paths, which means the merkle tree will include all the directories between execRoot and remotePrerix.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix, remotePrefix impath.Absolute, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
 	// First, upload the requests. Then, upload additional directories.
 	uploaded, stats, err = u.Upload(ctx, reqs...)
@@ -431,7 +433,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		}
 
 		// Add ancestors to the tree.
-		if paths == nil {
+		for {
 			remotePath = parent
 			parent = parent.Dir()
 			paths := dirPaths[parent]
@@ -447,7 +449,6 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		}
 	}
 
-	log.V(4).Infof("dirPaths=%v, dirNodes=%v", dirPaths, dirNodes)
 	// This stack loop starts processing intermediate directories top to bottom.
 	var moreReqs []UploadRequest
 	stack := make([]impath.Absolute, 0, len(dirPaths))
@@ -494,7 +495,6 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	}
 	rootDigest = digest.NewFromProtoUnvalidated(rootNode.Digest)
 	moreReqs = append(moreReqs, UploadRequest{Bytes: b, Digest: rootDigest})
-	log.V(4).Infof("more_reqs=%v", moreReqs)
 
 	// Upload the blobs of the directories.
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, moreReqs...)

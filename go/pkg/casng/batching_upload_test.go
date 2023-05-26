@@ -502,7 +502,7 @@ func Test_UploadTree(t *testing.T) {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
 	tmp := makeFs(t, map[string][]byte{"wd/a/b/c/foo.go": []byte("foo"), "wd/a/b/bar.go": []byte("bar"), "wd/e/f/baz.go": []byte("baz")})
-	rootDigest, uploaded, _, err := u.UploadTree(ctx, impath.MustAbs(tmp), impath.MustAbs(tmp, "wd"), impath.MustAbs(tmp, "rwd"),
+	rootDigest, _, _, err := u.UploadTree(ctx, impath.MustAbs(tmp), impath.MustAbs(tmp, "wd"), impath.MustAbs(tmp, "rwd"),
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/c/foo.go")},
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/bar.go")},
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/e/f/baz.go")},
@@ -510,11 +510,8 @@ func Test_UploadTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if rootDigest.Hash != "" {
-		t.Errorf("rootDigest=%v", rootDigest)
-	}
-	if diff := cmp.Diff([]digest.Digest{}, uploaded); diff != "" {
-		t.Errorf("uploaded mismatch, (-want _got): %s", diff)
+	if diff := cmp.Diff("4b29476de8abdfcce452b64003ed82517aa003d9e447ff943723e556e723d75c/78", rootDigest.String()); diff != "" {
+		t.Errorf("root digest mismatch, (-want _got): %s", diff)
 	}
 	ctxCancel()
 	u.Wait()
