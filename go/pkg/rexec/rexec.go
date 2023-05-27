@@ -4,7 +4,10 @@ package rexec
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/outerr"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
@@ -222,8 +226,11 @@ func (ec *Context) ngUploadInputs() error {
 	if err != nil {
 		return err
 	}
-	// TODO: use ec.cmd.InputSpec.InputExclusions
 	slo := symlinkOpts(ec.client.GrpcClient.TreeSymlinkOpts, ec.cmd.InputSpec.SymlinkBehavior)
+	filter, err := exclusionsFilter(ec.cmd.InputSpec.InputExclusions)
+	if err != nil {
+		return err
+	}
 	log.V(2).Infof("[casng] %s %s> exec_root=%s, local_prefix=%s, remote_prefix=%s, symlink_opts=%s", cmdID, executionID, execRoot, localPrefix, remotePrefix, slo)
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+len(ec.cmd.InputSpec.VirtualInputs))
 	for _, p := range ec.cmd.InputSpec.Inputs {
@@ -236,7 +243,7 @@ func (ec *Context) ngUploadInputs() error {
 			return err
 		}
 		reqs = append(reqs, casng.UploadRequest{
-			Path: casng.UploadRequest_Path{Root: absPath, SymlinkOptions: slo},
+			Path: casng.UploadRequest_Path{Root: absPath, SymlinkOptions: slo, Exclude: filter},
 		})
 	}
 	// TODO: handle virtual inputs properly.
@@ -356,6 +363,61 @@ func cmdDirs(cmd *command.Command) (execRoot impath.Absolute, workingDir impath.
 		return
 	}
 	return
+}
+
+func exclusionsFilter(es []*command.InputExclusion) (walker.Filter, error) {
+	filter := walker.Filter{}
+	var pathRegexes []*regexp.Regexp
+	var fileRegexes []*regexp.Regexp
+	var fileModes []fs.FileMode
+	var idBuilder strings.Builder
+	for _, e := range es {
+		re, err := regexp.Compile(e.Regex)
+		if err != nil {
+			return filter, fmt.Errorf("failed to compile regex from input exclusions: %w", err)
+		}
+
+		idBuilder.WriteString(e.Regex)
+
+		if e.Type == command.UnspecifiedInputType {
+			pathRegexes = append(pathRegexes, re)
+			continue
+		}
+
+		fileRegexes = append(fileRegexes, re)
+		mode := fs.FileMode(0)
+		switch e.Type {
+		case command.DirectoryInputType:
+			mode |= fs.ModeDir
+		case command.SymlinkInputType:
+			mode |= fs.ModeSymlink
+		}
+		fileModes = append(fileModes, mode)
+
+		idBuilder.WriteString(strconv.FormatUint(uint64(mode), 16))
+	}
+	id := idBuilder.String()
+
+	filter.Path = func(path string) bool {
+		for _, re := range pathRegexes {
+			if re.MatchString(path) {
+				return true
+			}
+		}
+		return false
+	}
+	filter.File = func(path string, mode fs.FileMode) bool {
+		for i, re := range fileRegexes {
+			if fileModes[i] == mode && re.MatchString(path) {
+				return true
+			}
+		}
+		return false
+	}
+	filter.ID = func() string {
+		return id
+	}
+	return filter, nil
 }
 
 // GetCachedResult tries to get the command result from the cache. The Result will be nil on a
