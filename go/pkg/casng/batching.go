@@ -377,11 +377,12 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 //
 // remotePrefix replaces localPrefix when handling paths, which means the merkle tree will include all the directories between execRoot and remotePrerix.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix, remotePrefix impath.Absolute, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
-	// First, upload the requests. Then, upload additional directories.
+	// First, upload the requests.
 	uploaded, stats, err = u.Upload(ctx, reqs...)
 	if err != nil {
 		return
 	}
+	// Then, upload additional directories.
 
 	// dirPaths associates a remote directory with a list of its children (also remote directories).
 	dirPaths := make(map[impath.Absolute]map[impath.Absolute]struct{})
@@ -399,11 +400,6 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	//   dirNodes{/a/b/c: [node], /a/b: [node], /e/f: [node]}
 	var remotePath impath.Absolute
 	for _, req := range reqs {
-		// TODO: should handle path instead of ignoring.
-		if !req.Bytes.Empty() {
-			continue
-		}
-
 		node := u.Node(req)
 		if node == nil {
 			err = fmt.Errorf("cannot construct the merkle tree with a missing node for path %q", req.Path)
@@ -411,7 +407,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		}
 
 		// Every path must be relative to the execution root, which means the remote working directory is included in the merkle tree.
-		remotePath, err = req.Path.Root.ReplacePrefix(localPrefix, remotePrefix)
+		remotePath, err = req.Path.ReplacePrefix(localPrefix, remotePrefix)
 		if err != nil {
 			return
 		}
@@ -481,7 +477,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 			// Attach the node to the parent.
 			dirNodes[parent] = append(dirNodes[parent], node)
 			// Also uploaded its blob.
-			moreReqs = append(moreReqs, UploadRequest{Bytes: UploadRequest_Bytes{Content: b}, Digest: digest.NewFromProtoUnvalidated(node.Digest)})
+			moreReqs = append(moreReqs, UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest)})
 			continue
 		}
 
@@ -498,7 +494,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		return
 	}
 	rootDigest = digest.NewFromProtoUnvalidated(rootNode.Digest)
-	moreReqs = append(moreReqs, UploadRequest{Bytes: UploadRequest_Bytes{Content: b}, Digest: rootDigest})
+	moreReqs = append(moreReqs, UploadRequest{Bytes: b, Digest: rootDigest})
 
 	// Upload the blobs of the directories.
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, moreReqs...)

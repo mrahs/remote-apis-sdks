@@ -242,11 +242,8 @@ func (ec *Context) ngUploadInputs() error {
 		if err != nil {
 			return err
 		}
-		reqs = append(reqs, casng.UploadRequest{
-			Path: casng.UploadRequest_Path{Root: absPath, SymlinkOptions: slo, Exclude: filter},
-		})
+		reqs = append(reqs, casng.UploadRequest{Path: absPath, SymlinkOptions: slo, Exclude: filter})
 	}
-	// TODO: handle virtual inputs properly.
 	for _, p := range ec.cmd.InputSpec.VirtualInputs {
 		if p.Path == "" {
 			return fmt.Errorf("[casng] %s %s> empty virtual path", cmdID, executionID)
@@ -259,12 +256,16 @@ func (ec *Context) ngUploadInputs() error {
 		if err != nil {
 			return err
 		}
-		reqs = append(reqs, casng.UploadRequest{
-			Bytes: casng.UploadRequest_Bytes{Content: p.Contents, Path: absPath},
-		})
+		r := casng.UploadRequest{Bytes: p.Contents, Path: absPath, Exclude: filter}
+		if p.IsEmptyDirectory {
+			r.BytesFileMode |= fs.ModeDir
+		} else if p.IsExecutable {
+			r.BytesFileMode |= 0100
+		}
+		reqs = append(reqs, r)
 	}
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
-	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs[0])
+	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs...)
 	if err != nil {
 		return err
 	}

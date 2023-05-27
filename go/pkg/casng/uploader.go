@@ -57,6 +57,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"sync"
 	"time"
 
@@ -179,10 +180,7 @@ func (u *uploader) Wait() {
 //
 // Returns nil if no node corresponds to req.
 func (u *uploader) Node(req UploadRequest) proto.Message {
-	key := req.Bytes.Path.String()
-	if req.Bytes.Empty() {
-		key = req.Path.Root.String() + req.Path.Exclude.GetID()
-	}
+	key := req.Path.String() + req.Exclude.GetID()
 	n, ok := u.nodeCache.Load(key)
 	if !ok {
 		return nil
@@ -409,4 +407,8 @@ func (u *uploader) withTimeout(timeout time.Duration, cancelFn context.CancelFun
 		cancelFn()
 	}()
 	return fn()
+}
+
+func isExec(mode fs.FileMode) bool {
+	return mode&0100 != 0
 }

@@ -460,7 +460,7 @@ func TestUpload_Batching(t *testing.T) {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
 			root := impath.MustAbs(tmp, test.root)
-			uploaded, stats, err := u.Upload(ctx, casng.UploadRequest{Path: casng.UploadRequest_Path{Root: root, SymlinkOptions: symlinkopts.PreserveAllowDangling()}})
+			uploaded, stats, err := u.Upload(ctx, casng.UploadRequest{Path: root, SymlinkOptions: symlinkopts.PreserveAllowDangling()})
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -503,9 +503,9 @@ func TestUpload_BatchingTree(t *testing.T) {
 	}
 	tmp := makeFs(t, map[string][]byte{"wd/a/b/c/foo.go": []byte("foo"), "wd/a/b/bar.go": []byte("bar"), "wd/e/f/baz.go": []byte("baz")})
 	rootDigest, _, _, err := u.UploadTree(ctx, impath.MustAbs(tmp), impath.MustAbs(tmp, "wd"), impath.MustAbs(tmp, "rwd"),
-		casng.UploadRequest{Path: casng.UploadRequest_Path{Root: impath.MustAbs(tmp, "wd/a/b/c/foo.go")}},
-		casng.UploadRequest{Path: casng.UploadRequest_Path{Root: impath.MustAbs(tmp, "wd/a/b/bar.go")}},
-		casng.UploadRequest{Path: casng.UploadRequest_Path{Root: impath.MustAbs(tmp, "wd/e/f/baz.go")}},
+		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/c/foo.go")},
+		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/bar.go")},
+		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/e/f/baz.go")},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

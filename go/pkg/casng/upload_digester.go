@@ -71,16 +71,26 @@ func (u *uploader) digester() {
 			continue
 		}
 
-		if !req.Bytes.Empty() {
+		if len(req.Bytes) > 0 {
 			if req.Digest.Hash == "" {
-				req.Digest = digest.NewFromBlob(req.Bytes.Content)
+				req.Digest = digest.NewFromBlob(req.Bytes)
 			}
-			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, tag=%s", len(req.Bytes.Content), req.tag)
-			u.dispatcherBlobCh <- blob{digest: req.Digest, bytes: req.Bytes.Content, path: req.Path.Root.String(), tag: req.tag, ctx: req.ctx}
+			var node proto.Message
+			name := req.Path.Base().String()
+			digest := req.Digest.ToProto()
+			if req.BytesFileMode&fs.ModeDir != 0 {
+				node = &repb.DirectoryNode{Digest: digest, Name: name}
+			} else {
+				node = &repb.FileNode{Digest: digest, Name: name, IsExecutable: isExec(req.BytesFileMode)}
+			}
+			key := req.Path.String() + req.Exclude.GetID()
+			u.nodeCache.Store(key, node)
+			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, tag=%s", len(req.Bytes), req.tag)
+			u.dispatcherBlobCh <- blob{digest: req.Digest, bytes: req.Bytes, path: req.Path.String(), tag: req.tag, ctx: req.ctx}
 			continue
 		}
 
-		log.V(3).Infof("[casng] upload.digester.req: path=%s, slo=%s, filter=%s, tag=%s", req.Path.Root, req.Path.SymlinkOptions, req.Path.Exclude, req.tag)
+		log.V(3).Infof("[casng] upload.digester.req: path=%s, slo=%s, filter=%s, tag=%s", req.Path, req.SymlinkOptions, req.Exclude, req.tag)
 		// Wait if too many walks are in-flight.
 		startTime := time.Now()
 		if !u.walkThrottler.acquire(req.ctx) {
@@ -114,7 +124,7 @@ func (u *uploader) digest(req UploadRequest) {
 	stats := Stats{}
 	var err error
 	deferredWg := make(map[string]*sync.WaitGroup)
-	walker.DepthFirst(req.Path.Root, req.Path.Exclude, walker.Callback{
+	walker.DepthFirst(req.Path, req.Exclude, walker.Callback{
 		Err: func(path impath.Absolute, realPath impath.Absolute, errVisit error) bool {
 			log.V(3).Infof("[casng] upload.digest.visit.err: path=%s, real_path=%s, err=%v, tag=%s, walk_id=%s, walk_id=%s", path, realPath, errVisit, req.tag, walkId)
 			err = errors.Join(errVisit, err)
@@ -138,7 +148,7 @@ func (u *uploader) digest(req UploadRequest) {
 			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
 			// In both cases, deferring is the right call. Once the requset is processed, all requestters will revisit the path to get the digestion result.
 			// If the path was not cached before, claim it by makring it as in-flight.
-			key := path.String() + req.Path.Exclude.GetID()
+			key := path.String() + req.Exclude.GetID()
 			wg := &sync.WaitGroup{}
 			wg.Add(1)
 			m, ok := u.nodeCache.LoadOrStore(key, wg)
@@ -199,8 +209,8 @@ func (u *uploader) digest(req UploadRequest) {
 			default:
 			}
 
-			key := path.String() + req.Path.Exclude.GetID()
-			parentKey := path.Dir().String() + req.Path.Exclude.GetID()
+			key := path.String() + req.Exclude.GetID()
+			parentKey := path.Dir().String() + req.Exclude.GetID()
 
 			// In post-access, the cache should have this walker's own wait group.
 			// Capture it here before it's overwritten with the actual result.
@@ -257,7 +267,7 @@ func (u *uploader) digest(req UploadRequest) {
 			return true
 		},
 		Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (action walker.SymlinkAction, ok bool) {
-			log.V(3).Infof("[casng] upload.digest.visit.symlink: path=%s, real_path=%s, slo=%s, tag=%s, walk_id=%s", path, realPath, req.Path.SymlinkOptions, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digest.visit.symlink: path=%s, real_path=%s, slo=%s, tag=%s, walk_id=%s", path, realPath, req.SymlinkOptions, req.tag, walkId)
 
 			select {
 			case <-req.ctx.Done():
@@ -270,8 +280,8 @@ func (u *uploader) digest(req UploadRequest) {
 			default:
 			}
 
-			key := path.String() + req.Path.Exclude.GetID()
-			parentKey := path.Dir().String() + req.Path.Exclude.GetID()
+			key := path.String() + req.Exclude.GetID()
+			parentKey := path.Dir().String() + req.Exclude.GetID()
 
 			// In symlink post-access, the cache should have this walker's own wait group.
 			// Capture it here before it's overwritten with the actual result.
@@ -290,7 +300,7 @@ func (u *uploader) digest(req UploadRequest) {
 
 			stats.DigestCount += 1
 			stats.InputSymlinkCount += 1
-			node, nextStep, errDigest := digestSymlink(req.Path.Root, realPath, req.Path.SymlinkOptions)
+			node, nextStep, errDigest := digestSymlink(req.Path, realPath, req.SymlinkOptions)
 			if errDigest != nil {
 				err = errors.Join(errDigest, err)
 				return walker.SkipSymlink, false
@@ -303,7 +313,7 @@ func (u *uploader) digest(req UploadRequest) {
 				// Unclaim so that other walkers can add the target to their queue.
 				u.nodeCache.Delete(key)
 			}
-			log.V(3).Infof("[casng] upload.digest.visit.symlink.symlink: path=%s, real_path=%s, slo=%s, tag=%s, step=%s, walk_id=%s", path, realPath, req.Path.SymlinkOptions, req.tag, nextStep, walkId)
+			log.V(3).Infof("[casng] upload.digest.visit.symlink.symlink: path=%s, real_path=%s, slo=%s, tag=%s, step=%s, walk_id=%s", path, realPath, req.SymlinkOptions, req.tag, nextStep, walkId)
 			return nextStep, true
 		},
 	})
@@ -462,7 +472,7 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioT
 
 	node = &repb.FileNode{
 		Name:         path.Base().String(),
-		IsExecutable: info.Mode()&0100 != 0,
+		IsExecutable: isExec(info.Mode()),
 	}
 	// Small: in-memory blob.
 	if info.Size() <= smallFileSizeThreshold {

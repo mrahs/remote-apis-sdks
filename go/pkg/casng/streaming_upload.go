@@ -51,53 +51,36 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// UploadRequest_Bytes represents an in-memory blob to be uploaded.
-type UploadRequest_Bytes struct {
-	// Content is raw content of this request.
-	Content []byte
-	// FileMode is probed to figure out if the bytes are for a directory or an executable file.
-	FileMode fs.FileMode
-	// Path is used to insert the bytes in their correct place within the tree of files.
-	Path impath.Absolute
-}
-
-// Empty is a convenient method that returns true if the bytes content is empty.
-func (b *UploadRequest_Bytes) Empty() bool {
-	return b == nil || len(b.Content) == 0
-}
-
-// UploadRequest_Path represents a single file or a tree of files to be uploaded.
-type UploadRequest_Path struct {
-	// Root is used to access and read files.
-	Root impath.Absolute
-
-	// SymlinkOptions are used to handle symlinks.
-	SymlinkOptions slo.Options
-
-	// Exclude is used to exclude paths during traversal.
-	//
-	// The filter ID is used in the keys of the digest cache.
-	// Using the same ID for effectively different filters will cause erroneous cache hits.
-	// Using a different ID for effectively identical filters will reduce cache hit rates and increase digestion compute cost.
-	Exclude walker.Filter
-}
-
 // UploadRequest represents a path to start uploading from.
 //
 // If the path is a directory, its entire tree is traversed and only files that are not excluded by the filter are uploaded.
 // Symlinks are handled according to the SymlinkOptions field.
 type UploadRequest struct {
 	// Digest is for pre-digested requests. This digest is trusted to be the one for the associated Bytes or Path.
+	//
 	// If not set, it will be calculated.
-	// If set, it implies that this request is a single blob. I.e. either Bytes is set or Path is a regular file and
-	// both SymlinkOptions and Exclude are ignored.
+	// If set, it implies that this request is a single blob. I.e. either Bytes is set or Path is a regular file and both SymlinkOptions and Exclude are ignored.
 	Digest digest.Digest
 
-	// Bytes takes precedence over Path. It is meant for small blobs. Using a large slice of bytes might slow things down.
-	Bytes UploadRequest_Bytes
+	// Bytes is meant for small blobs. Using a large slice of bytes might cause memory thrashing.
+	// If Bytes is set, Path is used to refer to the bytes content and is not used for traversal.
+	Bytes []byte
 
-	// Path is used to access and read files. It is ignored if Bytes is set.
-	Path UploadRequest_Path
+	// BytesFileMode describes the bytes content. It is ignored if Bytes is not set.
+	BytesFileMode fs.FileMode
+
+	// Path is used to access and read files if Bytes is not set. Otherwise, Bytes is assumed to be the paths content.
+	Path impath.Absolute
+
+	// SymlinkOptions are used to handle symlinks when Path is set and Bytes is not.
+	SymlinkOptions slo.Options
+
+	// Exclude is used to exclude paths during traversal when Path is et and Bytes is not.
+	//
+	// The filter ID is used in the keys of the node cache, even when Bytes is set.
+	// Using the same ID for effectively different filters will cause erroneous cache hits.
+	// Using a different ID for effectively identical filters will reduce cache hit rates and increase digestion compute cost.
+	Exclude walker.Filter
 
 	// ctx is used to unify metadata in the streaming uploader when making remote calls.
 	ctx context.Context
