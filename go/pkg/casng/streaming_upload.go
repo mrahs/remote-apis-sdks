@@ -44,11 +44,11 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
+	// "github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
-	"google.golang.org/grpc/status"
+	// "google.golang.org/grpc/status"
 )
 
 // UploadRequest represents a path to start uploading from.
@@ -63,19 +63,24 @@ type UploadRequest struct {
 	Digest digest.Digest
 
 	// Bytes is meant for small blobs. Using a large slice of bytes might cause memory thrashing.
-	// If Bytes is set, Path is used to refer to the bytes content and is not used for traversal.
+	//
+	// If Bytes is nil, BytesFileMode is ignored and Path is used for traversal.
+	// If Bytes is not nil (may be empty), Path is used to refer to the bytes content and is not used for traversal.
 	Bytes []byte
 
 	// BytesFileMode describes the bytes content. It is ignored if Bytes is not set.
 	BytesFileMode fs.FileMode
 
-	// Path is used to access and read files if Bytes is not set. Otherwise, Bytes is assumed to be the paths content.
+	// Path is used to access and read files if Bytes is nil. Otherwise, Bytes is assumed to be the paths content (even if empty).
+	//
+	// This must not be equal to impath.Root since this is considered a zero value (Path not set).
+	// If Bytes is not nil and Path is not set, a node cannot be constructed and therefore no node is cached.
 	Path impath.Absolute
 
 	// SymlinkOptions are used to handle symlinks when Path is set and Bytes is not.
 	SymlinkOptions slo.Options
 
-	// Exclude is used to exclude paths during traversal when Path is et and Bytes is not.
+	// Exclude is used to exclude paths during traversal when Path is set and Bytes is not.
 	//
 	// The filter ID is used in the keys of the node cache, even when Bytes is set.
 	// Using the same ID for effectively different filters will cause erroneous cache hits.
@@ -296,18 +301,21 @@ func (u *uploader) batcher() {
 				go func(b blob) (err error) {
 					defer u.workerWg.Done()
 					defer func() {
+						// If this blob was from a large file, ensure IO holds are released.
+						if b.reader != nil {
+							u.ioThrottler.release()
+							u.ioLargeThrottler.release()
+						}
 						if err != nil {
 							u.dispatcherResCh <- UploadResponse{
 								Digest: b.digest,
 								Err:    err,
 								tags:   []tag{b.tag},
 							}
+							return
 						}
-						// If this blob was from a large file, ensure IO holds are released.
-						if b.reader != nil {
-							u.ioThrottler.release()
-							u.ioLargeThrottler.release()
-						}
+						// Send after releasing resources.
+						u.batcherCh <- b
 					}()
 					r := b.reader
 					if r == nil {
@@ -333,7 +341,6 @@ func (u *uploader) batcher() {
 						return errors.Join(ErrIO, err)
 					}
 					b.bytes = bytes
-					u.batcherCh <- b
 					return nil
 				}(b)
 				continue
@@ -383,34 +390,37 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 	var uploaded []digest.Digest
 	failed := make(map[digest.Digest]error)
 	digestRetryCount := make(map[digest.Digest]int64)
-	ctxGrpc, ctxGrpcCancel := context.WithCancel(ctx)
-	err := u.withTimeout(u.queryRPCCfg.Timeout, ctxGrpcCancel, func() error {
-		return u.withRetry(ctxGrpc, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
-			// This call can have partial failures. Only retry retryable failed requests.
-			res, errCall := u.cas.BatchUpdateBlobs(ctxGrpc, req)
-			reqErr := errCall // return this error if nothing is retryable.
-			req.Requests = nil
-			for _, r := range res.Responses {
-				if errItem := status.FromProto(r.Status).Err(); errItem != nil {
-					if retry.TransientOnly(errItem) {
-						d := digest.NewFromProtoUnvalidated(r.Digest)
-						req.Requests = append(req.Requests, bundle[d].req)
-						digestRetryCount[d]++
-						reqErr = errItem // return any retryable error if there is one.
-						continue
-					}
-					// Permanent error.
-					failed[digest.NewFromProtoUnvalidated(r.Digest)] = errItem
-					continue
-				}
-				uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
-			}
-			if l := len(req.Requests); l > 0 {
-				log.V(3).Infof("[casng] upload.batch.call.retry: len=%d", l)
-			}
-			return reqErr
-		})
-	})
+	// TODO: uncomment when testing is done.
+
+	// ctxGrpc, ctxGrpcCancel := context.WithCancel(ctx)
+	// err := u.withTimeout(u.queryRPCCfg.Timeout, ctxGrpcCancel, func() error {
+	// 	return u.withRetry(ctxGrpc, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
+	// 		// This call can have partial failures. Only retry retryable failed requests.
+	// 		res, errCall := u.cas.BatchUpdateBlobs(ctxGrpc, req)
+	// 		reqErr := errCall // return this error if nothing is retryable.
+	// 		req.Requests = nil
+	// 		for _, r := range res.Responses {
+	// 			if errItem := status.FromProto(r.Status).Err(); errItem != nil {
+	// 				if retry.TransientOnly(errItem) {
+	// 					d := digest.NewFromProtoUnvalidated(r.Digest)
+	// 					req.Requests = append(req.Requests, bundle[d].req)
+	// 					digestRetryCount[d]++
+	// 					reqErr = errItem // return any retryable error if there is one.
+	// 					continue
+	// 				}
+	// 				// Permanent error.
+	// 				failed[digest.NewFromProtoUnvalidated(r.Digest)] = errItem
+	// 				continue
+	// 			}
+	// 			uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
+	// 		}
+	// 		if l := len(req.Requests); l > 0 {
+	// 			log.V(3).Infof("[casng] upload.batch.call.retry: len=%d", l)
+	// 		}
+	// 		return reqErr
+	// 	})
+	// })
+	err := fmt.Errorf("upload ignored")
 	log.V(3).Infof("[casng] upload.batch.call.grpc_done: duration=%v, uploaded=%d, failed=%d, req_failed=%d", time.Since(startTime), len(uploaded), len(failed), len(bundle)-len(uploaded)-len(failed))
 
 	// Report uploaded.
@@ -596,7 +606,7 @@ func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats S
 	// Medium file.
 	case len(b.path) > 0:
 		startTime := time.Now()
-		if u.ioThrottler.acquire(ctx) {
+		if !u.ioThrottler.acquire(ctx) {
 			return
 		}
 		log.V(3).Infof("[casng] upload.stream.io_throttle: duration=%v, tag=%s", time.Since(startTime), b.tag)
@@ -618,5 +628,8 @@ func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats S
 		reader = bytes.NewReader(b.bytes)
 	}
 
-	return u.writeBytes(ctx, name, reader, b.digest.Size, 0, true)
+	// TODO: remove testing code and restore original.
+	_ = reader
+	return Stats{}, fmt.Errorf("stream ignored")
+	// return u.writeBytes(ctx, name, reader, b.digest.Size, 0, true)
 }

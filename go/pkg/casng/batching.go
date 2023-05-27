@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -374,30 +376,26 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 }
 
 // UploadTree assumes reqs share localPrefix and appends to them any intermediate directories up to and excluding execRoot.
+// Requests must not have digests to ensure proper construction of the tree through the digsetion process.
 //
 // remotePrefix replaces localPrefix when handling paths, which means the merkle tree will include all the directories between execRoot and remotePrerix.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix, remotePrefix impath.Absolute, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
-	// First, upload the requests.
+	log.V(2).Infof("[casng] upload.tree: reqs=%d", len(reqs))
 	uploaded, stats, err = u.Upload(ctx, reqs...)
 	if err != nil {
 		return
 	}
-	// Then, upload additional directories.
 
-	// dirPaths associates a remote directory with a list of its children (also remote directories).
-	dirPaths := make(map[impath.Absolute]map[impath.Absolute]struct{})
-	// direNodes associates ad remote directory with a list of digested children (nodes).
-	dirNodes := make(map[impath.Absolute][]proto.Message)
+	log.V(2).Info("[casng] upload.tree: constructing the tree")
+	// dirChildren associates a remote directory with a list of its children.
+	dirChildren := make(map[impath.Absolute]map[impath.Absolute]proto.Message)
 	// nodeSeen helps avoid duplicated node children in case of a duplicated request.
 	nodeSeen := make(map[impath.Absolute]bool)
 
-	// This loop flattens out intermediate directories in a the maps above.
-	// dirPaths will hold children that need to be converted into directory nodes.
-	// dirNodes will hold already digested nodes from the previous upload above.
+	// This loop flattens out intermediate directories in the map above.
 	// For example:
 	//   reqs=[/a/b/c/foo.go /a/b/bar.go /e/f/baz.go]
-	//   dirPaths{/: [/a /e], /a: [/a/b], /a/b: [/a/b/c], /e: [/e/f]]
-	//   dirNodes{/a/b/c: [node], /a/b: [node], /e/f: [node]}
+	//   dirChildren{/: [/a /e], /a: [/a/b], /a/b: [/a/b/c], /e: [/e/f]]
 	var remotePath impath.Absolute
 	for _, req := range reqs {
 		node := u.Node(req)
@@ -418,101 +416,98 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		}
 		nodeSeen[remotePath] = true
 
-		parent := remotePath.Dir()
-		nodes := dirNodes[parent]
-		paths := dirPaths[parent]
-		parentSeen := len(nodes) > 0 || len(paths) > 0
-		dirNodes[parent] = append(nodes, node)
-		// Do not reconstruct the node if it's already available.
-		// For example: remotePath=/a/b was added to dirPaths while processing /a/b/c, but now we have the node so remove it from the pending paths of /a
-		delete(paths, remotePath)
-
-		// Do not go beyond the root. Also stop if the ancestors are already processed.
-		if parent.String() == execRoot.String() || parentSeen {
-			continue
-		}
-
 		// Add ancestors to the tree.
+		parent := remotePath
 		for {
 			remotePath = parent
 			parent = parent.Dir()
-			paths := dirPaths[parent]
-			if paths == nil {
-				paths = make(map[impath.Absolute]struct{})
-				dirPaths[parent] = paths
+			siblings := dirChildren[parent]
+			parentSeen := len(siblings) > 0
+			if siblings == nil {
+				siblings = make(map[impath.Absolute]proto.Message)
+				dirChildren[parent] = siblings
 			}
-			paths[remotePath] = struct{}{}
+			siblings[remotePath] = node
+			// Only the deep-most directory holds the node.
+			node = nil
 
-			if parent.String() == execRoot.String() {
+			// Do not go beyond the root. Also stop if the ancestors are already processed to avoid niling a node if any.
+			if parent.String() == execRoot.String() || parentSeen {
 				break
 			}
 		}
 	}
 
-	// This stack loop starts processing intermediate directories top to bottom.
-	var moreReqs []UploadRequest
-	stack := make([]impath.Absolute, 0, len(dirPaths))
-	// First, add all the root's children to the stack.
-	for child := range dirPaths[execRoot] {
-		stack = append(stack, child)
+	// TODO: remove debug logs.
+	paths := make([]string, 0, len(reqs))
+	for _, r := range reqs {
+		paths = append(paths, r.Path.String())
 	}
+	morePaths := make([]string, 0, len(dirChildren))
+	for p := range dirChildren {
+		morePaths = append(morePaths, p.String())
+	}
+	sort.Slice(morePaths, func(i, j int) bool { return morePaths[i] < morePaths[j] })
+	sort.Slice(paths, func(i, j int) bool { return paths[i] < paths[j] })
+	log.V(4).Infof("[casng] upload.tree: \n  root=%v\n  paths=%d\n%v\n  extra_dirs=%d\n%v", rootDigest, len(paths), strings.Join(paths, "\n"), len(morePaths), strings.Join(morePaths, "\n"))
+
+	// This loop processes intermediate directories from the execRoot downwards.
+	var dirReqs []UploadRequest
+	stack := make([]impath.Absolute, 0, len(dirChildren))
+	stack = append(stack, execRoot)
 	for len(stack) > 0 {
 		// Peek.
 		dir := stack[len(stack)-1]
 
-		children := dirPaths[dir]
-		// If all path children have been processed, there are only nodes. Construct a directory node and attach it to the parent.
-		if len(children) == 0 {
-			// Pop.
-			stack = stack[:len(stack)-1]
-			// Construct the directory node.
-			node, b, errDigest := digestDirectory(dir, dirNodes[dir])
+		children := dirChildren[dir]
+		pending := false
+		for child, node := range children {
+			if node == nil {
+				pending = true
+				stack = append(stack, child)
+			}
+		}
+		if pending {
+			continue
+		}
+
+		// Pop.
+		stack = stack[:len(stack)-1]
+		// Check if the dir's node is already computed by looking it up from the parent.
+		var node proto.Message
+		parent := dir.Dir()
+		siblings := dirChildren[parent]
+		if siblings != nil { // nil means it's the execRoot
+			node = siblings[dir]
+		}
+		if node == nil {
+			childrenNodes := make([]proto.Message, 0, len(children))
+			for _, node := range children {
+				childrenNodes = append(childrenNodes, node)
+			}
+			nodeDir, b, errDigest := digestDirectory(dir, childrenNodes)
 			if errDigest != nil {
 				err = errDigest
 				return
 			}
-			parent := dir.Dir()
-			// Delete this path from its parent so the parent can itself be converted into a node once it's processed.
-			delete(dirPaths[parent], dir)
-			// Attach the node to the parent.
-			dirNodes[parent] = append(dirNodes[parent], node)
-			// Also uploaded its blob.
-			moreReqs = append(moreReqs, UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest)})
+			node = nodeDir
+			// Attach the node to its parent.
+			dirChildren[parent][dir] = nodeDir
+			// Also upload its blob.
+			dirReqs = append(dirReqs, UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(nodeDir.Digest)})
+		}
+		if dir.String() == execRoot.String() {
+			rootDigest = digest.NewFromProtoUnvalidated(node.(*repb.DirectoryNode).Digest)
 			continue
 		}
-
-		// There are children to be processed first.
-		for child := range children {
-			stack = append(stack, child)
-		}
 	}
-
-	// Construct the root node. Only the blob is needed. Passing any path to the function works since we are not interested in the path name or the returned node.
-	rootNode, b, errDigest := digestDirectory(execRoot, dirNodes[execRoot])
-	if errDigest != nil {
-		err = errDigest
-		return
-	}
-	rootDigest = digest.NewFromProtoUnvalidated(rootNode.Digest)
-	moreReqs = append(moreReqs, UploadRequest{Bytes: b, Digest: rootDigest})
 
 	// Upload the blobs of the directories.
-	moreUploaded, moreStats, moreErr := u.Upload(ctx, moreReqs...)
+	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
 	if moreErr != nil {
 		err = moreErr
 	}
 	stats.Add(moreStats)
 	uploaded = append(uploaded, moreUploaded...)
-
-	// TODO: remove debug logs.
-	// paths := make([]string, 0, len(reqs))
-	// for _, r := range reqs {
-	// paths = append(paths, r.Path.String())
-	// }
-	// morePaths := make([]string, 0, len(dirNodes))
-	// for p := range dirNodes {
-	// morePaths = append(morePaths, p.String())
-	// }
-	// log.V(4).Infof("[casng] tree: \n  root=%v\n  paths=%v\n  more_paths=%v", rootDigest, paths, morePaths)
 	return
 }

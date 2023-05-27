@@ -232,7 +232,10 @@ func (ec *Context) ngUploadInputs() error {
 		return err
 	}
 	log.V(2).Infof("[casng] %s %s> exec_root=%s, local_prefix=%s, remote_prefix=%s, symlink_opts=%s", cmdID, executionID, execRoot, localPrefix, remotePrefix, slo)
+	log.V(2).Infof("[casng] %s %s> inputs=%d, virtual_inputs=%d", cmdID, executionID, len(ec.cmd.InputSpec.Inputs), len(ec.cmd.InputSpec.VirtualInputs))
+	log.V(4).Infof("[casng] %s %s> inputs=%v, virtual_inputs=%v", cmdID, executionID, ec.cmd.InputSpec.Inputs, ec.cmd.InputSpec.VirtualInputs)
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+len(ec.cmd.InputSpec.VirtualInputs))
+	seenPaths := make(map[impath.Absolute]bool)
 	for _, p := range ec.cmd.InputSpec.Inputs {
 		rel, err := impath.Rel(p)
 		if err != nil {
@@ -243,10 +246,15 @@ func (ec *Context) ngUploadInputs() error {
 			return err
 		}
 		reqs = append(reqs, casng.UploadRequest{Path: absPath, SymlinkOptions: slo, Exclude: filter})
+		seenPaths[absPath] = true
 	}
 	for _, p := range ec.cmd.InputSpec.VirtualInputs {
 		if p.Path == "" {
 			return fmt.Errorf("[casng] %s %s> empty virtual path", cmdID, executionID)
+		}
+		// If execRoot is a virtual path, ignore it.
+		if p.IsEmptyDirectory && p.Path == "." {
+			continue
 		}
 		rel, err := impath.Rel(p.Path)
 		if err != nil {
@@ -256,7 +264,14 @@ func (ec *Context) ngUploadInputs() error {
 		if err != nil {
 			return err
 		}
+		if seenPaths[absPath] {
+			continue
+		}
 		r := casng.UploadRequest{Bytes: p.Contents, Path: absPath, Exclude: filter}
+		// Ensure Bytes is not nil to avoid traversing the path.
+		if r.Bytes == nil {
+			r.Bytes = []byte{}
+		}
 		if p.IsEmptyDirectory {
 			r.BytesFileMode |= fs.ModeDir
 		} else if p.IsExecutable {
@@ -265,9 +280,17 @@ func (ec *Context) ngUploadInputs() error {
 		reqs = append(reqs, r)
 	}
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
-	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs...)
-	if err != nil {
-		return err
+	rootDg, missing, stats, err1 := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs...)
+	rootDg2, _, _, err2 := ec.client.GrpcClient.ComputeMerkleTree(ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
+	log.V(3).Infof("[casng] %s %s> roots: ng=%v, client=%v", cmdID, executionID, rootDg, rootDg2)
+	if err1 != nil {
+		return err1
+	}
+	if err2 != nil {
+		return err2
+	}
+	if rootDg.Hash != rootDg2.Hash {
+		return fmt.Errorf("root digest mismatch: ng=%v, client=%v", rootDg, rootDg2)
 	}
 	ec.Metadata.InputFiles = int(stats.InputFileCount)
 	ec.Metadata.InputDirectories = int(stats.InputDirCount)
@@ -409,7 +432,7 @@ func exclusionsFilter(es []*command.InputExclusion) (walker.Filter, error) {
 	}
 	filter.File = func(path string, mode fs.FileMode) bool {
 		for i, re := range fileRegexes {
-			if fileModes[i] == mode && re.MatchString(path) {
+			if (fileModes[i] == 0 && mode.IsRegular() || fileModes[i]&mode != 0) && re.MatchString(path) {
 				return true
 			}
 		}

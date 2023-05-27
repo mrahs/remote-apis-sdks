@@ -631,14 +631,12 @@ func (c *Client) ngUploadPredigested(ctx context.Context, entries []*uploadinfo.
 			contextmd.Infof(ctx, log.Level(2), "expecting digested entries, but got an empty digest for upload; skipping")
 			continue
 		}
-		r := casng.UploadRequest{Digest: entry.Digest}
-		if entry.Path == "" {
-			r.Bytes = entry.Contents
-		} else if abs, err := impath.Abs(entry.Path); err != nil {
+		r := casng.UploadRequest{Digest: entry.Digest, Bytes: entry.Contents}
+		abs, err := impath.Abs(entry.Path)
+		if err != nil {
 			return nil, 0, err
-		} else {
-			r.Path = abs
-		}
+		} 
+		r.Path = abs
 		reqs = append(reqs, r)
 	}
 	uploaded, stats, err := c.ngCasUploader.Upload(ctx, reqs...)

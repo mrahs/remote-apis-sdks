@@ -13,6 +13,7 @@ go_library(
         "//go/pkg/digest",
         "//go/pkg/filemetadata",
         "//go/pkg/io/impath",
+        "//go/pkg/io/walker",
         "//go/pkg/outerr",
         "//go/pkg/uploadinfo",
         "//go/pkg/symlinkopts",

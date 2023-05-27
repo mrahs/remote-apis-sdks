@@ -505,6 +505,7 @@ func TestUpload_BatchingTree(t *testing.T) {
 	rootDigest, _, _, err := u.UploadTree(ctx, impath.MustAbs(tmp), impath.MustAbs(tmp, "wd"), impath.MustAbs(tmp, "rwd"),
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/c/foo.go")},
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/bar.go")},
+		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b")},
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/e/f/baz.go")},
 	)
 	if err != nil {

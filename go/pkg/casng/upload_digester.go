@@ -71,26 +71,33 @@ func (u *uploader) digester() {
 			continue
 		}
 
-		if len(req.Bytes) > 0 {
+		// If it's a bytes request, do not traverse the path.
+		if req.Bytes != nil {
 			if req.Digest.Hash == "" {
 				req.Digest = digest.NewFromBlob(req.Bytes)
 			}
-			var node proto.Message
-			name := req.Path.Base().String()
-			digest := req.Digest.ToProto()
-			if req.BytesFileMode&fs.ModeDir != 0 {
-				node = &repb.DirectoryNode{Digest: digest, Name: name}
-			} else {
-				node = &repb.FileNode{Digest: digest, Name: name, IsExecutable: isExec(req.BytesFileMode)}
+			// If path is set, construct and cache the corresponding node.
+			if req.Path.String() != impath.Root {
+				name := req.Path.Base().String()
+				digest := req.Digest.ToProto()
+				var node proto.Message
+				if req.BytesFileMode&fs.ModeDir != 0 {
+					node = &repb.DirectoryNode{Digest: digest, Name: name}
+				} else {
+					node = &repb.FileNode{Digest: digest, Name: name, IsExecutable: isExec(req.BytesFileMode)}
+				}
+				key := req.Path.String() + req.Exclude.String()
+				u.nodeCache.Store(key, node)
 			}
-			key := req.Path.String() + req.Exclude.GetID()
-			u.nodeCache.Store(key, node)
-			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, tag=%s", len(req.Bytes), req.tag)
-			u.dispatcherBlobCh <- blob{digest: req.Digest, bytes: req.Bytes, path: req.Path.String(), tag: req.tag, ctx: req.ctx}
+			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, path=%s, tag=%s", len(req.Bytes), req.Path, req.tag)
+
+			if len(req.Bytes) > 0 {
+				u.dispatcherBlobCh <- blob{digest: req.Digest, bytes: req.Bytes, path: req.Path.String(), tag: req.tag, ctx: req.ctx}
+			}
 			continue
 		}
 
-		log.V(3).Infof("[casng] upload.digester.req: path=%s, slo=%s, filter=%s, tag=%s", req.Path, req.SymlinkOptions, req.Exclude, req.tag)
+		log.V(3).Infof("[casng] upload.digester.req: path=%s, filter=%s, slo=%s, tag=%s", req.Path, req.Exclude, req.SymlinkOptions, req.tag)
 		// Wait if too many walks are in-flight.
 		startTime := time.Now()
 		if !u.walkThrottler.acquire(req.ctx) {
@@ -136,11 +143,11 @@ func (u *uploader) digest(req UploadRequest) {
 			select {
 			// If request aborted, abort.
 			case <-req.ctx.Done():
-				log.V(3).Info("upload.digest.req.cancel: %tag=%s, walk_id=%s", req.tag, walkId)
+				log.V(3).Infof("upload.digest.req.cancel: tag=%s, walk_id=%s", req.tag, walkId)
 				return walker.SkipPath, false
 			// This is intended to short-circuit a cancelled uploader. It is not intended to abort by cancelling the uploader's context.
 			case <-u.ctx.Done():
-				log.V(3).Info("upload.digest.cancel: %tag=%s, walk_id=%s", req.tag, walkId)
+				log.V(3).Infof("upload.digest.cancel: tag=%s, walk_id=%s", req.tag, walkId)
 				return walker.SkipPath, false
 			default:
 			}
@@ -148,7 +155,7 @@ func (u *uploader) digest(req UploadRequest) {
 			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
 			// In both cases, deferring is the right call. Once the requset is processed, all requestters will revisit the path to get the digestion result.
 			// If the path was not cached before, claim it by makring it as in-flight.
-			key := path.String() + req.Exclude.GetID()
+			key := path.String() + req.Exclude.String()
 			wg := &sync.WaitGroup{}
 			wg.Add(1)
 			m, ok := u.nodeCache.LoadOrStore(key, wg)
@@ -200,7 +207,7 @@ func (u *uploader) digest(req UploadRequest) {
 
 			select {
 			case <-req.ctx.Done():
-				log.V(3).Info("upload.digest.req.cancel: %tag=%s, walk_id=%s", req.tag, walkId)
+				log.V(3).Infof("upload.digest.req.cancel: tag=%s, walk_id=%s", req.tag, walkId)
 				return false
 			// This is intended to short-circuit a cancelled uploader. It is not intended to abort by cancelling the uploader's context.
 			case <-u.ctx.Done():
@@ -209,8 +216,8 @@ func (u *uploader) digest(req UploadRequest) {
 			default:
 			}
 
-			key := path.String() + req.Exclude.GetID()
-			parentKey := path.Dir().String() + req.Exclude.GetID()
+			key := path.String() + req.Exclude.String()
+			parentKey := path.Dir().String() + req.Exclude.String()
 
 			// In post-access, the cache should have this walker's own wait group.
 			// Capture it here before it's overwritten with the actual result.
@@ -271,7 +278,7 @@ func (u *uploader) digest(req UploadRequest) {
 
 			select {
 			case <-req.ctx.Done():
-				log.V(3).Info("upload.digest.req.cancel: %tag=%s, walk_id=%s", req.tag, walkId)
+				log.V(3).Infof("upload.digest.req.cancel: tag=%s, walk_id=%s", req.tag, walkId)
 				return walker.SkipSymlink, false
 			// This is intended to short-circuit a cancelled uploader. It is not intended to abort by cancelling the uploader's context.
 			case <-u.ctx.Done():
@@ -280,8 +287,8 @@ func (u *uploader) digest(req UploadRequest) {
 			default:
 			}
 
-			key := path.String() + req.Exclude.GetID()
-			parentKey := path.Dir().String() + req.Exclude.GetID()
+			key := path.String() + req.Exclude.String()
+			parentKey := path.Dir().String() + req.Exclude.String()
 
 			// In symlink post-access, the cache should have this walker's own wait group.
 			// Capture it here before it's overwritten with the actual result.
@@ -410,15 +417,9 @@ func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.Dire
 		}
 	}
 	// Sort children to get a deterministic hash.
-	sort.Slice(dir.Files, func(i, j int) bool {
-		return dir.Files[i].Name < dir.Files[j].Name
-	})
-	sort.Slice(dir.Directories, func(i, j int) bool {
-		return dir.Directories[i].Name < dir.Directories[j].Name
-	})
-	sort.Slice(dir.Symlinks, func(i, j int) bool {
-		return dir.Symlinks[i].Name < dir.Symlinks[j].Name
-	})
+	sort.Slice(dir.Files, func(i, j int) bool { return dir.Files[i].Name < dir.Files[j].Name })
+	sort.Slice(dir.Directories, func(i, j int) bool { return dir.Directories[i].Name < dir.Directories[j].Name })
+	sort.Slice(dir.Symlinks, func(i, j int) bool { return dir.Symlinks[i].Name < dir.Symlinks[j].Name })
 	b, err := proto.Marshal(dir)
 	if err != nil {
 		return nil, nil, err

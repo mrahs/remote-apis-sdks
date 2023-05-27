@@ -30,10 +30,12 @@ func (f *Filter) MatchFile(path string, mode fs.FileMode) bool {
 	return f.File(path, mode)
 }
 
-// GetID delegates to ID if set. Otherwise, returns the empty string.
-func (f *Filter) GetID() string {
-	if f == nil || f.ID == nil {
+// String delegates to ID if set. Otherwise, returns the empty string.
+func (f Filter) String() string {
+	// Value receiver is used to ensure the method is called on both a pointer and value receiver.
+	if f.ID == nil {
 		return ""
 	}
 	return f.ID()
 }
+
