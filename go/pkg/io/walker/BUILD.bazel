@@ -3,7 +3,6 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "walker",
     srcs = [
-        "filter.go",
         "stack.go",
         "walker.go",
     ],
@@ -15,7 +14,6 @@ go_library(
 go_test(
     name = "walker_test",
     srcs = [
-        "filter_test.go",
         "walker_test.go",
     ],
     deps = [

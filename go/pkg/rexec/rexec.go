@@ -236,7 +236,7 @@ func (ec *Context) ngUploadInputs() error {
 			return err
 		}
 		reqs = append(reqs, casng.UploadRequest{
-			Path:           casng.UploadRequest_Path{Root: absPath, SymlinkOptions: slo},
+			Path: casng.UploadRequest_Path{Root: absPath, SymlinkOptions: slo},
 		})
 	}
 	// TODO: handle virtual inputs properly.

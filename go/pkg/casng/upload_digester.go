@@ -71,11 +71,10 @@ func (u *uploader) digester() {
 			continue
 		}
 
-		if !req.Bytes.Empty() && req.Digest.Hash == "" {
-			req.Digest = digest.NewFromBlob(req.Bytes.Content)
-		}
-
-		if req.Digest.Hash != "" {
+		if !req.Bytes.Empty() {
+			if req.Digest.Hash == "" {
+				req.Digest = digest.NewFromBlob(req.Bytes.Content)
+			}
 			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, tag=%s", len(req.Bytes.Content), req.tag)
 			u.dispatcherBlobCh <- blob{digest: req.Digest, bytes: req.Bytes.Content, path: req.Path.Root.String(), tag: req.tag, ctx: req.ctx}
 			continue
@@ -125,6 +124,11 @@ func (u *uploader) digest(req UploadRequest) {
 			log.V(3).Infof("[casng] upload.digest.visit.pre: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
 
 			select {
+			// If request aborted, abort.
+			case <-req.ctx.Done():
+				log.V(3).Info("upload.digest.req.cancel: %tag=%s, walk_id=%s", req.tag, walkId)
+				return walker.SkipPath, false
+			// This is intended to short-circuit a cancelled uploader. It is not intended to abort by cancelling the uploader's context.
 			case <-u.ctx.Done():
 				log.V(3).Info("upload.digest.cancel: %tag=%s, walk_id=%s", req.tag, walkId)
 				return walker.SkipPath, false
@@ -134,7 +138,7 @@ func (u *uploader) digest(req UploadRequest) {
 			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
 			// In both cases, deferring is the right call. Once the requset is processed, all requestters will revisit the path to get the digestion result.
 			// If the path was not cached before, claim it by makring it as in-flight.
-			key := path.String() + req.Path.Exclude.String()
+			key := path.String() + req.Path.FilterID()
 			wg := &sync.WaitGroup{}
 			wg.Add(1)
 			m, ok := u.nodeCache.LoadOrStore(key, wg)
@@ -185,14 +189,18 @@ func (u *uploader) digest(req UploadRequest) {
 			log.V(3).Infof("[casng] upload.digest.visit.post: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
 
 			select {
+			case <-req.ctx.Done():
+				log.V(3).Info("upload.digest.req.cancel: %tag=%s, walk_id=%s", req.tag, walkId)
+				return false
+			// This is intended to short-circuit a cancelled uploader. It is not intended to abort by cancelling the uploader's context.
 			case <-u.ctx.Done():
 				log.V(3).Infof("upload.digest.cancel: tag=%s, walk_id=%s", req.tag, walkId)
 				return false
 			default:
 			}
 
-			key := path.String() + req.Path.Exclude.String()
-			parentKey := path.Dir().String() + req.Path.Exclude.String()
+			key := path.String() + req.Path.FilterID()
+			parentKey := path.Dir().String() + req.Path.FilterID()
 
 			// In post-access, the cache should have this walker's own wait group.
 			// Capture it here before it's overwritten with the actual result.
@@ -252,14 +260,18 @@ func (u *uploader) digest(req UploadRequest) {
 			log.V(3).Infof("[casng] upload.digest.visit.symlink: path=%s, real_path=%s, slo=%s, tag=%s, walk_id=%s", path, realPath, req.Path.SymlinkOptions, req.tag, walkId)
 
 			select {
+			case <-req.ctx.Done():
+				log.V(3).Info("upload.digest.req.cancel: %tag=%s, walk_id=%s", req.tag, walkId)
+				return walker.SkipSymlink, false
+			// This is intended to short-circuit a cancelled uploader. It is not intended to abort by cancelling the uploader's context.
 			case <-u.ctx.Done():
 				log.V(3).Infof("upload.digest.cancel: tag=%s, walk_id=%s", req.tag, walkId)
 				return walker.SkipSymlink, false
 			default:
 			}
 
-			key := path.String() + req.Path.Exclude.String()
-			parentKey := path.Dir().String() + req.Path.Exclude.String()
+			key := path.String() + req.Path.FilterID()
+			parentKey := path.Dir().String() + req.Path.FilterID()
 
 			// In symlink post-access, the cache should have this walker's own wait group.
 			// Capture it here before it's overwritten with the actual result.

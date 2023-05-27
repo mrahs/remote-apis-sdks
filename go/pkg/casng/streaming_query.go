@@ -38,14 +38,15 @@ type missingBlobRequestBundle = map[digest.Digest][]tag
 // This method is useful when digests are calculated and dispatched on the fly.
 // For a large list of known digests, consider using the batching uploader.
 //
-// The digests are unified (aggregated/bundled) based on ItemsLimit, BytesLimit and BundleTimeout of the gRPC config.
-// The uploader's context is used to make remote calls. It will carry any metadata present in ctx.
+// To properly stop this call, close in and cancel ctx, then wait for the returned channel to close.
+// The channel in must be closed as a termination signal. Cancelling ctx is not enough.
+// The uploader's context is used to make remote calls using metadata from ctx.
 // Metadata unification assumes all requests share the same correlated invocation ID.
 //
-// The caller must close in as a termination signal. Cancelling ctx or the uploader's context is not enough.
 // The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
 // All received requests will have corresponding responses sent on the returned channel.
 //
+// The digests are unified (aggregated/bundled) based on ItemsLimit, BytesLimit and BundleTimeout of the gRPC config.
 // The returned channel is unbuffered and will be closed after the input channel is closed and no more responses are available for this call.
 // This could indicate completion or cancellation (in case the context was canceled).
 // Slow consumption speed on this channel affects the consumption speed on the input channel.
@@ -168,7 +169,15 @@ func (u *uploader) queryProcessor() {
 		// Block the entire processor if the concurrency limit is reached.
 		startTime := time.Now()
 		if !u.queryThrottler.acquire(u.ctx) {
-			// TODO: must send results before returning.
+			// Ensure responses are dispatched before aborting.
+			for d := range bundle {
+				u.queryPubSub.pub(MissingBlobsResponse{
+					Digest:  d,
+					Missing: false,
+					// This should always be nil at this point.
+					Err: context.Canceled,
+				}, bundle[d]...)
+			}
 			return
 		}
 		log.V(3).Infof("[casng] query.processor.throttle: duration=%v", time.Since(startTime))

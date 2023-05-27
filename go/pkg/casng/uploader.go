@@ -179,7 +179,13 @@ func (u *uploader) Wait() {
 //
 // Returns nil if no node corresponds to req.
 func (u *uploader) Node(req UploadRequest) proto.Message {
-	key := req.Path.Root.String() + req.Path.Exclude.String()
+	key := req.Bytes.Path.String()
+	if req.Bytes.Empty() {
+		key = req.Path.Root.String()
+		if req.Path.Exclude != nil {
+			key += req.Path.Exclude.ID()
+		}
+	}
 	n, ok := u.nodeCache.Load(key)
 	if !ok {
 		return nil
@@ -194,7 +200,7 @@ func (u *uploader) Node(req UploadRequest) proto.Message {
 // NewBatchingUploader creates a new instance of the batching uploader.
 //
 // The specified configs must be compatible with the capabilities of the server that the specified clients are connected to.
-// ctx must be cancelled to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
+// ctx must be cancelled after all batching calls have returned to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
 func NewBatchingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
@@ -209,7 +215,7 @@ func NewBatchingUploader(
 // NewStreamingUploader creates a new instance of the streaming uploader.
 //
 // The specified configs must be compatible with the capabilities of the server which the specified clients are connected to.
-// ctx must be cancelled to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
+// ctx must be cancelled after all response channels have been closed to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
 func NewStreamingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,

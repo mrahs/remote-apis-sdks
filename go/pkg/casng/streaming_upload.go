@@ -11,9 +11,11 @@
 //   dispatcher/res  -> requester
 //
 // The termination sequence is as follows:
-//   user closes input channels (streaming uploader).
-//   user waits for termination signal (return from batching uploader or channel closed from streaming uploader).
-//   user cancels uploader's context: cancel in-flight digestions and gRPC processors blocked on throttlers.
+//   user cancels the batching or the streaming context, not the uploader's context, and closes input streaming channels.
+//       cancelling the context triggers aborting in-flight requests.
+//   user waits for the termination signal: return from batching uploader or response channel closed from streaming uploader.
+//       this ensures the whole pipeline is drained properly.
+//   user cancels uploader's context: cancels pending digestions and gRPC processors blocked on throttlers.
 //   client senders (top level) terminate.
 //   the digester channel is closed, and a termination signal is sent to the dispatcher.
 //   the dispatcher terminates its sender and propagates the signal to its piper.
@@ -59,7 +61,7 @@ type UploadRequest_Bytes struct {
 	Path impath.Absolute
 }
 
-// Empty returns true if the bytes content is empty.
+// Empty is a convenient method that returns true if the bytes content is empty.
 func (b *UploadRequest_Bytes) Empty() bool {
 	return b == nil || len(b.Content) == 0
 }
@@ -73,7 +75,19 @@ type UploadRequest_Path struct {
 	SymlinkOptions slo.Options
 
 	// Exclude is used to exclude paths during traversal.
+	//
+	// The filter ID is used in the keys of the digest cache.
+	// Using the same ID for effectively different filters will cause erroneous cache hits.
+	// Using a different ID for effectively identical filters will reduce cache hit rates and increase digestion compute cost.
 	Exclude walker.Filter
+}
+
+// FilterID is a convenient method that returns the filter ID if not nil, or the empty string otherwise.
+func (p *UploadRequest_Path) FilterID() string {
+	if p.Exclude != nil {
+		return p.Exclude.ID()
+	}
+	return ""
 }
 
 // UploadRequest represents a path to start uploading from.
@@ -157,8 +171,9 @@ type tagCount struct {
 
 // Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
 //
-// The caller must close in as a termination signal. Cancelling ctx or the uploader's context is not enough.
-// The uploader's context is used to make remote calls. It will carry any metadata present in ctx.
+// To properly stop this call, close in and cancel ctx, then wait for the returned channel to close.
+// The channel in must be closed as a termination signal. Cancelling ctx is not enough.
+// The uploader's context is used to make remote calls using metadata from ctx.
 // Metadata unification assumes all requests share the same correlated invocation ID.
 //
 // The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
@@ -251,7 +266,16 @@ func (u *uploader) batcher() {
 		// Block the bundler if the concurrency limit is reached.
 		startTime := time.Now()
 		if !u.uploadThrottler.acquire(u.ctx) {
-			// TODO: must send results to the dispatcher here.
+			// Ensure responses are dispatched before aborting.
+			for d, item := range bundle {
+				tags := item.tags
+				u.dispatcherResCh <- UploadResponse{
+					Digest: d,
+					Stats:  Stats{BytesRequested: d.Size},
+					Err:    context.Canceled,
+					tags:   tags,
+				}
+			}
 			return
 		}
 		log.V(3).Infof("[casng] upload.batch.throttle: duration=%v", time.Since(startTime))
@@ -532,7 +556,12 @@ func (u *uploader) streamer() {
 					u.ioThrottler.release()
 					u.ioLargeThrottler.release()
 				}
-				// TODO: must send a message to the dispatcher here.
+				// Ensure the response is dispatched before aborting.
+				u.workerWg.Add(1)
+				go func(b blob) {
+					defer u.workerWg.Done()
+					streamResCh <- UploadResponse{Digest: b.digest, Stats: Stats{BytesRequested: b.digest.Size}, Err: context.Canceled, tags: []tag{b.tag}}
+				}(b)
 				continue
 			}
 			log.V(3).Infof("[casng] upload.stream.throttle: duration=%v, tag=%s", time.Since(startTime), b.tag)
@@ -547,12 +576,12 @@ func (u *uploader) streamer() {
 
 			pending += 1
 			u.workerWg.Add(1)
-			go func() {
+			go func(b blob) {
 				defer u.workerWg.Done()
 				defer u.streamThrottle.release()
 				s, err := u.callStream(b.ctx, name, b)
 				streamResCh <- UploadResponse{Digest: b.digest, Stats: s, Err: err, tags: []tag{b.tag}}
-			}()
+			}(b)
 			log.V(3).Infof("[casng] upload.stream.req: pending=%d", pending)
 
 		case r := <-streamResCh:

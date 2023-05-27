@@ -312,7 +312,7 @@ func (c *Client) ComputeMerkleTree(execRoot, workingDir, remoteWorkingDir string
 	// TODO: remove debug logs
 	// paths := make([]string, 0, len(fs))
 	// for p := range fs {
-		// paths = append(paths, p)
+	// paths = append(paths, p)
 	// }
 	// log.V(4).Infof("The Tree:\n  root=%v\n  paths=%v", root, paths)
 	if err != nil {

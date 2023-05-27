@@ -206,7 +206,7 @@ func TestUpload_Batching(t *testing.T) {
 				findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 					return &repb.FindMissingBlobsResponse{MissingBlobDigests: in.BlobDigests}, nil
 				},
-				batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
+				batchUpdateBlobs: func(_ context.Context, in *repb.BatchUpdateBlobsRequest, _ ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
 					resp := make([]*repb.BatchUpdateBlobsResponse_Response, len(in.Requests))
 					for i, r := range in.Requests {
 						resp[i] = &repb.BatchUpdateBlobsResponse_Response{Digest: r.Digest, Status: &rpcstatus.Status{}}
@@ -270,7 +270,7 @@ func TestUpload_Batching(t *testing.T) {
 				findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 					return &repb.FindMissingBlobsResponse{MissingBlobDigests: in.BlobDigests}, nil
 				},
-				batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
+				batchUpdateBlobs: func(_ context.Context, in *repb.BatchUpdateBlobsRequest, _ ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
 					resp := make([]*repb.BatchUpdateBlobsResponse_Response, len(in.Requests))
 					for i, r := range in.Requests {
 						resp[i] = &repb.BatchUpdateBlobsResponse_Response{Digest: r.Digest, Status: &rpcstatus.Status{}}
@@ -339,7 +339,7 @@ func TestUpload_Batching(t *testing.T) {
 				findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 					return &repb.FindMissingBlobsResponse{MissingBlobDigests: in.BlobDigests}, nil
 				},
-				batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
+				batchUpdateBlobs: func(_ context.Context, in *repb.BatchUpdateBlobsRequest, _ ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
 					resp := make([]*repb.BatchUpdateBlobsResponse_Response, len(in.Requests))
 					for i, r := range in.Requests {
 						resp[i] = &repb.BatchUpdateBlobsResponse_Response{Digest: r.Digest, Status: &rpcstatus.Status{}}
@@ -396,7 +396,7 @@ func TestUpload_Batching(t *testing.T) {
 				findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
 					return &repb.FindMissingBlobsResponse{MissingBlobDigests: in.BlobDigests}, nil
 				},
-				batchUpdateBlobs: func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
+				batchUpdateBlobs: func(_ context.Context, in *repb.BatchUpdateBlobsRequest, _ ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
 					resp := make([]*repb.BatchUpdateBlobsResponse_Response, len(in.Requests))
 					for i, r := range in.Requests {
 						resp[i] = &repb.BatchUpdateBlobsResponse_Response{Digest: r.Digest, Status: &rpcstatus.Status{}}

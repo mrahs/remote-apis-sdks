@@ -4,7 +4,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -28,7 +27,29 @@ type (
 	actions     = map[int]actionVal
 	pathActions = map[string]actions
 	pathCount   = map[string]int
+	filter      struct {
+		path func(path string) bool
+		file func(path string, mode fs.FileMode) bool
+	}
 )
+
+func (f *filter) Path(path string) bool {
+	if f.path == nil {
+		return false
+	}
+	return f.path(path)
+}
+
+func (f *filter) File(path string, mode fs.FileMode) bool {
+	if f.file == nil {
+		return false
+	}
+	return f.file(path, mode)
+}
+
+func (f *filter) ID() string {
+	return ""
+}
 
 func TestWalker(t *testing.T) {
 	tests := []struct {
@@ -96,7 +117,7 @@ func TestWalker(t *testing.T) {
 		{
 			name:          "skip_file_by_path",
 			paths:         []string{"foo.c"},
-			filter:        walker.Filter{Regexp: regexp.MustCompile("foo.c")},
+			filter:        &filter{path: func(path string) bool { return strings.HasSuffix(path, "foo.c") }},
 			wantRealCount: pathCount{},
 		},
 		{

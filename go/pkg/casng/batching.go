@@ -20,6 +20,7 @@ import (
 // MissingBlobs queries the CAS for digests and returns a slice of the missing ones.
 //
 // This method is useful when a large number of digests is already known. For other use cases, consider the streaming uploader.
+// This method does not use internal processors and does not use the uploader's context. It is safe to use even if the uploader's context is cancelled.
 //
 // Cancelling the context will cancel retries, but not a pending request which will be cancelled upon timeout.
 // The digests are batched based on ItemLimits of the gRPC config. BytesLimit and BundleTimeout are not used in this method.
@@ -119,7 +120,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	}()
 
 	var stats Stats
-	if u.streamThrottle.acquire(ctx) {
+	if !u.streamThrottle.acquire(ctx) {
 		return stats, ctx.Err()
 	}
 	defer u.streamThrottle.release()
@@ -274,9 +275,11 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	return stats, err
 }
 
-// Upload processes the specified blobs for upload. Blobs that already exist in the CAS are not uploaded.
-// Any path or file that matches the specified filter is excluded.
-// Additionally, any path that is not a symlink, a directory or a regular file is skipped (e.g. sockets and pipes).
+// Upload processes reqs for upload. Blobs that already exist in the CAS are not uploaded.
+// Additionally, any path that is not a regular file, a directory or a symlink file is skipped (e.g. sockets and pipes).
+// For requests with non-empty Bytes fields, only the Content field is used. In that case, the Path field is ignored.
+//
+// Cancelling ctx gracefully aborts the upload process.
 //
 // Requests are unified across a window of time defined by the BundleTimeout value of the gRPC configuration.
 // The unification is affected by the order of the requests, bundle limits (length, size, timeout) and the upload speed.
@@ -508,11 +511,11 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	// TODO: remove debug logs.
 	// paths := make([]string, 0, len(reqs))
 	// for _, r := range reqs {
-		// paths = append(paths, r.Path.String())
+	// paths = append(paths, r.Path.String())
 	// }
 	// morePaths := make([]string, 0, len(dirNodes))
 	// for p := range dirNodes {
-		// morePaths = append(morePaths, p.String())
+	// morePaths = append(morePaths, p.String())
 	// }
 	// log.V(4).Infof("[casng] tree: \n  root=%v\n  paths=%v\n  more_paths=%v", rootDigest, paths, morePaths)
 	return
