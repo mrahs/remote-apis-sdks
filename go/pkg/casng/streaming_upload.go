@@ -82,14 +82,6 @@ type UploadRequest_Path struct {
 	Exclude walker.Filter
 }
 
-// FilterID is a convenient method that returns the filter ID if not nil, or the empty string otherwise.
-func (p *UploadRequest_Path) FilterID() string {
-	if p.Exclude != nil {
-		return p.Exclude.ID()
-	}
-	return ""
-}
-
 // UploadRequest represents a path to start uploading from.
 //
 // If the path is a directory, its entire tree is traversed and only files that are not excluded by the filter are uploaded.

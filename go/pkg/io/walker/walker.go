@@ -18,20 +18,6 @@ const (
 	aCancel
 )
 
-// Filter defines an interface for matching paths during traversal.
-// The matching semantics, whether matches are included or excluded, is defined by the consumer.
-type Filter interface {
-	// Path accepts a path, absolute or relative, and returns true if it's a match.
-	Path(path string) bool
-
-	// File accepts a path, absolute or relative, and a mode and returns true if it's a match.
-	File(path string, mode fs.FileMode) bool
-
-	// ID returns a unique identifier for this filter.
-	// The identifier may be used by consumers to deduplicate filters so it must be unique within the consumers scope.
-	ID() string
-}
-
 type (
 	// PreAction is an enum that defines the valid actions for the pre-access callback.
 	PreAction int
@@ -188,7 +174,7 @@ func DepthFirst(root impath.Absolute, exclude Filter, cb Callback) {
 //	int is an action that is one of aRead, aDefer, aSkip, or aCancel.
 func visit(e elem, exclude Filter, cb Callback) (*elem, int) {
 	// If the filter applies to the path only, use it here.
-	if exclude != nil && exclude.Path(e.path.String()) {
+	if exclude.MatchPath(e.path.String()) {
 		return nil, aSkip
 	}
 
@@ -209,7 +195,7 @@ func visit(e elem, exclude Filter, cb Callback) (*elem, int) {
 		}
 
 		// If the filter applies to path and mode, use it here.
-		if exclude != nil && exclude.File(e.path.String(), info.Mode()) {
+		if exclude.MatchFile(e.path.String(), info.Mode()) {
 			return nil, aSkip
 		}
 

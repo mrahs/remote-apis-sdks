@@ -181,10 +181,7 @@ func (u *uploader) Wait() {
 func (u *uploader) Node(req UploadRequest) proto.Message {
 	key := req.Bytes.Path.String()
 	if req.Bytes.Empty() {
-		key = req.Path.Root.String()
-		if req.Path.Exclude != nil {
-			key += req.Path.Exclude.ID()
-		}
+		key = req.Path.Root.String() + req.Path.Exclude.GetID()
 	}
 	n, ok := u.nodeCache.Load(key)
 	if !ok {
