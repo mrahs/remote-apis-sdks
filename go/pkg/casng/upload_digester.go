@@ -87,7 +87,8 @@ func (u *uploader) digester() {
 					node = &repb.FileNode{Digest: digest, Name: name, IsExecutable: isExec(req.BytesFileMode)}
 				}
 				key := req.Path.String() + req.Exclude.String()
-				u.nodeCache.Store(key, node)
+				// Do not override if the node already exists.
+				_, _ = u.nodeCache.LoadOrStore(key, node)
 			}
 			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, path=%s, tag=%s", len(req.Bytes), req.Path, req.tag)
 

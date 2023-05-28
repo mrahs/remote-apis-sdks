@@ -248,12 +248,14 @@ func (ec *Context) ngUploadInputs() error {
 		reqs = append(reqs, casng.UploadRequest{Path: absPath, SymlinkOptions: slo, Exclude: filter})
 		seenPaths[absPath] = true
 	}
+	// Append virtual inputs after real inputs so that virtual nodes do not override the cached real nodes.
+	ec.cmd.InputSpec.VirtualInputs = []*command.VirtualInput{{Path:".", IsEmptyDirectory: true}, {Path:"inputs/dir/i/j", IsEmptyDirectory: true}}
 	for _, p := range ec.cmd.InputSpec.VirtualInputs {
 		if p.Path == "" {
 			return fmt.Errorf("[casng] %s %s> empty virtual path", cmdID, executionID)
 		}
 		// If execRoot is a virtual path, ignore it.
-		if p.IsEmptyDirectory && p.Path == "." {
+		if p.Path == "." {
 			continue
 		}
 		rel, err := impath.Rel(p.Path)

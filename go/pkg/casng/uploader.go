@@ -383,7 +383,7 @@ func (u *uploader) logBeat() {
 		case <-ticker.C:
 		}
 
-		log.V(1).Infof("[casng] beat: upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
+		log.V(4).Infof("[casng] beat: upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
 			u.uploadPubSub.len(), u.queryPubSub.len(), u.walkThrottler.len(), u.uploadThrottler.len(), u.streamThrottle.len(), u.queryThrottler.len(), u.ioThrottler.len(), u.ioLargeThrottler.len())
 	}
 }
