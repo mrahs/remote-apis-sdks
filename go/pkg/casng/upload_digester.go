@@ -87,8 +87,10 @@ func (u *uploader) digester() {
 					node = &repb.FileNode{Digest: digest, Name: name, IsExecutable: isExec(req.BytesFileMode)}
 				}
 				key := req.Path.String() + req.Exclude.String()
-				// Do not override if the node already exists.
+				// Do not override the node if it already exists.
 				_, _ = u.nodeCache.LoadOrStore(key, node)
+				// This node cannot be added to the children cache because the cache is owned by the walker callback.
+				// Parent nodes may have already been generated cached in u.nodeCache and updating the u.dirChildren cache will not regenerate them.
 			}
 			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, path=%s, tag=%s", len(req.Bytes), req.Path, req.tag)
 

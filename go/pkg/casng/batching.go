@@ -386,21 +386,16 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		return
 	}
 
-	log.V(2).Info("[casng] upload.tree: constructing the tree")
-	// dirChildren associates a remote directory with a list of its children.
-	dirChildren := make(map[impath.Absolute]map[impath.Absolute]proto.Message)
-	// nodeSeen helps avoid duplicated node children in case of a duplicated request.
-	nodeSeen := make(map[impath.Absolute]bool)
+	log.V(2).Info("[casng] upload.tree.merkle: constructing the tree")
 
 	// This loop flattens out intermediate directories in the map above.
 	// For example:
 	//   reqs=[/a/b/c/foo.go /a/b/bar.go /e/f/baz.go]
 	//   dirChildren{/: [/a /e], /a: [/a/b], /a/b: [/a/b/c], /e: [/e/f]]
 	reqPaths := make([]string, 0, len(reqs))
-	var remotePath impath.Absolute
+	// dirChildren associates a remote directory with a list of its children.
+	dirChildren := make(map[impath.Absolute]map[impath.Absolute]proto.Message)
 	for _, req := range reqs {
-		// BUG: virtual inputs are not traversed which means a parent directory will not include them in their descedants and the cached node will have the wrong digest.
-		// Virtual inputs should be traversed somehow.
 		node := u.Node(req)
 		if node == nil {
 			err = fmt.Errorf("cannot construct the merkle tree with a missing node for path %q", req.Path)
@@ -408,34 +403,32 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		}
 
 		// Every path must be relative to the execution root, which means the remote working directory is included in the merkle tree.
-		remotePath, err = req.Path.ReplacePrefix(localPrefix, remotePrefix)
-		if err != nil {
+		remotePath, errIm := req.Path.ReplacePrefix(localPrefix, remotePrefix)
+		if errIm != nil {
+			err = errIm
 			return
 		}
 
 		reqPaths = append(reqPaths, req.Path.String())
-		// Avoid duplicate nodes.
-		if _, ok := nodeSeen[remotePath]; ok {
-			continue
-		}
-		nodeSeen[remotePath] = true
 
 		parent := remotePath
 		for {
 			remotePath = parent
 			parent = parent.Dir()
-			siblings := dirChildren[parent]
-			parentSeen := len(siblings) > 0
-			if siblings == nil {
-				siblings = make(map[impath.Absolute]proto.Message)
-				dirChildren[parent] = siblings
+			children := dirChildren[parent]
+			if children == nil {
+				children = make(map[impath.Absolute]proto.Message)
+				dirChildren[parent] = children
 			}
-			siblings[remotePath] = node
+			// If the parent already has this child, then no need to continue traversing up.
+			_, ancestrySeen := children[remotePath]
+			// This will nil a previously set node which is required to regenerate directory nodes that get new children in this loop.
+			children[remotePath] = node
 			// Only the deep-most directory holds the node.
 			node = nil
 
-			// Do not go beyond the root. Also stop if the ancestors are already processed to avoid niling a node if any.
-			if parent.String() == execRoot.String() || parentSeen {
+			// Do not go beyond the root. Also stop if ancestors are already processed.
+			if parent.String() == execRoot.String() || ancestrySeen {
 				break
 			}
 		}
@@ -447,7 +440,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	}
 	sort.Strings(dirs)
 	sort.Strings(reqPaths)
-	log.V(4).Infof("[casng] upload.tree: paths:\n%s\n extra_dirs=\n%s", strings.Join(reqPaths, "\n"), strings.Join(dirs, "\n"))
+	log.V(4).Infof("[casng] upload.tree.phase1: paths:\n%s\n extra_dirs=\n%s", strings.Join(reqPaths, "\n"), strings.Join(dirs, "\n"))
 
 	// This loop processes intermediate directories from the execRoot downwards.
 	var dirReqs []UploadRequest
@@ -475,16 +468,21 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		// Check if the dir's node is already computed by looking it up from the parent.
 		var node proto.Message
 		parent := dir.Dir()
-		// TODO: virtual nodes should not take precedence over computed ones.
 		siblings := dirChildren[parent]
 		if siblings != nil { // nil means it's the execRoot
 			node = siblings[dir]
 		}
 		if node == nil {
-			childrenNodes := make([]proto.Message, 0, len(children))
+			// Include cached children in addition to the ones added above.
+			key, _ := dir.ReplacePrefix(remotePrefix, localPrefix) // This will not error out because it's the reverse operation of the one done above.
+			cachedChildren := u.dirChildren.load(key.String())
+			// BUG: dedup
+			childrenNodes := make([]proto.Message, 0, len(children)+len(cachedChildren))
+			childrenNodes = append(childrenNodes, cachedChildren...)
 			for _, node := range children {
 				childrenNodes = append(childrenNodes, node)
 			}
+			log.V(3).Infof("[casng] upload.tree.phase2: dir=%s, children=%d, cached=%d, new=%d", dir, len(childrenNodes), len(cachedChildren), len(children))
 			nodeDir, b, errDigest := digestDirectory(dir, childrenNodes)
 			if errDigest != nil {
 				err = errDigest
@@ -494,6 +492,8 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 			// Also upload its blob.
 			dirReqs = append(dirReqs, UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(nodeDir.Digest)})
 			pathDigest[dir.String()] = digest.NewFromProtoUnvalidated(nodeDir.Digest)
+			// Attach the node to its parent.
+			dirChildren[parent][dir] = node
 		}
 		if dir.String() == execRoot.String() {
 			n, ok := node.(*repb.DirectoryNode)
@@ -504,8 +504,6 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 			rootDigest = digest.NewFromProtoUnvalidated(n.Digest)
 			break
 		}
-		// Attach the node to its parent.
-		dirChildren[parent][dir] = node
 	}
 
 	// Upload the blobs of the directories.
@@ -531,7 +529,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	for _, p := range extraDirs {
 		strBuilder.WriteString(fmt.Sprintf("  %s: %v\n  %s\n", p, pathDigest[p.String()], dirChildren[p]))
 	}
-	log.V(4).Infof("[casng] upload.tree: \n  root=%v\n  paths=%d\n%v\n  extra_dirs=%d\n%s", rootDigest, len(paths), strings.Join(paths, "\n"), len(extraDirs), strBuilder.String())
+	log.V(4).Infof("[casng] upload.tree.result: \n  root=%v\n  paths=%d\n%v\n  extra_dirs=%d\n%s", rootDigest, len(paths), strings.Join(paths, "\n"), len(extraDirs), strBuilder.String())
 
 	return
 }
