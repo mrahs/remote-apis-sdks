@@ -547,7 +547,10 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	sort.Strings(paths)
 	strBuilder := strings.Builder{}
 	for _, p := range extraDirs {
-		strBuilder.WriteString(fmt.Sprintf("  %s: %v\n  %s\n", p, pathDigest[p.String()], dirChildren[p]))
+		strBuilder.WriteString(fmt.Sprintf("  %s: %v\n", p, pathDigest[p.String()]))
+		for c := range dirChildren[p] {
+			strBuilder.WriteString(fmt.Sprintf("    %s\n", c))
+		}
 	}
 	log.V(4).Infof("[casng] upload.tree.result: \n  root=%v\n  paths=%d\n%v\n  extra_dirs=%d\n%s", rootDigest, len(paths), strings.Join(paths, "\n"), len(extraDirs), strBuilder.String())
 
