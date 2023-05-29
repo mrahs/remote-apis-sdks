@@ -427,8 +427,7 @@ func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.Dire
 	if err != nil {
 		return nil, nil, err
 	}
-	d := digest.NewFromBlob(b)
-	node.Digest = d.ToProto()
+	node.Digest = digest.NewFromBlob(b).ToProto()
 	return node, b, nil
 }
 
