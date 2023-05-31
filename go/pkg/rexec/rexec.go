@@ -235,7 +235,7 @@ func (ec *Context) ngUploadInputs() error {
 	log.V(2).Infof("[casng] %s %s> inputs=%d, virtual_inputs=%d", cmdID, executionID, len(ec.cmd.InputSpec.Inputs), len(ec.cmd.InputSpec.VirtualInputs))
 	log.V(4).Infof("[casng] %s %s> inputs=%v, virtual_inputs=%v", cmdID, executionID, ec.cmd.InputSpec.Inputs, ec.cmd.InputSpec.VirtualInputs)
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+len(ec.cmd.InputSpec.VirtualInputs))
-	seenPaths := make(map[impath.Absolute]bool)
+	seenPath := make(map[impath.Absolute]bool)
 	for _, p := range ec.cmd.InputSpec.Inputs {
 		rel, err := impath.Rel(p)
 		if err != nil {
@@ -245,11 +245,25 @@ func (ec *Context) ngUploadInputs() error {
 		if err != nil {
 			return err
 		}
+		if seenPath[absPath] {
+			return fmt.Errorf("[casng] %s %s> cannot have shared paths among inputs: %q", cmdID, executionID, absPath)
+		}
 		reqs = append(reqs, casng.UploadRequest{Path: absPath, SymlinkOptions: slo, Exclude: filter})
-		seenPaths[absPath] = true
+		seenPath[absPath] = true
+		// Mark ancestors as seen to ensure mutually exclusive paths.
+		parent := absPath.Dir()
+		for !seenPath[parent] && parent.String() != localPrefix.String() {
+			seenPath[parent] = true
+			parent = parent.Dir()
+		}
 	}
-	// Append virtual inputs after real inputs so that virtual nodes do not override the cached real nodes.
-	ec.cmd.InputSpec.VirtualInputs = []*command.VirtualInput{{Path:".", IsEmptyDirectory: true}, {Path:"inputs/dir/i/j", IsEmptyDirectory: true}}
+	// Append virtual inputs after real inputs in order to ignore any redundant virtual inputs.
+	// ec.cmd.InputSpec.VirtualInputs = []*command.VirtualInput{
+	// 	{Path:".", IsEmptyDirectory: true},
+	// 	{Path:"out/reclient/gen", IsEmptyDirectory: true},
+	// 	{Path:"buildtools/third_party/libc++", IsEmptyDirectory: true},
+	// 	{Path:"build/linux/debian_bullseye_amd64-sysroot", IsEmptyDirectory: true},
+	// }
 	for _, p := range ec.cmd.InputSpec.VirtualInputs {
 		if p.Path == "" {
 			return fmt.Errorf("[casng] %s %s> empty virtual path", cmdID, executionID)
@@ -266,11 +280,13 @@ func (ec *Context) ngUploadInputs() error {
 		if err != nil {
 			return err
 		}
-		if seenPaths[absPath] {
+		// If redundant, ignore it to avoid corrupting the node cache.
+		if seenPath[absPath] {
 			continue
 		}
+
 		r := casng.UploadRequest{Bytes: p.Contents, Path: absPath, Exclude: filter}
-		// Ensure Bytes is not nil to avoid traversing the path.
+		// Ensure Bytes is not nil to avoid traversing Path.
 		if r.Bytes == nil {
 			r.Bytes = []byte{}
 		}
@@ -291,8 +307,16 @@ func (ec *Context) ngUploadInputs() error {
 	if err2 != nil {
 		return err2
 	}
+	strBuilder := strings.Builder{}
+	strBuilder.WriteString(fmt.Sprintf("  new=%v\n", rootDg))
+	strBuilder.WriteString(fmt.Sprintf("  old=%v\n", rootDg2))
+
+	specStr := formatInputSpec(ec.cmd.InputSpec, "    ")
+	msg := fmt.Sprintf("new=%s\n  old=%s\n  spec=%s\n  client_slo=%+v\n  ng_slo=%s", rootDg, rootDg2, specStr, ec.client.GrpcClient.TreeSymlinkOpts, slo)
 	if rootDg.Hash != rootDg2.Hash {
-		return fmt.Errorf("root digest mismatch: ng=%v, client=%v", rootDg, rootDg2)
+		return fmt.Errorf("root digest mismatch:\n  %s", msg)
+	} else {
+		log.V(4).Infof("root digest match:\n  %s", msg)
 	}
 	ec.Metadata.InputFiles = int(stats.InputFileCount)
 	ec.Metadata.InputDirectories = int(stats.InputDirCount)
@@ -354,12 +378,13 @@ func symlinkOpts(treeOpts *rc.TreeSymlinkOpts, cmdOpts command.SymlinkBehaviorTy
 		treeOpts = rc.DefaultTreeSymlinkOpts()
 	}
 	slPreserve := treeOpts.Preserved
-	if cmdOpts == command.ResolveSymlink {
+	switch cmdOpts {
+	case command.ResolveSymlink:
 		slPreserve = false
-	}
-	if cmdOpts == command.PreserveSymlink {
+	case command.PreserveSymlink:
 		slPreserve = true
 	}
+
 	switch {
 	case slPreserve && treeOpts.FollowsTarget && treeOpts.MaterializeOutsideExecRoot:
 		slo = symlinkopts.ResolveExternalOnlyWithTarget()
@@ -744,4 +769,22 @@ func (c *Client) Run(ctx context.Context, cmd *command.Command, opt *command.Exe
 	ec.ExecuteRemotely()
 	// TODO(olaola): implement the cache-miss-retry loop.
 	return ec.Result, ec.Metadata
+}
+
+func formatInputSpec(spec *command.InputSpec, indent string) string {
+	sb := strings.Builder{}
+	sb.WriteString(indent + "inputs:\n")
+	for _, p := range spec.Inputs {
+		sb.WriteString(fmt.Sprintf("%[1]s%[1]s%s\n", indent, p))
+	}
+	sb.WriteString(indent+ "virtual_inputs:\n")
+	for _, v := range spec.VirtualInputs {
+		sb.WriteString(fmt.Sprintf("%[1]s%[1]s%s, bytes=%d, dir=%t, exe=%t\n", indent, v.Path, len(v.Contents), v.IsEmptyDirectory, v.IsExecutable))
+	}
+	sb.WriteString(indent+"exclusions:\n")
+	for _, e := range spec.InputExclusions {
+		sb.WriteString(fmt.Sprintf("%[1]s%[1]s%s\n", indent, e))
+	}
+	sb.WriteString(fmt.Sprintf("%ssymlink_behaviour: %s", indent, spec.SymlinkBehavior))
+	return sb.String()
 }

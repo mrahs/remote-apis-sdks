@@ -1,7 +1,6 @@
 package casng
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,12 +12,14 @@ import (
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
 	"github.com/pborman/uuid"
+	"github.com/pkg/xattr"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -87,10 +88,9 @@ func (u *uploader) digester() {
 					node = &repb.FileNode{Digest: digest, Name: name, IsExecutable: isExec(req.BytesFileMode)}
 				}
 				key := req.Path.String() + req.Exclude.String()
-				// Do not override the node if it already exists.
-				_, _ = u.nodeCache.LoadOrStore(key, node)
-				// This node cannot be added to the children cache because the cache is owned by the walker callback.
-				// Parent nodes may have already been generated cached in u.nodeCache and updating the u.dirChildren cache will not regenerate them.
+				u.nodeCache.Store(key, node)
+				// This node cannot be added to the u.dirChildren cache because the cache is owned by the walker callback.
+				// Parent nodes may have already been generated and cached in u.nodeCache; updating the u.dirChildren cache will not regenerate them.
 			}
 			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, path=%s, tag=%s", len(req.Bytes), req.Path, req.tag)
 
@@ -256,17 +256,21 @@ func (u *uploader) digest(req UploadRequest) {
 			case info.Mode().IsRegular():
 				stats.DigestCount += 1
 				stats.InputFileCount += 1
-				node, blb, errDigest := digestFile(u.ctx, realPath, info, u.ioThrottler, u.ioLargeThrottler, u.ioCfg.SmallFileSizeThreshold, u.ioCfg.LargeFileSizeThreshold)
+				node, blb, errDigest := u.digestFile(realPath, info)
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
 					return false
 				}
 				node.Name = path.Base().String()
+				u.nodeCache.Store(key, node)
 				u.dirChildren.append(parentKey, node)
+				if blb == nil {
+					log.V(3).Infof("[casng] upload.digest.visit.post.file.cached: path=%s, real_path=%s, digest=%v, tag=%s, walk_id=%s", path, realPath, node.Digest, req.tag, walkId)
+					return true
+				}
 				blb.tag = req.tag
 				blb.ctx = req.ctx
-				u.dispatcherBlobCh <- blb
-				u.nodeCache.Store(key, node)
+				u.dispatcherBlobCh <- *blb
 				log.V(3).Infof("[casng] upload.digest.visit.post.file: path=%s, real_path=%s, digest=%v, tag=%s, walk_id=%s", path, realPath, node.Digest, req.tag, walkId)
 				return true
 
@@ -443,46 +447,87 @@ func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.Dire
 // The caller must assume ownership of that token and release it.
 //
 // If the returned err is not nil, both tokens are released before returning.
-func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioThrottler, ioLargeThrottler *throttler, smallFileSizeThreshold, largeFileSizeThreshold int64) (node *repb.FileNode, blb blob, err error) {
-	// Start by acquiring a token for the large file.
-	// This avoids consuming too many tokens from ioThrottler only to get blocked waiting for ioLargeThrottler which would starve non-large files.
-	// This assumes ioThrottler has more tokens than ioLargeThrottler.
-	if info.Size() > largeFileSizeThreshold {
-		startTime := time.Now()
-		if !ioLargeThrottler.acquire(ctx) {
-			return nil, blb, ctx.Err()
+func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *repb.FileNode, blb *blob, err error) {
+	// Check the cache first. If not cached or claimed, claim it.
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	m, ok := u.fileNodeCache.LoadOrStore(path, wg)
+	if ok {
+		// If cached, return it.
+		if n, ok := m.(*repb.FileNode); ok {
+			return n, nil, nil
 		}
-		log.V(3).Infof("[casng] upload.digest.file.io_large_throttle: duration=%v", time.Since(startTime))
-		defer func() {
-			// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
-			if blb.reader == nil {
-				ioLargeThrottler.release()
-			}
-		}()
+		// If calimed, wait for it.
+		wg = m.(*sync.WaitGroup)
+		wg.Wait()
+		if n, ok := u.fileNodeCache.Load(path); ok {
+			return n.(*repb.FileNode), nil, nil
+		}
+		return nil, nil, fmt.Errorf("file node was not cached for path %q", path)
 	}
-
-	startTime := time.Now()
-	if !ioThrottler.acquire(ctx) {
-		return nil, blb, ctx.Err()
-	}
-	log.V(3).Infof("[casng] upload.digest.file.io_throttle: duration=%v", time.Since(startTime))
+	// Not cached or calimed before. Compute it.
 	defer func() {
-		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
-		if blb.reader == nil {
-			ioThrottler.release()
-		}
+		u.fileNodeCache.Store(path, node)
+		wg.Done()
 	}()
 
 	node = &repb.FileNode{
 		Name:         path.Base().String(),
 		IsExecutable: isExec(info.Mode()),
 	}
+
+	// TODO
+	if filemetadata.XattrDigestName != "" {
+		if !xattr.XATTR_SUPPORTED {
+			return nil, nil, fmt.Errorf("failed to read digest for %q: x-attributes are not supported by the system", path)
+		}
+		xattrValue, err := xattr.Get(path.String(), filemetadata.XattrDigestName)
+		if err == nil {
+			log.V(3).Infof("[casng] upload.digest.file.xattr: path=%s, size=%d", path, info.Size())
+			dg := digest.Digest{
+				Hash: string(xattrValue),
+				Size: info.Size(), // TODO: must be in xattrValue
+			}
+			node.Digest = dg.ToProto()
+			return node, &blob{digest: dg, path: path.String()}, nil
+		}
+	}
+
+	// Start by acquiring a token for the large file.
+	// This avoids consuming too many tokens from ioThrottler only to get blocked waiting for ioLargeThrottler which would starve non-large files.
+	// This assumes ioThrottler has more tokens than ioLargeThrottler.
+	if info.Size() > u.ioCfg.LargeFileSizeThreshold {
+		startTime := time.Now()
+		if !u.ioLargeThrottler.acquire(u.ctx) {
+			return nil, nil, u.ctx.Err()
+		}
+		log.V(3).Infof("[casng] upload.digest.file.io_large_throttle: duration=%v", time.Since(startTime))
+		defer func() {
+			// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
+			if blb == nil || blb.reader == nil {
+				u.ioLargeThrottler.release()
+			}
+		}()
+	}
+
+	startTime := time.Now()
+	if !u.ioThrottler.acquire(u.ctx) {
+		return nil, nil, u.ctx.Err()
+	}
+	log.V(3).Infof("[casng] upload.digest.file.io_throttle: duration=%v", time.Since(startTime))
+	defer func() {
+		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
+		if blb == nil || blb.reader == nil {
+			u.ioThrottler.release()
+		}
+	}()
+
 	// Small: in-memory blob.
-	if info.Size() <= smallFileSizeThreshold {
+	if info.Size() <= u.ioCfg.SmallFileSizeThreshold {
 		log.V(3).Infof("[casng] upload.digest.file.small: path=%s, size=%d", path, info.Size())
 		f, err := os.Open(path.String())
 		if err != nil {
-			return nil, blb, err
+			return nil, nil, err
 		}
 		defer func() {
 			if errClose := f.Close(); errClose != nil {
@@ -492,32 +537,29 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioT
 
 		b, err := io.ReadAll(f)
 		if err != nil {
-			return nil, blb, err
+			return nil, nil, err
 		}
-		node.Digest = digest.NewFromBlob(b).ToProto()
-		blb.digest = digest.NewFromProtoUnvalidated(node.Digest)
-		blb.bytes = b
-		return node, blb, nil
+		dg := digest.NewFromBlob(b)
+		node.Digest = dg.ToProto()
+		return node, &blob{bytes: b, digest: dg}, nil
 	}
 
 	// Medium: blob with path.
-	if info.Size() < largeFileSizeThreshold {
+	if info.Size() < u.ioCfg.LargeFileSizeThreshold {
 		log.V(3).Infof("[casng] upload.digest.file.medium: path=%s, size=%d", path, info.Size())
-		d, err := digest.NewFromFile(path.String())
-		if err != nil {
-			return nil, blb, err
+		dg, errDigest := digest.NewFromFile(path.String())
+		if errDigest != nil {
+			return nil, nil, errDigest
 		}
-		node.Digest = d.ToProto()
-		blb.digest = digest.NewFromProtoUnvalidated(node.Digest)
-		blb.path = path.String()
-		return node, blb, nil
+		node.Digest = dg.ToProto()
+		return node, &blob{digest: dg, path: path.String()}, nil
 	}
 
 	// Large: blob with a reader.
 	log.V(3).Infof("[casng] upload.digest.file.large: path=%s, size=%d", path, info.Size())
 	f, err := os.Open(path.String())
 	if err != nil {
-		return nil, blb, err
+		return nil, nil, err
 	}
 	defer func() {
 		if err != nil {
@@ -528,20 +570,18 @@ func digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, ioT
 		}
 	}()
 
-	d, err := digest.NewFromReader(f)
-	if err != nil {
-		return nil, blb, err
+	dg, errDigest := digest.NewFromReader(f)
+	if errDigest != nil {
+		return nil, nil, errDigest
 	}
 
 	// Reset the offset for the streamer.
-	_, err = f.Seek(0, io.SeekStart)
-	if err != nil {
-		return nil, blb, err
+	_, errSeek := f.Seek(0, io.SeekStart)
+	if errSeek != nil {
+		return nil, nil, errSeek
 	}
 
-	node.Digest = d.ToProto()
+	node.Digest = dg.ToProto()
 	// The streamer is responsible for closing the file and releasing both ioThrottler and ioLargeThrottler.
-	blb.digest = digest.NewFromProtoUnvalidated(node.Digest)
-	blb.reader = f
-	return node, blb, nil
+	return node, &blob{digest: dg, reader: f}, nil
 }

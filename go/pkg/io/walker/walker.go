@@ -39,8 +39,7 @@ const (
 	// Follow indicates that the walker should follow the symlink.
 	Follow SymlinkAction = aRead
 
-	// Replace indicates that the walker should follow the target of a symlink, but reports every path from that sub-traversal
-	// as a descendant path of the symlink's path.
+	// Replace indicates that the walker should follow the symlink, but report every path from that sub-traversal as a descendant path of the symlink's path.
 	//
 	// For example: if /foo/bar was a symlink to /a/b, the walker would report the path of b as /foo/bar, and the path of a/b/c.d as /foo/bar/c.d.
 	// This behavior is equivalent to copying the entire tree of the target in place of the symlink.
@@ -308,5 +307,33 @@ func processDir(dirElem elem, exclude Filter, cb Callback) ([]any, int) {
 		if errRead == io.EOF {
 			return deferred, aRead
 		}
+	}
+}
+
+// String return a textual version of the action.
+func (s PreAction) String() string {
+	switch s {
+	case Access:
+		return "Access"
+	case SkipPath:
+		return "Skip"
+	case Defer:
+		return "Defer"
+	default:
+		return "Unknown"
+	}
+}
+
+// String return a textual version of the action.
+func (a SymlinkAction) String() string {
+	switch a {
+	case Follow:
+		return "Follow"
+	case Replace:
+		return "Replace"
+	case SkipSymlink:
+		return "Skip"
+	default:
+		return "Unknown"
 	}
 }

@@ -420,7 +420,10 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 	// 		return reqErr
 	// 	})
 	// })
-	err := fmt.Errorf("upload ignored")
+	var err error
+	for _, r := range req.Requests {
+		uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
+	}
 	log.V(3).Infof("[casng] upload.batch.call.grpc_done: duration=%v, uploaded=%d, failed=%d, req_failed=%d", time.Since(startTime), len(uploaded), len(failed), len(bundle)-len(uploaded)-len(failed))
 
 	// Report uploaded.
@@ -630,6 +633,6 @@ func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats S
 
 	// TODO: remove testing code and restore original.
 	_ = reader
-	return Stats{}, fmt.Errorf("stream ignored")
+	return Stats{}, nil
 	// return u.writeBytes(ctx, name, reader, b.digest.Size, 0, true)
 }
