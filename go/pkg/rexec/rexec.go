@@ -231,9 +231,8 @@ func (ec *Context) ngUploadInputs() error {
 	if err != nil {
 		return err
 	}
-	log.V(2).Infof("[casng] %s %s> exec_root=%s, local_prefix=%s, remote_prefix=%s, symlink_opts=%s", cmdID, executionID, execRoot, localPrefix, remotePrefix, slo)
-	log.V(2).Infof("[casng] %s %s> inputs=%d, virtual_inputs=%d", cmdID, executionID, len(ec.cmd.InputSpec.Inputs), len(ec.cmd.InputSpec.VirtualInputs))
-	log.V(4).Infof("[casng] %s %s> inputs=%v, virtual_inputs=%v", cmdID, executionID, ec.cmd.InputSpec.Inputs, ec.cmd.InputSpec.VirtualInputs)
+	log.V(2).Infof("[casng] %s %s> exec_root=%s, local_prefix=%s, remote_prefix=%s, symlink_opts=%s, inputs=%d, virtual_inputs=%d", cmdID, executionID, execRoot, localPrefix, remotePrefix, slo, len(ec.cmd.InputSpec.Inputs), len(ec.cmd.InputSpec.VirtualInputs))
+	log.V(4).Infof("[casng] %s %s> exec_root=%s, local_prefix=%s, remote_prefix=%s, symlink_opts=%s, inputs=%+v, virtual_inputs=%+v", cmdID, executionID, execRoot, localPrefix, remotePrefix, slo, ec.cmd.InputSpec.Inputs, ec.cmd.InputSpec.VirtualInputs)
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+len(ec.cmd.InputSpec.VirtualInputs))
 	seenPath := make(map[impath.Absolute]bool)
 	for _, p := range ec.cmd.InputSpec.Inputs {
@@ -258,12 +257,6 @@ func (ec *Context) ngUploadInputs() error {
 		}
 	}
 	// Append virtual inputs after real inputs in order to ignore any redundant virtual inputs.
-	// ec.cmd.InputSpec.VirtualInputs = []*command.VirtualInput{
-	// 	{Path:".", IsEmptyDirectory: true},
-	// 	{Path:"out/reclient/gen", IsEmptyDirectory: true},
-	// 	{Path:"buildtools/third_party/libc++", IsEmptyDirectory: true},
-	// 	{Path:"build/linux/debian_bullseye_amd64-sysroot", IsEmptyDirectory: true},
-	// }
 	for _, p := range ec.cmd.InputSpec.VirtualInputs {
 		if p.Path == "" {
 			return fmt.Errorf("[casng] %s %s> empty virtual path", cmdID, executionID)
@@ -298,25 +291,22 @@ func (ec *Context) ngUploadInputs() error {
 		reqs = append(reqs, r)
 	}
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
-	rootDg, missing, stats, err1 := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs...)
-	rootDg2, _, _, err2 := ec.client.GrpcClient.ComputeMerkleTree(ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
-	log.V(3).Infof("[casng] %s %s> roots: ng=%v, client=%v", cmdID, executionID, rootDg, rootDg2)
-	if err1 != nil {
-		return err1
+	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs...)
+	if err != nil {
+		return err
 	}
-	if err2 != nil {
-		return err2
-	}
-	strBuilder := strings.Builder{}
-	strBuilder.WriteString(fmt.Sprintf("  new=%v\n", rootDg))
-	strBuilder.WriteString(fmt.Sprintf("  old=%v\n", rootDg2))
-
-	specStr := formatInputSpec(ec.cmd.InputSpec, "    ")
-	msg := fmt.Sprintf("new=%s\n  old=%s\n  spec=%s\n  client_slo=%+v\n  ng_slo=%s", rootDg, rootDg2, specStr, ec.client.GrpcClient.TreeSymlinkOpts, slo)
-	if rootDg.Hash != rootDg2.Hash {
-		return fmt.Errorf("root digest mismatch:\n  %s", msg)
-	} else {
-		log.V(4).Infof("root digest match:\n  %s", msg)
+	if log.V(5) {
+		rootDg2, _, _, err := ec.client.GrpcClient.ComputeMerkleTree(ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
+		if err != nil {
+			return err
+		}
+		specStr := formatInputSpec(ec.cmd.InputSpec, "    ")
+		msg := fmt.Sprintf("new=%s\n  old=%s\n  spec=%s\n  client_slo=%+v\n  ng_slo=%s", rootDg, rootDg2, specStr, ec.client.GrpcClient.TreeSymlinkOpts, slo)
+		if rootDg.Hash != rootDg2.Hash {
+			return fmt.Errorf("root digest mismatch:\n  %s", msg)
+		} else {
+			log.Infof("root digest match:\n  %s", msg)
+		}
 	}
 	ec.Metadata.InputFiles = int(stats.InputFileCount)
 	ec.Metadata.InputDirectories = int(stats.InputDirCount)
@@ -777,11 +767,11 @@ func formatInputSpec(spec *command.InputSpec, indent string) string {
 	for _, p := range spec.Inputs {
 		sb.WriteString(fmt.Sprintf("%[1]s%[1]s%s\n", indent, p))
 	}
-	sb.WriteString(indent+ "virtual_inputs:\n")
+	sb.WriteString(indent + "virtual_inputs:\n")
 	for _, v := range spec.VirtualInputs {
 		sb.WriteString(fmt.Sprintf("%[1]s%[1]s%s, bytes=%d, dir=%t, exe=%t\n", indent, v.Path, len(v.Contents), v.IsEmptyDirectory, v.IsExecutable))
 	}
-	sb.WriteString(indent+"exclusions:\n")
+	sb.WriteString(indent + "exclusions:\n")
 	for _, e := range spec.InputExclusions {
 		sb.WriteString(fmt.Sprintf("%[1]s%[1]s%s\n", indent, e))
 	}

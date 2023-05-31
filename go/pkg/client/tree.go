@@ -308,24 +308,23 @@ func (c *Client) ComputeMerkleTree(execRoot, workingDir, remoteWorkingDir string
 		return digest.Empty, nil, nil, err
 	}
 	var blobs map[digest.Digest]*uploadinfo.Entry
-	tree := make(map[string]digest.Digest)
+	var tree map[string]digest.Digest
+	if log.V(4) {
+		tree = make(map[string]digest.Digest)
+	}
 	root, blobs, err = packageTree(ft, stats, "", tree)
-	// TODO: remove debug logs
-	treePaths := make([]string, 0, len(tree))
-	for p := range tree {
-		treePaths = append(treePaths, p)
+	if log.V(4) {
+		treePaths := make([]string, 0, len(tree))
+		for p := range tree {
+			treePaths = append(treePaths, p)
+		}
+		sort.Strings(treePaths)
+		sb := strings.Builder{}
+		for _, p := range treePaths {
+			sb.WriteString(fmt.Sprintf("  %s: %s\n", p, tree[p]))
+		}
+		log.V(4).Infof("Tree:\n  root=%s\n  tree=%d\n%s", root, len(tree), sb.String())
 	}
-	sort.Strings(treePaths)
-	sb := strings.Builder{}
-	for _, p := range treePaths {
-		sb.WriteString(fmt.Sprintf("  %s: %s\n", p, tree[p]))
-	}
-	// paths := make([]string, 0, len(fs))
-	// for p := range fs {
-	// paths = append(paths, p)
-	// }
-	// log.V(4).Infof("The Tree:\n  root=%v\n  paths=%v", root, paths)
-	log.V(4).Infof("Tree:\n  root=%s\n  tree=%d\n%s", root, len(tree), sb.String())
 	if err != nil {
 		return digest.Empty, nil, nil, err
 	}
@@ -384,7 +383,7 @@ func buildTree(files map[string]*fileSysNode) (*treeNode, error) {
 	for p := range paths {
 		pathsSlice = append(pathsSlice, p)
 	}
-	sort.Slice(pathsSlice, func(i,j int) bool {return pathsSlice[i] < pathsSlice[j]})
+	sort.Slice(pathsSlice, func(i, j int) bool { return pathsSlice[i] < pathsSlice[j] })
 	log.V(4).Infof("ExtraPaths=%d\n%v", len(pathsSlice), strings.Join(pathsSlice, "\n"))
 	return root, nil
 }
@@ -393,13 +392,21 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 	dir := &repb.Directory{}
 	blobs = make(map[digest.Digest]*uploadinfo.Entry)
 
+	var path string
 	for name, child := range t.dirs {
-		path := prefix + "/" + name
+		if log.V(4) {
+			path = prefix + "/" + name
+		}
+
 		dg, childBlobs, err := packageTree(child, stats, path, tree)
 		if err != nil {
 			return digest.Empty, nil, err
 		}
-		tree[path] = dg
+
+		if log.V(4) {
+			tree[path] = dg
+		}
+
 		dir.Directories = append(dir.Directories, &repb.DirectoryNode{Name: name, Digest: dg.ToProto()})
 		for d, b := range childBlobs {
 			blobs[d] = b
@@ -409,8 +416,10 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 
 	for name, fn := range t.files {
 		dg := fn.ue.Digest
-		path := prefix + "/" + name
-		tree[path] = dg
+		if log.V(4) {
+			path := prefix + "/" + name
+			tree[path] = dg
+		}
 		dir.Files = append(dir.Files, &repb.FileNode{Name: name, Digest: dg.ToProto(), IsExecutable: fn.isExecutable})
 		blobs[dg] = fn.ue
 		stats.InputFiles++
@@ -429,8 +438,9 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 		return digest.Empty, nil, err
 	}
 	dg := ue.Digest
-	path := prefix
-	tree[path] = dg
+	if log.V(4) {
+		tree[prefix] = dg
+	}
 	blobs[dg] = ue
 	stats.TotalInputBytes += dg.Size
 	stats.InputDirectories++

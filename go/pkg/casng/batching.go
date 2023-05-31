@@ -380,13 +380,15 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 // and the root might have too many descendants such that traversing and filtering might add a significant overhead.
 //
 // The following constraints are enforced on the reqs set to ensure proper hierarchy caching during the internal digestion process:
-//   localPrefix and the exclusion filter is shared among all paths.
-//   No digests are set on any request.
-//   The paths are mutually exclusive.
+//
+//	localPrefix and the exclusion filter is shared among all paths.
+//	No digests are set on any request.
+//	The paths are mutually exclusive.
 //
 // remotePrefix replaces localPrefix inside the merkle tree such that the server is only aware of remotePrefix.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix, remotePrefix impath.Absolute, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
-	log.V(2).Infof("[casng] upload.tree: reqs=%d", len(reqs))
+	log.V(1).Infof("[casng] upload.tree: reqs=%d", len(reqs))
+	defer log.V(1).Infof("[casng] upload.tree.done")
 
 	if len(reqs) == 0 {
 		return
@@ -433,8 +435,8 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		}
 	}
 	sort.Strings(pathList)
-	filterID = digest.NewFromBlob([]byte(strings.Join(pathList, "")+filterID)).String()
-	filterIDFunc := func() string {return filterID}
+	filterID = digest.NewFromBlob([]byte(strings.Join(pathList, "") + filterID)).String()
+	filterIDFunc := func() string { return filterID }
 	for _, r := range reqs {
 		r.Exclude.ID = filterIDFunc // r is a copy, but r.Exclude is a reference.
 	}
@@ -487,7 +489,10 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	var dirReqs []UploadRequest
 	stack := make([]impath.Absolute, 0, len(dirChildren))
 	stack = append(stack, execRoot)
-	log_pathDigest := make(map[string]string) // TODO: logs
+	var logPathDigest map[string]string
+	if log.V(4) {
+		logPathDigest = make(map[string]string)
+	}
 	for len(stack) > 0 {
 		// Peek.
 		dir := stack[len(stack)-1]
@@ -507,39 +512,13 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 
 		// Pop.
 		stack = stack[:len(stack)-1]
-		// Include cached children in addition to the ones added above.
-		// path, _ := dir.ReplacePrefix(remotePrefix, localPrefix) // This will not error out because it's the reverse operation of the one done above.
-		// key := path.String() + filterID
-		// cachedChildren := u.dirChildren.load(key)
-		
-		// TODO: revisit after now that the unified filter is implemented above.
-		// A real directory (not virtual) that is the direct parent of a path in the reqs set could have duplicate new and cached nodes.
-		// Examples: if it was /root/remote and the requests were
-		//   /root/remote/a/foo.go,/root/remote/a/bar.go then all new nodes for a are duplicates of cached ones.
-		//   /root/remote/a/foo.go,/root/remote/a/b/bar.go then one node for a would be duplicate (b is new and non-duplicate).
-		//   /root/remote/a/b/foo.go,/root/remote/a/b/bar.go then all new nodes for a are non-duplicates (no cached nodes).
-		// The children must deduplicated based on name, not digest, because the digest may have changed.
-		type named interface {
-			GetName() string
-			GetDigest() *repb.Digest
-		}
-		// seenChild := make(map[string]bool, len(children)+len(cachedChildren))
-		// childrenNodes := make([]proto.Message, 0, len(children)+len(cachedChildren))
 		childrenNodes := make([]proto.Message, 0, len(children))
-		// New children must override cached ones to ensure the tree is up to date.
 		for _, n := range children {
-			// seenChild[n.(named).GetName()] = true
 			childrenNodes = append(childrenNodes, n)
-			log_pathDigest[dir.Append(impath.MustRel(n.(named).GetName())).String()] = n.(named).GetDigest().String()
+			if log.V(4) {
+				logPathDigest[dir.Append(impath.MustRel(n.(named).GetName())).String()] = n.(named).GetDigest().String()
+			}
 		}
-		// for _, n := range cachedChildren {
-			// if seenChild[n.(named).GetName()] {
-				// continue
-			// }
-			// childrenNodes = append(childrenNodes, n)
-			// log_pathDigest[dir.Append(impath.MustRel(n.(named).GetName())).String()] = fmt.Sprintf("%+v", n)
-		// }
-		// log.V(3).Infof("[casng] upload.tree.phase2: dir=%s, key=%s, children=%d, cached=%d, new=%d", dir, key, len(childrenNodes), len(cachedChildren), len(children))
 
 		node, b, errDigest := digestDirectory(dir, childrenNodes)
 		if errDigest != nil {
@@ -547,7 +526,9 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 			return
 		}
 		dirReqs = append(dirReqs, UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest)})
-		log_pathDigest[dir.String()] = node.GetDigest().String() // TODO: logs
+		if log.V(4) {
+			logPathDigest[dir.String()] = node.GetDigest().String()
+		}
 		if dir.String() == execRoot.String() {
 			rootDigest = digest.NewFromProtoUnvalidated(node.Digest)
 			break
@@ -556,7 +537,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 		dirChildren[dir.Dir()][dir] = node
 	}
 
-	// Upload the blobs the shared ancestors.
+	// Upload the blobs of the shared ancestors.
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
 	if moreErr != nil {
 		err = moreErr
@@ -564,28 +545,35 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	stats.Add(moreStats)
 	uploaded = append(uploaded, moreUploaded...)
 
-	// TODO: logs
-	log_paths := make([]string, 0, len(remotePath))
-	for p := range remotePath {
-		log_paths = append(log_paths, p.String())
+	if log.V(4) {
+		logPaths := make([]string, 0, len(remotePath))
+		for p := range remotePath {
+			logPaths = append(logPaths, p.String())
+		}
+		sort.Strings(logPaths)
+		logDirs := make([]string, 0, len(dirChildren))
+		for p := range dirChildren {
+			logDirs = append(logDirs, p.String())
+		}
+		sort.Strings(logDirs)
+		logTreePaths := make([]string, 0, len(logPathDigest))
+		for p := range logPathDigest {
+			logTreePaths = append(logTreePaths, p)
+		}
+		sort.Strings(logTreePaths)
+		sb := strings.Builder{}
+		for _, p := range logTreePaths {
+			pp, _ := filepath.Rel(execRoot.String(), p)
+			sb.WriteString(fmt.Sprintf("  %s: %s\n", pp, logPathDigest[p]))
+		}
+		log.Infof("[casng] upload.tree.result:\n  root=%s\n  paths=%d\n%v\n  tree=%d\n%s", rootDigest, len(logPaths), strings.Join(logPaths, "\n"), len(logPathDigest), sb.String())
 	}
-	sort.Strings(log_paths)
-	log_dirs := make([]string, 0, len(dirChildren))
-	for p := range dirChildren {
-		log_dirs = append(log_dirs, p.String())
-	}
-	sort.Strings(log_dirs)
-	log_treePaths := make([]string, 0, len(log_pathDigest))
-	for p := range log_pathDigest {
-		log_treePaths = append(log_treePaths, p)
-	}
-	sort.Strings(log_treePaths)
-	sb := strings.Builder{}
-	for _, p := range log_treePaths {
-		pp, _ := filepath.Rel(execRoot.String(), p)
-		sb.WriteString(fmt.Sprintf("  %s: %s\n", pp, log_pathDigest[p]))
-	}
-	log.V(4).Infof("[casng] upload.tree.result:\n  root=%s\n  paths=%d\n%v\n  tree=%d\n%s", rootDigest, len(log_paths), strings.Join(log_paths, "\n"), len(log_pathDigest), sb.String())
 
 	return
+}
+
+// named is used to conveniently extract the file name and its digest from nodes for logging purposes.
+type named interface {
+	GetName() string
+	GetDigest() *repb.Digest
 }
