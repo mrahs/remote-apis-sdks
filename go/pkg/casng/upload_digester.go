@@ -448,6 +448,12 @@ func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.Dire
 //
 // If the returned err is not nil, both tokens are released before returning.
 func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *repb.FileNode, blb *blob, err error) {
+	// Always return a clone to ensure the cached version remains owned by the cache.
+	defer func() {
+		if node != nil {
+			node = proto.Clone(node).(*repb.FileNode)
+		}
+	}()
 	// Check the cache first. If not cached or claimed, claim it.
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
