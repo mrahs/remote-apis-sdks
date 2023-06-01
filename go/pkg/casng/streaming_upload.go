@@ -44,6 +44,9 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
+	"google.golang.org/grpc/status"
+
 	// "github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -390,40 +393,35 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 	var uploaded []digest.Digest
 	failed := make(map[digest.Digest]error)
 	digestRetryCount := make(map[digest.Digest]int64)
-	// TODO: uncomment when testing is done.
 
-	// ctxGrpc, ctxGrpcCancel := context.WithCancel(ctx)
-	// err := u.withTimeout(u.queryRPCCfg.Timeout, ctxGrpcCancel, func() error {
-	// 	return u.withRetry(ctxGrpc, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
-	// 		// This call can have partial failures. Only retry retryable failed requests.
-	// 		res, errCall := u.cas.BatchUpdateBlobs(ctxGrpc, req)
-	// 		reqErr := errCall // return this error if nothing is retryable.
-	// 		req.Requests = nil
-	// 		for _, r := range res.Responses {
-	// 			if errItem := status.FromProto(r.Status).Err(); errItem != nil {
-	// 				if retry.TransientOnly(errItem) {
-	// 					d := digest.NewFromProtoUnvalidated(r.Digest)
-	// 					req.Requests = append(req.Requests, bundle[d].req)
-	// 					digestRetryCount[d]++
-	// 					reqErr = errItem // return any retryable error if there is one.
-	// 					continue
-	// 				}
-	// 				// Permanent error.
-	// 				failed[digest.NewFromProtoUnvalidated(r.Digest)] = errItem
-	// 				continue
-	// 			}
-	// 			uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
-	// 		}
-	// 		if l := len(req.Requests); l > 0 {
-	// 			log.V(3).Infof("[casng] upload.batch.call.retry: len=%d", l)
-	// 		}
-	// 		return reqErr
-	// 	})
-	// })
-	var err error
-	for _, r := range req.Requests {
-		uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
-	}
+	ctxGrpc, ctxGrpcCancel := context.WithCancel(ctx)
+	err := u.withTimeout(u.queryRPCCfg.Timeout, ctxGrpcCancel, func() error {
+		return u.withRetry(ctxGrpc, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
+			// This call can have partial failures. Only retry retryable failed requests.
+			res, errCall := u.cas.BatchUpdateBlobs(ctxGrpc, req)
+			reqErr := errCall // return this error if nothing is retryable.
+			req.Requests = nil
+			for _, r := range res.Responses {
+				if errItem := status.FromProto(r.Status).Err(); errItem != nil {
+					if retry.TransientOnly(errItem) {
+						d := digest.NewFromProtoUnvalidated(r.Digest)
+						req.Requests = append(req.Requests, bundle[d].req)
+						digestRetryCount[d]++
+						reqErr = errItem // return any retryable error if there is one.
+						continue
+					}
+					// Permanent error.
+					failed[digest.NewFromProtoUnvalidated(r.Digest)] = errItem
+					continue
+				}
+				uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
+			}
+			if l := len(req.Requests); l > 0 {
+				log.V(3).Infof("[casng] upload.batch.call.retry: len=%d", l)
+			}
+			return reqErr
+		})
+	})
 	log.V(3).Infof("[casng] upload.batch.call.grpc_done: duration=%v, uploaded=%d, failed=%d, req_failed=%d", time.Since(startTime), len(uploaded), len(failed), len(bundle)-len(uploaded)-len(failed))
 
 	// Report uploaded.
@@ -631,8 +629,5 @@ func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats S
 		reader = bytes.NewReader(b.bytes)
 	}
 
-	// TODO: remove testing code and restore original.
-	_ = reader
-	return Stats{}, nil
-	// return u.writeBytes(ctx, name, reader, b.digest.Size, 0, true)
+	return u.writeBytes(ctx, name, reader, b.digest.Size, 0, true)
 }

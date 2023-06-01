@@ -283,6 +283,11 @@ func (ec *Context) ngUploadInputs() error {
 		if seenPath[absPath] {
 			continue
 		}
+		parent := absPath.Dir()
+		for !seenPath[parent] && parent.String() != execRoot.String() {
+			seenPath[parent] = true
+			parent = parent.Dir()
+		}
 
 		r := casng.UploadRequest{Bytes: p.Contents, Path: absPath, Exclude: filter}
 		// Ensure Bytes is not nil to avoid traversing Path.
@@ -299,6 +304,7 @@ func (ec *Context) ngUploadInputs() error {
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
 	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs...)
 	if err != nil {
+		log.V(4).Infof("[casng] %s %s> upload error %q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
 		return err
 	}
 	if log.V(5) {
