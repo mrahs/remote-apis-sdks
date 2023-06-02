@@ -394,33 +394,32 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 	failed := make(map[digest.Digest]error)
 	digestRetryCount := make(map[digest.Digest]int64)
 
-	ctxGrpc, ctxGrpcCancel := context.WithCancel(ctx)
-	err := u.withTimeout(u.queryRPCCfg.Timeout, ctxGrpcCancel, func() error {
-		return u.withRetry(ctxGrpc, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
-			// This call can have partial failures. Only retry retryable failed requests.
-			res, errCall := u.cas.BatchUpdateBlobs(ctxGrpc, req)
-			reqErr := errCall // return this error if nothing is retryable.
-			req.Requests = nil
-			for _, r := range res.Responses {
-				if errItem := status.FromProto(r.Status).Err(); errItem != nil {
-					if retry.TransientOnly(errItem) {
-						d := digest.NewFromProtoUnvalidated(r.Digest)
-						req.Requests = append(req.Requests, bundle[d].req)
-						digestRetryCount[d]++
-						reqErr = errItem // return any retryable error if there is one.
-						continue
-					}
-					// Permanent error.
-					failed[digest.NewFromProtoUnvalidated(r.Digest)] = errItem
+	err := u.withRetry(ctx, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
+		// This call can have partial failures. Only retry retryable failed requests.
+		ctx, ctxCancel := context.WithTimeout(ctx, u.batchRPCCfg.Timeout)
+		defer ctxCancel()
+		res, errCall := u.cas.BatchUpdateBlobs(ctx, req)
+		reqErr := errCall // return this error if nothing is retryable.
+		req.Requests = nil
+		for _, r := range res.Responses {
+			if errItem := status.FromProto(r.Status).Err(); errItem != nil {
+				if retry.TransientOnly(errItem) {
+					d := digest.NewFromProtoUnvalidated(r.Digest)
+					req.Requests = append(req.Requests, bundle[d].req)
+					digestRetryCount[d]++
+					reqErr = errItem // return any retryable error if there is one.
 					continue
 				}
-				uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
+				// Permanent error.
+				failed[digest.NewFromProtoUnvalidated(r.Digest)] = errItem
+				continue
 			}
-			if l := len(req.Requests); l > 0 {
-				log.V(3).Infof("[casng] upload.batch.call.retry: len=%d", l)
-			}
-			return reqErr
-		})
+			uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
+		}
+		if l := len(req.Requests); l > 0 {
+			log.V(3).Infof("[casng] upload.batch.call.retry: len=%d", l)
+		}
+		return reqErr
 	})
 	log.V(3).Infof("[casng] upload.batch.call.grpc_done: duration=%v, uploaded=%d, failed=%d, req_failed=%d", time.Since(startTime), len(uploaded), len(failed), len(bundle)-len(uploaded)-len(failed))
 

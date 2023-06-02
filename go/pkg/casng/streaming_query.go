@@ -256,12 +256,11 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 
 	var res *repb.FindMissingBlobsResponse
 	var err error
-	ctx, ctxCancel := context.WithCancel(ctx)
-	err = u.withTimeout(u.queryRPCCfg.Timeout, ctxCancel, func() error {
-		return u.withRetry(ctx, u.queryRPCCfg.RetryPredicate, u.queryRPCCfg.RetryPolicy, func() error {
-			res, err = u.cas.FindMissingBlobs(ctx, req)
-			return err
-		})
+	err = u.withRetry(ctx, u.queryRPCCfg.RetryPredicate, u.queryRPCCfg.RetryPolicy, func() error {
+		ctx, ctxCancel := context.WithTimeout(ctx, u.queryRPCCfg.Timeout)
+		defer ctxCancel()
+		res, err = u.cas.FindMissingBlobs(ctx, req)
+		return err
 	})
 
 	var missing []*repb.Digest

@@ -67,12 +67,11 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	req := &repb.FindMissingBlobsRequest{InstanceName: u.instanceName}
 	for _, batch := range batches {
 		req.BlobDigests = batch
-		ctx, ctxCancel := context.WithCancel(ctx)
-		errRes = u.withTimeout(u.queryRPCCfg.Timeout, ctxCancel, func() error {
-			return u.withRetry(ctx, u.queryRPCCfg.RetryPredicate, u.queryRPCCfg.RetryPolicy, func() error {
-				res, errRes = u.cas.FindMissingBlobs(ctx, req)
-				return errRes
-			})
+		errRes = u.withRetry(ctx, u.queryRPCCfg.RetryPredicate, u.queryRPCCfg.RetryPolicy, func() error {
+			ctx, ctxCancel := context.WithTimeout(ctx, u.queryRPCCfg.Timeout)
+			defer ctxCancel()
+			res, errRes = u.cas.FindMissingBlobs(ctx, req)
+			return errRes
 		})
 		if res == nil {
 			res = &repb.FindMissingBlobsResponse{}
@@ -198,11 +197,20 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 
 		req.Data = buf[:n]
 		req.FinishWrite = finish && errRead == io.EOF
-		errStream := u.withTimeout(u.streamRPCCfg.Timeout, ctxCancel, func() error {
-			return u.withRetry(ctx, u.streamRPCCfg.RetryPredicate, u.streamRPCCfg.RetryPolicy, func() error {
-				stats.TotalBytesMoved += n64
-				return stream.Send(req)
-			})
+		errStream := u.withRetry(ctx, u.streamRPCCfg.RetryPredicate, u.streamRPCCfg.RetryPolicy, func() error {
+			timer := time.NewTimer(u.streamRPCCfg.Timeout)
+			// Ensure the timer goroutine terminates if Send does not timeout.
+			success := make(chan struct{})
+			defer close(success)
+			go func() {
+				select {
+				case <-timer.C:
+					ctxCancel() // Cancel the stream to allow Send to return.
+				case <-success:
+				}
+			}()
+			stats.TotalBytesMoved += n64
+			return stream.Send(req)
 		})
 		if errStream != nil && errStream != io.EOF {
 			err = errors.Join(ErrGRPC, errStream, err)
@@ -386,7 +394,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 //	The paths are mutually exclusive.
 //
 // remotePrefix replaces localPrefix inside the merkle tree such that the server is only aware of remotePrefix.
-func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix, remotePrefix impath.Absolute, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
+func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
 	log.V(1).Infof("[casng] upload.tree: reqs=%d", len(reqs))
 	defer log.V(1).Infof("[casng] upload.tree.done")
 
@@ -402,9 +410,9 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	filterID := filter.String()
 	pathList := make([]string, 0, len(reqs))
 	// Cache the mapping between local and remote paths.
-	remotePath := make(map[impath.Absolute]impath.Absolute)
+	remotePath := make(map[impath.Absolute]impath.Absolute, len(reqs))
 	// Fast lookup for potentially shared paths between requests.
-	disallowedPath := make(map[impath.Absolute]bool)
+	disallowedPath := make(map[impath.Absolute]bool, len(reqs)*2) // over-allocate to avoid copying on growth.
 	for _, r := range reqs {
 		if r.Digest.Hash != "" {
 			err = fmt.Errorf("cannot create a tree with a pre-digesetd path: %q", r.Path)
@@ -420,12 +428,9 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 			return
 		}
 
-		rp, errIm := r.Path.ReplacePrefix(localPrefix, remotePrefix)
-		if errIm != nil {
-			err = fmt.Errorf("cannot create a tree with paths outside the local prefix %q: %q", localPrefix, r.Path)
-			return
-		}
-
+		rpStr := strings.TrimPrefix(r.Path.String(), execRoot.String()+string(filepath.Separator))
+		rpStr = strings.Replace(rpStr, workingDir.String(), remoteDir.String(), 1)
+		rp := impath.MustAbs(rpStr)
 		pathList = append(pathList, r.Path.String())
 		remotePath[r.Path] = rp
 		parent := r.Path.Dir()
@@ -452,7 +457,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	// This block creates a flattened tree of the paths in reqs rooted at execRoot.
 	// Each key is an absolute path to a node in the tree and its value is a list of absolute paths that any of them can be a key as well.
 	// Example: /a: [/a/b /a/c], /a/b: [/a/b/foo.go], /a/c: [/a/c/bar.go]
-	dirChildren := make(map[impath.Absolute]map[impath.Absolute]proto.Message)
+	dirChildren := make(map[impath.Absolute]map[impath.Absolute]proto.Message, len(disallowedPath))
 	for _, r := range reqs {
 		// Each request in reqs must correspond to a cached node.
 		node := u.Node(r)
@@ -469,7 +474,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 			parent = parent.Dir()
 			children := dirChildren[parent]
 			if children == nil {
-				children = make(map[impath.Absolute]proto.Message)
+				children = make(map[impath.Absolute]proto.Message, len(reqs)) // over-allocating to avoid copying on growth.
 				dirChildren[parent] = children
 			}
 			// If the parent already has this child, then no need to traverse up the tree again.
@@ -486,12 +491,12 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot, localPrefix
 	}
 
 	// This block generates directory nodes for shared ancestors starting from leaf nodes (DFS-style).
-	var dirReqs []UploadRequest
+	dirReqs := make([]UploadRequest, 0, len(dirChildren))
 	stack := make([]impath.Absolute, 0, len(dirChildren))
 	stack = append(stack, execRoot)
 	var logPathDigest map[string]string
 	if log.V(4) {
-		logPathDigest = make(map[string]string)
+		logPathDigest = make(map[string]string, len(dirChildren))
 	}
 	for len(stack) > 0 {
 		// Peek.

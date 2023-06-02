@@ -106,6 +106,7 @@ func (u *uploader) digester() {
 		if !u.walkThrottler.acquire(req.ctx) {
 			continue
 		}
+		// TODO: print duration as: duration=%d (%v)
 		log.V(3).Infof("[casng] upload.digester.req.walk_throttle: duration=%v, tag=%s", time.Since(startTime), req.tag)
 		wg := requesterWalkWg[req.tag]
 		if wg == nil {

@@ -315,6 +315,7 @@ func (ec *Context) ngUploadInputs() error {
 		specStr := formatInputSpec(ec.cmd.InputSpec, "    ")
 		msg := fmt.Sprintf("new=%s\n  old=%s\n  spec=%s\n  client_slo=%+v\n  ng_slo=%s", rootDg, rootDg2, specStr, ec.client.GrpcClient.TreeSymlinkOpts, slo)
 		if rootDg.Hash != rootDg2.Hash {
+			log.Infof("root digest mismatch:\n  %s", msg)
 			return fmt.Errorf("root digest mismatch:\n  %s", msg)
 		} else {
 			log.Infof("root digest match:\n  %s", msg)

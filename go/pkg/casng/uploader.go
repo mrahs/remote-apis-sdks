@@ -401,23 +401,6 @@ func (u *uploader) withRetry(ctx context.Context, predicate retry.ShouldRetry, p
 	return retry.WithPolicy(ctx, predicate, policy, fn)
 }
 
-func (u *uploader) withTimeout(timeout time.Duration, cancelFn context.CancelFunc, fn func() error) error {
-	// Success signal.
-	done := make(chan struct{})
-	defer close(done)
-	// Timeout signal.
-	timer := time.NewTimer(timeout)
-	go func() {
-		select {
-		case <-done:
-			timer.Stop()
-		case <-timer.C:
-		}
-		cancelFn()
-	}()
-	return fn()
-}
-
 func isExec(mode fs.FileMode) bool {
 	return mode&0100 != 0
 }
