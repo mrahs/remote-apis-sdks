@@ -49,7 +49,7 @@
 //
 //	Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
 //	Level 2 is used for internal functions that may be called per request.
-//	Level 3 is used for internal functions that may be called multiple times per request.
+//	Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
 //  Level 4 is used for messages with large objects.
 package casng
 
@@ -205,6 +205,7 @@ func (u *uploader) Node(req UploadRequest) proto.Message {
 //
 // The specified configs must be compatible with the capabilities of the server that the specified clients are connected to.
 // ctx must be cancelled after all batching calls have returned to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
+// gRPC timeouts are multiplied by retries. Batched RPCs are retried per batch. Streaming PRCs are retried per chunk.
 func NewBatchingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
@@ -220,6 +221,7 @@ func NewBatchingUploader(
 //
 // The specified configs must be compatible with the capabilities of the server which the specified clients are connected to.
 // ctx must be cancelled after all response channels have been closed to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
+// gRPC timeouts are multiplied by retries. Batched RPCs are retried per batch. Streaming PRCs are retried per chunk.
 func NewStreamingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
@@ -302,6 +304,7 @@ func newUploaderv2(
 
 		logBeatDoneCh: make(chan struct{}),
 	}
+	log.V(1).Infof("[casng] uploader.new: cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v", queryCfg, uploadCfg, streamCfg, ioCfg)
 
 	u.processorWg.Add(1)
 	go func() {

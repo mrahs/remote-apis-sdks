@@ -200,8 +200,8 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	// Forward the requests to the internal processor.
 	u.uploadSenderWg.Add(1)
 	go func() {
-		log.V(1).Infof("[casng] upload.stream_pipe.sender.start: tag=%s", tag)
-		defer log.V(1).Infof("[casng] upload.stream_pipe.sender.stop: tag=%s", tag)
+		contextmd.Infof(ctx, log.Level(1), "[casng] upload.stream_pipe.sender.start: tag=%s", tag)
+		defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.stream_pipe.sender.stop: tag=%s", tag)
 		defer u.uploadSenderWg.Done()
 		for r := range in {
 			r.tag = tag
@@ -216,8 +216,8 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	// Once the sender above sends a done-tagged request, the processor will send a done-tagged response.
 	u.receiverWg.Add(1)
 	go func() {
-		log.V(1).Infof("[casng] upload.stream_pipe.receiver.start: tag=%s", tag)
-		defer log.V(1).Infof("[casng] upload.stream_pipe.receiver.stop: tag=%s", tag)
+		contextmd.Infof(ctx, log.Level(1), "[casng] upload.stream_pipe.receiver.start: tag=%s", tag)
+		defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.stream_pipe.receiver.stop: tag=%s", tag)
 		defer u.receiverWg.Done()
 		defer close(ch)
 		for rawR := range resChan {
@@ -261,7 +261,7 @@ func (u *uploader) batcher() {
 			}
 			return
 		}
-		log.V(3).Infof("[casng] upload.batch.throttle: duration=%v", time.Since(startTime))
+		log.V(3).Infof("[casng] upload.batch.throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b uploadRequestBundle) {
@@ -326,7 +326,7 @@ func (u *uploader) batcher() {
 						if !u.ioThrottler.acquire(b.ctx) {
 							return b.ctx.Err()
 						}
-						log.V(3).Infof("[casng] upload.batch.file.io_throttle: duration=%v, tag=%s", time.Since(startTime), b.tag)
+						log.V(3).Infof("[casng] upload.batch.file.io_throttle.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), b.tag)
 						defer u.ioThrottler.release()
 						f, err := os.Open(b.path)
 						if err != nil {
@@ -378,11 +378,12 @@ func (u *uploader) batcher() {
 }
 
 func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBundle) {
-	log.V(3).Infof("[casng] upload.batch.call: len=%d", len(bundle))
-	startTime := time.Now()
-	defer func() {
-		log.V(3).Infof("[casng] upload.batch.call.done: duration=%v", time.Since(startTime))
-	}()
+	if log.V(3) {
+		startTime := time.Now()
+		defer func() {
+			log.Infof("[casng] upload.batch.call.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+		}()
+	}
 
 	req := &repb.BatchUpdateBlobsRequest{InstanceName: u.instanceName}
 	req.Requests = make([]*repb.BatchUpdateBlobsRequest_Request, 0, len(bundle))
@@ -421,7 +422,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		}
 		return reqErr
 	})
-	log.V(3).Infof("[casng] upload.batch.call.grpc_done: duration=%v, uploaded=%d, failed=%d, req_failed=%d", time.Since(startTime), len(uploaded), len(failed), len(bundle)-len(uploaded)-len(failed))
+	log.V(3).Infof("[casng] upload.batch.call.result: uploaded=%d, failed=%d, req_failed=%d", len(uploaded), len(failed), len(bundle)-len(uploaded)-len(failed))
 
 	// Report uploaded.
 	for _, d := range uploaded {
@@ -549,7 +550,7 @@ func (u *uploader) streamer() {
 				}(b)
 				continue
 			}
-			log.V(3).Infof("[casng] upload.stream.throttle: duration=%v, tag=%s", time.Since(startTime), b.tag)
+			log.V(3).Infof("[casng] upload.stream.throttle.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), b.tag)
 
 			var name string
 			if b.digest.Size >= u.ioCfg.CompressionSizeThreshold {
@@ -580,11 +581,12 @@ func (u *uploader) streamer() {
 }
 
 func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats Stats, err error) {
-	log.V(3).Infof("[casng] upload.stream.call: digest=%s, tag=%s", b.digest, b.tag)
-	startTime := time.Now()
-	defer func() {
-		log.V(3).Infof("[casng] upload.stream.call.done: duration=%v, digest=%s, tag=%s, err=%v", time.Since(startTime), b.digest, b.tag, err)
-	}()
+	if log.V(3) {
+		startTime := time.Now()
+		defer func() {
+			log.Infof("[casng] upload.stream.call.duration: start=%d, end=%d, digest=%s, tag=%s, err=%v", startTime.UnixNano(), time.Now().UnixNano(), b.digest, b.tag, err)
+		}()
+	}
 
 	var reader io.Reader
 
@@ -609,7 +611,7 @@ func (u *uploader) callStream(ctx context.Context, name string, b blob) (stats S
 		if !u.ioThrottler.acquire(ctx) {
 			return
 		}
-		log.V(3).Infof("[casng] upload.stream.io_throttle: duration=%v, tag=%s", time.Since(startTime), b.tag)
+		log.V(3).Infof("[casng] upload.stream.io_throttle.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), b.tag)
 		defer u.ioThrottler.release()
 
 		f, errOpen := os.Open(b.path)

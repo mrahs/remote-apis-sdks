@@ -228,7 +228,7 @@ func (ec *Context) ngUploadInputs() error {
 		log.V(1).Infof("[casng] %s %s> inputs already uploaded", cmdID, executionID)
 		return nil
 	}
-	execRoot, localPrefix, remotePrefix, err := cmdDirs(ec.cmd)
+	execRoot, workingDir, remoteWorkingDir, err := cmdDirs(ec.cmd)
 	if err != nil {
 		return err
 	}
@@ -237,8 +237,8 @@ func (ec *Context) ngUploadInputs() error {
 	if err != nil {
 		return err
 	}
-	log.V(2).Infof("[casng] %s %s> exec_root=%s, local_prefix=%s, remote_prefix=%s, symlink_opts=%s, inputs=%d, virtual_inputs=%d", cmdID, executionID, execRoot, localPrefix, remotePrefix, slo, len(ec.cmd.InputSpec.Inputs), len(ec.cmd.InputSpec.VirtualInputs))
-	log.V(4).Infof("[casng] %s %s> exec_root=%s, local_prefix=%s, remote_prefix=%s, symlink_opts=%s, inputs=%+v, virtual_inputs=%+v", cmdID, executionID, execRoot, localPrefix, remotePrefix, slo, ec.cmd.InputSpec.Inputs, ec.cmd.InputSpec.VirtualInputs)
+	log.V(2).Infof("[casng] %s %s> exec_root=%s, working_dir=%s, remote_working_dir=%s, symlink_opts=%s, inputs=%d, virtual_inputs=%d", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, slo, len(ec.cmd.InputSpec.Inputs), len(ec.cmd.InputSpec.VirtualInputs))
+	log.V(4).Infof("[casng] %s %s> exec_root=%s, working_dir=%s, remote_working_dir=%s, symlink_opts=%s, inputs=%+v, virtual_inputs=%+v", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, slo, ec.cmd.InputSpec.Inputs, ec.cmd.InputSpec.VirtualInputs)
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+len(ec.cmd.InputSpec.VirtualInputs))
 	seenPath := make(map[impath.Absolute]bool)
 	for _, p := range ec.cmd.InputSpec.Inputs {
@@ -257,7 +257,7 @@ func (ec *Context) ngUploadInputs() error {
 		seenPath[absPath] = true
 		// Mark ancestors as seen to ensure mutually exclusive paths.
 		parent := absPath.Dir()
-		for !seenPath[parent] && parent.String() != localPrefix.String() {
+		for !seenPath[parent] && parent.String() != execRoot.String() {
 			seenPath[parent] = true
 			parent = parent.Dir()
 		}
@@ -302,7 +302,7 @@ func (ec *Context) ngUploadInputs() error {
 		reqs = append(reqs, r)
 	}
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
-	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, localPrefix, remotePrefix, reqs...)
+	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, workingDir, remoteWorkingDir, reqs...)
 	if err != nil {
 		log.V(4).Infof("[casng] %s %s> upload error %q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
 		return err
@@ -403,16 +403,16 @@ func symlinkOpts(treeOpts *rc.TreeSymlinkOpts, cmdOpts command.SymlinkBehaviorTy
 	return slo
 }
 
-func cmdDirs(cmd *command.Command) (execRoot impath.Absolute, workingDir impath.Absolute, remoteWorkingDir impath.Absolute, err error) {
+func cmdDirs(cmd *command.Command) (execRoot impath.Absolute, workingDir impath.Relative, remoteWorkingDir impath.Relative, err error) {
 	execRoot, err = impath.Abs(cmd.ExecRoot)
 	if err != nil {
 		return
 	}
-	workingDir, err = impath.Abs(cmd.ExecRoot, cmd.WorkingDir)
+	workingDir, err = impath.Rel(cmd.WorkingDir)
 	if err != nil {
 		return
 	}
-	remoteWorkingDir, err = impath.Abs(cmd.ExecRoot, cmd.RemoteWorkingDir)
+	remoteWorkingDir, err = impath.Rel(cmd.RemoteWorkingDir)
 	if err != nil {
 		return
 	}

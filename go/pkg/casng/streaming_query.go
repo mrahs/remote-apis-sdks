@@ -180,7 +180,7 @@ func (u *uploader) queryProcessor() {
 			}
 			return
 		}
-		log.V(3).Infof("[casng] query.processor.throttle: duration=%v", time.Since(startTime))
+		log.V(3).Infof("[casng] query.processor.throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b missingBlobRequestBundle) {
@@ -238,11 +238,12 @@ func (u *uploader) queryProcessor() {
 // callMissingBlobs calls the gRPC endpoint and notifies requesters of the results.
 // It assumes ownership of the bundle argument.
 func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
-	log.V(3).Infof("[casng] query.call: len=%d", len(bundle))
-	startTime := time.Now()
-	defer func() {
-		log.V(3).Infof("[casng] query.call: duration=%v", time.Since(startTime))
-	}()
+	if log.V(3) {
+		startTime := time.Now()
+		defer func() {
+			log.Infof("[casng] query.call.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+		}()
+	}
 
 	digests := make([]*repb.Digest, 0, len(bundle))
 	for d := range bundle {
@@ -256,12 +257,14 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 
 	var res *repb.FindMissingBlobsResponse
 	var err error
+	startTime := time.Now()
 	err = u.withRetry(ctx, u.queryRPCCfg.RetryPredicate, u.queryRPCCfg.RetryPolicy, func() error {
 		ctx, ctxCancel := context.WithTimeout(ctx, u.queryRPCCfg.Timeout)
 		defer ctxCancel()
 		res, err = u.cas.FindMissingBlobs(ctx, req)
 		return err
 	})
+	log.V(3).Infof("[casng] query.call.grpc.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 
 	var missing []*repb.Digest
 	if res != nil {
@@ -271,7 +274,6 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 		err = errors.Join(ErrGRPC, err)
 		missing = digests
 	}
-	log.V(3).Infof("[casng] query.call.grpc_done: duration%v, missing=%d", time.Since(startTime), len(missing))
 
 	// Report missing.
 	for _, dpb := range missing {

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	log "github.com/golang/glog"
 	"github.com/pborman/uuid"
 )
@@ -38,7 +39,7 @@ type pubsub struct {
 // A slow subscriber affects all other subscribers that are waiting for the same message.
 func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 	t := tag(uuid.New())
-	log.V(3).Infof("[casng] pubsub.sub: tag=%s", t)
+	contextmd.Infof(ctx, log.Level(4), "[casng] pubsub.sub: tag=%s", t)
 
 	// Serialize this block to avoid concurrent map-read-write errors.
 	ps.mu.Lock()
@@ -54,7 +55,7 @@ func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 		defer ps.wg.Done()
 		<-ctx.Done()
 
-		log.V(3).Infof("[casng] pubsub.unsub: tag=%s", t)
+		contextmd.Infof(ctx, log.Level(4), "[casng] pubsub.unsub: tag=%s", t)
 
 		// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
 		ps.mu.Lock()

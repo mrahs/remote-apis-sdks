@@ -26,7 +26,7 @@ var (
 )
 
 // Absolute represents an immutable absolute path.
-// The zero value is system root, which is `/` on Unix and `C:\` on Windows.
+// The zero value is Root.
 type Absolute struct {
 	path string
 }
@@ -78,22 +78,12 @@ func (p Relative) String() string {
 
 // Append is a convenient method to join additional elements to this path.
 func (p Absolute) Append(elements ...Relative) Absolute {
-	paths := appendRels(p.String(), elements)
-	path := strings.Join(paths, string(filepath.Separator))
-	if dirty(path) {
-		path = filepath.Clean(path)
-	}
-	return Absolute{path: path}
+	return Absolute{path: clean(p.String(), elements)}
 }
 
 // Append is a convenient method to join additional elements to this path.
 func (p Relative) Append(elements ...Relative) Relative {
-	paths := appendRels(p.String(), elements)
-	path := strings.Join(paths, string(filepath.Separator))
-	if dirty(path) {
-		path = filepath.Clean(path)
-	}
-	return Relative{path: path}
+	return Relative{path: clean(p.String(), elements)}
 }
 
 // Abs creates a new absolute and clean path from the specified elements.
@@ -101,7 +91,7 @@ func (p Relative) Append(elements ...Relative) Relative {
 // If the specified elements do not join to a valid absolute path, ErrNotAbsolute is returned.
 // If the joined path does not contain consecutive separators or dot elements, filepath.Clean is not called.
 func Abs(elements ...string) (Absolute, error) {
-	p := strings.Join(elements, string(filepath.Separator))
+	p := strings.Join(elements, string(os.PathSeparator))
 	if !filepath.IsAbs(p) {
 		return zeroAbs, errors.Join(ErrNotAbsolute, fmt.Errorf("path %q", p))
 	}
@@ -126,14 +116,15 @@ func MustAbs(elements ...string) Absolute {
 //
 // If the specified elements do not join to a valid relative path, ErrNotRelative is returned.
 func Rel(elements ...string) (Relative, error) {
-	p := strings.Join(elements, string(filepath.Separator))
+	p := strings.Join(elements, string(os.PathSeparator))
 	if filepath.IsAbs(p) {
 		return zeroRel, errors.Join(ErrNotRelative, fmt.Errorf("path %q", p))
 	}
+	// Exclude valid leading dot elements before calling dirty.
 	j := 0
 	for i, r := range p {
 		j = i
-		if r != '.' && r != filepath.Separator {
+		if r != '.' && !os.IsPathSeparator(uint8(r)) {
 			break
 		}
 	}
@@ -154,18 +145,15 @@ func MustRel(elements ...string) Relative {
 	return p
 }
 
-// Descendant returns a relative path to the specified base path such that
-// when joined together with the base using filepath.Join(base, path), the result
-// is lexically equivalent to the specified target path.
+// Descendant returns a relative path to the base such that when joined together with base using
+// filepath.Join(base, path), the result is lexically equivalent to target.
 //
-// The returned error is nil, ErrNotRelative, or ErrNotDescendant.
-// ErrNotRelative indicates that the target cannot be made relative to base.
-// ErrNotDescendant indicates the target is not a descendant of base, even though it is relative.
+// The returned error is nil or ErrNotDescendant.
 func Descendant(base Absolute, target Absolute) (Relative, error) {
 	b := base.String()
 	// If not the root itself (unix), add a separator.
-	if b[len(b)-1] != filepath.Separator {
-		b += string(filepath.Separator)
+	if !os.IsPathSeparator(b[len(b)-1]) {
+		b += string(os.PathSeparator)
 	}
 	rel := strings.TrimPrefix(target.String(), b)
 	if rel == target.String() {
@@ -174,20 +162,6 @@ func Descendant(base Absolute, target Absolute) (Relative, error) {
 		return zeroRel, errors.Join(ErrNotDescendant, fmt.Errorf("target %q is not a descendant of base %q", target, base))
 	}
 	return Relative{path: rel}, nil
-}
-
-func appendRels(base string, elements []Relative) []string {
-	paths := make([]string, 0, len(elements)+1)
-	if base != "" {
-		paths = append(paths, base)
-	}
-	for _, p := range elements {
-		if p.String() == "" {
-			continue
-		}
-		paths = append(paths, p.String())
-	}
-	return paths
 }
 
 // fastDir assumes all paths are clean and avoids calling filepath.Clean.
@@ -203,25 +177,43 @@ func fastDir(path string) string {
 		// must be UNC
 		return vol
 	}
-	if dir[len(dir)-1] == os.PathSeparator {
+	if os.IsPathSeparator(dir[len(dir)-1]) {
 		dir = dir[:len(dir)-1]
 	}
 	return vol + dir
 }
 
-// dirty return true if path contains consecutive separators or dot elements.
+// clean returns a clean path from provided parts.
+func clean(base string, elements []Relative) string {
+	paths := make([]string, 0, len(elements)+1)
+	if base != "" {
+		paths = append(paths, base)
+	}
+	for _, p := range elements {
+		if p.String() == "" {
+			continue
+		}
+		paths = append(paths, p.String())
+	}
+	path := strings.Join(paths, string(os.PathSeparator))
+	if dirty(path) {
+		path = filepath.Clean(path)
+	}
+	return path
+}
+
+// dirty return true if path contains consecutive separators or a dot elements (e.g. . or ..).
 func dirty(path string) bool {
 	dotsElm := true
 	lastRune := '\000'
 	for _, r := range path {
-		switch r {
-		case filepath.Separator:
+		switch {
+		case os.IsPathSeparator(uint8(r)):
 			if r == lastRune || dotsElm {
 				return true
 			}
 			dotsElm = true
-		case '.':
-		default:
+		case r != '.':
 			dotsElm = false
 		}
 		lastRune = r

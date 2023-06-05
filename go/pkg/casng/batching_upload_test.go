@@ -502,10 +502,9 @@ func TestUpload_BatchingTree(t *testing.T) {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
 	tmp := makeFs(t, map[string][]byte{"wd/a/b/c/foo.go": []byte("foo"), "wd/a/b/bar.go": []byte("bar"), "wd/e/f/baz.go": []byte("baz")})
-	rootDigest, _, _, err := u.UploadTree(ctx, impath.MustAbs(tmp), impath.MustAbs(tmp, "wd"), impath.MustAbs(tmp, "rwd"),
+	rootDigest, _, _, err := u.UploadTree(ctx, impath.MustAbs(tmp), impath.MustRel("wd"), impath.MustRel("rwd"),
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/c/foo.go")},
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/bar.go")},
-		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b")},
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/e/f/baz.go")},
 	)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
@@ -31,7 +32,7 @@ import (
 // In other words, if an error is returned, any digest that is not in the returned slice is not missing.
 // If no error is returned, the returned slice contains all the missing digests.
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
-	log.V(1).Infof("[casng] batch.query: len=%d", len(digests))
+	contextmd.Infof(ctx, log.Level(1), "[casng] batch.query: len=%d", len(digests))
 	if len(digests) == 0 {
 		return nil, nil
 	}
@@ -57,7 +58,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	if len(batches) == 0 {
 		return nil, nil
 	}
-	log.V(1).Infof("[casng] batch.query.deduped: len=%d", len(dgSet))
+	contextmd.Infof(ctx, log.Level(1), "[casng] batch.query.deduped: len=%d", len(dgSet))
 
 	// Call remote.
 	missing := make([]digest.Digest, 0, len(dgSet))
@@ -84,7 +85,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			missing = append(missing, digest.NewFromProtoUnvalidated(d))
 		}
 	}
-	log.V(1).Infof("[casng] batch.query.done: missing=%d", len(missing))
+	contextmd.Infof(ctx, log.Level(1), "[casng] batch.query.done: missing=%d", len(missing))
 
 	if err != nil {
 		err = errors.Join(ErrGRPC, err)
@@ -104,22 +105,22 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
 // If an error was returned, the returned stats may indicate that all the bytes were sent, but that does not guarantee that the server committed all of them.
 func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64) (Stats, error) {
-	log.V(1).Infof("[casng] upload.write_bytes: name=%s, size=%d, offset=%d, finish=%t", name, size, offset)
 	return u.writeBytes(ctx, name, r, size, offset, true)
 }
 
 // WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
 func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size int64, offset int64) (Stats, error) {
-	log.V(1).Infof("[casng] upload.write_bytes_partial: name=%s, size=%d, offset=%d, finish=%t", name, size, offset)
 	return u.writeBytes(ctx, name, r, size, offset, false)
 }
 
 func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error) {
-	log.V(2).Infof("[casng] upload.write_bytes.start: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
-	startTime := time.Now()
-	defer func() {
-		log.V(2).Infof("[casng] upload.write_bytes.done: duration=%v, name=%s, size=%d, offset=%d, finish=%t", time.Since(startTime), name, size, offset, finish)
-	}()
+	contextmd.Infof(ctx, log.Level(1), "[casng] upload.write_bytes: name=%s, size=%d, offset=%d, finish=%t", name, size, offset)
+	if log.V(3) {
+		startTime := time.Now()
+		defer func() {
+			log.Infof("[casng] upload.write_bytes.duration: start=%d, end=%d, name=%s, size=%d", startTime.UnixNano(), time.Now().UnixNano(), name, size)
+		}()
+	}
 
 	var stats Stats
 	if !u.streamThrottle.acquire(ctx) {
@@ -136,7 +137,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	var encWg sync.WaitGroup
 	var withCompression bool // Used later to ensure the pipe is closed.
 	if size >= u.ioCfg.CompressionSizeThreshold {
-		log.V(2).Infof("[casng] upload.write_bytes.compressing: name=%s, size=%d", name, size)
+		contextmd.Infof(ctx, log.Level(1), "[casng] upload.write_bytes.compressing: name=%s, size=%d", name, size)
 		withCompression = true
 		pr, pw := io.Pipe()
 		// Closing pr always returns a nil error, but also sends ErrClosedPipe to pw.
@@ -306,8 +307,8 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, Stats, error) {
-	log.V(1).Infof("[casng] upload: %d requests", len(reqs))
-	defer log.V(1).Infof("[casng] upload.done")
+	contextmd.Infof(ctx, log.Level(1), "[casng] upload: %d requests", len(reqs))
+	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.done")
 
 	var stats Stats
 
@@ -330,7 +331,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	if err != nil {
 		return nil, stats, err
 	}
-	log.V(1).Infof("[casng] upload: missing=%d, undigested=%d", len(missing), len(undigested))
+	contextmd.Infof(ctx, log.Level(1), "[casng] upload: missing=%d, undigested=%d", len(missing), len(undigested))
 
 	reqs = undigested
 	for _, d := range missing {
@@ -344,11 +345,11 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		stats.DigestCount += 1
 	}
 	if len(reqs) == 0 {
-		log.V(1).Info("[casng] upload: nothing is missing")
+		contextmd.Infof(ctx, log.Level(1), "[casng] upload: nothing is missing")
 		return nil, stats, nil
 	}
 
-	log.V(1).Infof("[casng] upload: uploading %d blobs", len(reqs))
+	contextmd.Infof(ctx, log.Level(1), "[casng] upload: uploading %d blobs", len(reqs))
 	ch := make(chan UploadRequest)
 	resCh := u.streamPipe(ctx, ch)
 
@@ -357,8 +358,8 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		defer close(ch) // let the streamer terminate.
 		defer u.clientSenderWg.Done()
 
-		log.V(1).Info("[casng] upload.sender.start")
-		defer log.V(1).Info("[casng] upload.sender.stop")
+		contextmd.Infof(ctx, log.Level(1), "[casng] upload.sender.start")
+		defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.sender.stop")
 
 		for _, r := range reqs {
 			r.ctx = ctx
@@ -395,8 +396,8 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 //
 // remotePrefix replaces localPrefix inside the merkle tree such that the server is only aware of remotePrefix.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
-	log.V(1).Infof("[casng] upload.tree: reqs=%d", len(reqs))
-	defer log.V(1).Infof("[casng] upload.tree.done")
+	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree: reqs=%d", len(reqs))
+	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree.done")
 
 	if len(reqs) == 0 {
 		return
@@ -429,12 +430,14 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		}
 
 		rpStr := strings.TrimPrefix(r.Path.String(), execRoot.String()+string(filepath.Separator))
-		rpStr = strings.Replace(rpStr, workingDir.String(), remoteDir.String(), 1)
-		rp := impath.MustAbs(rpStr)
+		if strings.HasPrefix(rpStr, workingDir.String()) {
+			rpStr = strings.Replace(rpStr, workingDir.String(), remoteWorkingDir.String(), 1)
+		}
+		rp := execRoot.Append(impath.MustRel(rpStr))
 		pathList = append(pathList, r.Path.String())
 		remotePath[r.Path] = rp
 		parent := r.Path.Dir()
-		for !disallowedPath[parent] && parent.String() != localPrefix.String() {
+		for !disallowedPath[parent] && parent.String() != workingDir.String() {
 			disallowedPath[parent] = true
 			parent = parent.Dir()
 		}

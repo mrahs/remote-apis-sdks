@@ -642,8 +642,8 @@ func (c *Client) ngUploadPredigested(ctx context.Context, entries []*uploadinfo.
 	return uploaded, stats.TotalBytesMoved, err
 }
 
-func (c *Client) NgUploadTree(ctx context.Context, execRoot, localPrefix, remotePrefix impath.Absolute, reqs ...casng.UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats casng.Stats, err error) {
-	return c.ngCasUploader.UploadTree(ctx, execRoot, localPrefix, remotePrefix, reqs...)
+func (c *Client) NgUploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...casng.UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats casng.Stats, err error) {
+	return c.ngCasUploader.UploadTree(ctx, execRoot, workingDir, remoteWorkingDir, reqs...)
 }
 
 func (c *Client) NgUpload(ctx context.Context, reqs ...casng.UploadRequest) ([]digest.Digest, casng.Stats, error) {
