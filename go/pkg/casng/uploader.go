@@ -348,6 +348,8 @@ func (u *uploader) close() {
 	// The context must be cancelled first.
 	<-u.ctx.Done()
 
+	startTime := time.Now()
+
 	// 1st, batching API senders should stop producing requests.
 	// These senders are terminated by the user.
 	log.V(1).Infof("[casng] uploader: waiting for client senders")
@@ -383,6 +385,7 @@ func (u *uploader) close() {
 	u.workerWg.Wait()
 
 	close(u.logBeatDoneCh)
+	log.V(3).Infof("[casng] upload.close.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 }
 
 func (u *uploader) logBeat() {

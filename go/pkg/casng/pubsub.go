@@ -103,6 +103,12 @@ func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
 
 // pubN is like pub, but delivers the message to no more than n subscribers. The tags of the subscribers that got the message are returned.
 func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
+	if log.V(3) {
+		startTime := time.Now()
+		defer func() {
+			log.Infof("[casng] pubsub.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+		}()
+	}
 	if len(tags) == 0 {
 		log.Warning("[casng] pubsub.pub: called without tags")
 		log.V(4).Infof("[casng] pubsub.pub: called without tags: msg=%v", m)
@@ -115,7 +121,7 @@ func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 	defer ps.mu.RUnlock()
 
 	log.V(4).Infof("[casng] pubsub.pub.msg: type=%[1]T, value=%[1]v", m)
-	var toRetry []tag
+	toRetry := make([]tag, 0, len(tags))
 	var received []tag
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()

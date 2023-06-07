@@ -336,17 +336,13 @@ func (c *Client) ComputeMerkleTree(execRoot, workingDir, remoteWorkingDir string
 
 func buildTree(files map[string]*fileSysNode) (*treeNode, error) {
 	root := &treeNode{}
-	paths := make(map[string]struct{})
 	for name, fn := range files {
 		segs := strings.Split(name, string(filepath.Separator))
 		// The last segment is the filename, so split it off.
 		segs, base := segs[0:len(segs)-1], segs[len(segs)-1]
 
 		node := root
-		var p string
 		for _, s := range segs {
-			p += s + "/"
-			paths[p] = struct{}{}
 			if node.dirs == nil {
 				node.dirs = make(map[string]*treeNode)
 			}
@@ -379,22 +375,18 @@ func buildTree(files map[string]*fileSysNode) (*treeNode, error) {
 			node.symlinks[base] = fn.symlink
 		}
 	}
-	pathsSlice := make([]string, 0, len(paths))
-	for p := range paths {
-		pathsSlice = append(pathsSlice, p)
-	}
-	sort.Slice(pathsSlice, func(i, j int) bool { return pathsSlice[i] < pathsSlice[j] })
-	log.V(4).Infof("ExtraPaths=%d\n%v", len(pathsSlice), strings.Join(pathsSlice, "\n"))
 	return root, nil
 }
 
+// If tree is not nil, it will be populated with a flattened tree of path->digest.
+// prefix should always be provided as an empty string which will be used to accumolate path prefixes during recursion.
 func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]digest.Digest) (root digest.Digest, blobs map[digest.Digest]*uploadinfo.Entry, err error) {
 	dir := &repb.Directory{}
 	blobs = make(map[digest.Digest]*uploadinfo.Entry)
 
 	var path string
 	for name, child := range t.dirs {
-		if log.V(4) {
+		if tree != nil {
 			path = prefix + "/" + name
 		}
 
@@ -403,7 +395,7 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 			return digest.Empty, nil, err
 		}
 
-		if log.V(4) {
+		if tree != nil {
 			tree[path] = dg
 		}
 
@@ -416,7 +408,7 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 
 	for name, fn := range t.files {
 		dg := fn.ue.Digest
-		if log.V(4) {
+		if tree != nil {
 			path := prefix + "/" + name
 			tree[path] = dg
 		}
@@ -438,7 +430,7 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 		return digest.Empty, nil, err
 	}
 	dg := ue.Digest
-	if log.V(4) {
+	if tree != nil {
 		tree[prefix] = dg
 	}
 	blobs[dg] = ue

@@ -47,6 +47,7 @@ func (u *uploader) digester() {
 
 	requesterWalkWg := make(map[tag]*sync.WaitGroup)
 	for req := range u.digesterCh {
+		startTime := time.Now()
 		// If the requester will not be sending any further requests, wait for in-flight walks from previous requests
 		// then tell the dispatcher to forward the signal once all dispatched blobs are done.
 		if req.done {
@@ -56,6 +57,8 @@ func (u *uploader) digester() {
 				log.V(2).Infof("[casng] upload.digester.req.done: no pending walks for tag=%s", req.tag)
 				// Let the dispatcher know that this requester is done.
 				u.dispatcherBlobCh <- blob{tag: req.tag, done: true}
+				// Covers waiting on the dispatcher.
+				log.V(3).Infof("[casng] upload.digester.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
 				continue
 			}
 			// Remove the wg to ensure a new one is used if the requester decides to send more requests.
@@ -98,16 +101,19 @@ func (u *uploader) digester() {
 			if len(req.Bytes) > 0 {
 				u.dispatcherBlobCh <- blob{digest: req.Digest, bytes: req.Bytes, path: req.Path.String(), tag: req.tag, ctx: req.ctx}
 			}
+			// Covers waiting on the node cache and waiting on the dispatcher.
+			log.V(3).Infof("[casng] upload.digester.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
 			continue
 		}
 
 		log.V(3).Infof("[casng] upload.digester.req: path=%s, filter=%s, slo=%s, tag=%s", req.Path, req.Exclude, req.SymlinkOptions, req.tag)
 		// Wait if too many walks are in-flight.
-		startTime := time.Now()
+		startTimeThrottle := time.Now()
 		if !u.walkThrottler.acquire(req.ctx) {
+			log.V(3).Infof("[casng] upload.digester.walk_throttle.duration: start=%d, end=%d, tag=%s", startTimeThrottle.UnixNano(), time.Now().UnixNano(), req.tag)
 			continue
 		}
-		log.V(3).Infof("[casng] upload.digester.req.walk_throttle.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
+		log.V(3).Infof("[casng] upload.digester.walk_throttle.duration: start=%d, end=%d, tag=%s", startTimeThrottle.UnixNano(), time.Now().UnixNano(), req.tag)
 		wg := requesterWalkWg[req.tag]
 		if wg == nil {
 			wg = &sync.WaitGroup{}
@@ -128,10 +134,9 @@ func (u *uploader) digester() {
 func (u *uploader) digest(req UploadRequest) {
 	walkId := uuid.New()
 	if log.V(3) {
-
 		startTime := time.Now()
 		defer func() {
-			log.V(3).Infof("[casng] upload.digester.duration: start=%d, end=%d, root=%s, tag=%s, walk_id=%s", startTime.UnixNano(), time.Now().UnixNano(), req.Path, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digester.digest.duration: start=%d, end=%d, root=%s, tag=%s, walk_id=%s", startTime.UnixNano(), time.Now().UnixNano(), req.Path, req.tag, walkId)
 		}()
 	}
 
@@ -187,7 +192,7 @@ func (u *uploader) digest(req UploadRequest) {
 				return walker.Defer, true
 			}
 
-			node, _ := m.(proto.Message) // Guaranteed assertion because the cache is an internal field.
+			node := m.(proto.Message) // Guaranteed assertion because the cache is an internal field.
 			log.V(3).Infof("[casng] upload.digester.visit.cached: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
 
 			// Forward it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
@@ -206,6 +211,9 @@ func (u *uploader) digest(req UploadRequest) {
 				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
+			default:
+				log.Errorf("[casng] cached node has unexpected type: %T", node)
+				return walker.SkipPath, false
 			}
 
 			return walker.SkipPath, true
@@ -517,7 +525,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *rep
 		if !u.ioLargeThrottler.acquire(u.ctx) {
 			return nil, nil, u.ctx.Err()
 		}
-		log.V(3).Infof("[casng] upload.digester.file.io_large_throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+		log.V(3).Infof("[casng] upload.digester.io_large_throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 		defer func() {
 			// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 			if blb == nil || blb.reader == nil {
@@ -530,7 +538,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *rep
 	if !u.ioThrottler.acquire(u.ctx) {
 		return nil, nil, u.ctx.Err()
 	}
-	log.V(3).Infof("[casng] upload.digester.file.io_throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("[casng] upload.digester.io_throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 	defer func() {
 		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 		if blb == nil || blb.reader == nil {

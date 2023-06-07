@@ -180,7 +180,7 @@ func (u *uploader) queryProcessor() {
 			}
 			return
 		}
-		log.V(3).Infof("[casng] query.processor.throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+		log.V(3).Infof("[casng] query.throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b missingBlobRequestBundle) {
@@ -202,6 +202,7 @@ func (u *uploader) queryProcessor() {
 			if !ok {
 				return
 			}
+			startTime := time.Now()
 
 			log.V(3).Infof("[casng] query.processor.req: digest=%s, tag=%s, bundle=%d", req.digest, req.tag, len(bundle))
 			dSize := proto.Size(req.digest.ToProto())
@@ -212,6 +213,8 @@ func (u *uploader) queryProcessor() {
 					Digest: req.digest,
 					Err:    ErrOversizedItem,
 				}, req.tag)
+				// Covers waiting on subscribers.
+				log.V(3).Infof("[casng] query.pub.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 				continue
 			}
 
@@ -238,13 +241,6 @@ func (u *uploader) queryProcessor() {
 // callMissingBlobs calls the gRPC endpoint and notifies requesters of the results.
 // It assumes ownership of the bundle argument.
 func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobRequestBundle) {
-	if log.V(3) {
-		startTime := time.Now()
-		defer func() {
-			log.Infof("[casng] query.call.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
-		}()
-	}
-
 	digests := make([]*repb.Digest, 0, len(bundle))
 	for d := range bundle {
 		digests = append(digests, d.ToProto())
@@ -264,7 +260,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 		res, err = u.cas.FindMissingBlobs(ctx, req)
 		return err
 	})
-	log.V(3).Infof("[casng] query.call.grpc.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("[casng] query.grpc.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 
 	var missing []*repb.Digest
 	if res != nil {
@@ -275,6 +271,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 		missing = digests
 	}
 
+	startTime = time.Now()
 	// Report missing.
 	for _, dpb := range missing {
 		d := digest.NewFromProtoUnvalidated(dpb)
@@ -295,4 +292,5 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 			Err: err,
 		}, bundle[d]...)
 	}
+	log.V(3).Infof("[casng] query.pub.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 }

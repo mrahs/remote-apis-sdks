@@ -118,7 +118,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
-			log.Infof("[casng] upload.write_bytes.duration: start=%d, end=%d, name=%s, size=%d", startTime.UnixNano(), time.Now().UnixNano(), name, size)
+			log.Infof("[casng] upload.write_bytes.duration: start=%d, end=%d, name=%s, size=%d, chunk_size=%d", startTime.UnixNano(), time.Now().UnixNano(), name, size, u.ioCfg.BufferSize)
 		}()
 	}
 

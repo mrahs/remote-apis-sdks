@@ -357,11 +357,10 @@ func (ec *Context) ngUploadInputs() error {
 	}
 	acDg := digest.NewFromBlob(acBlb)
 	log.V(1).Infof("[casng] %s %s> action digest: %s", cmdID, executionID, acDg)
-	// missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx)// TODO: confirm those are cache hits in a fully cached build which would verify that the digestion is correct.
-
-	// casng.UploadRequest{Bytes: rootBytes, Digest: rootDg},
-	// casng.UploadRequest{Bytes: acBlb, Digest: acDg},
-	// casng.UploadRequest{Bytes: cmdBlb, Digest: cmdDg},
+	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx,
+		casng.UploadRequest{Bytes: acBlb, Digest: acDg},
+		casng.UploadRequest{Bytes: cmdBlb, Digest: cmdDg},
+	)
 
 	if err != nil {
 		return err
