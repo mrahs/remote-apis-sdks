@@ -16,11 +16,10 @@ func TestMissingBlobs_StreamingAbort(t *testing.T) {
 	}}
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	ctxCancel()
-	u, err := casng.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
+	_, err := casng.NewStreamingUploader(ctx, fCas, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
-	u.Wait()
 }
 
 func TestMissingBlobs_Streaming(t *testing.T) {
@@ -42,18 +41,13 @@ func TestMissingBlobs_Streaming(t *testing.T) {
 		close(reqChan)
 	}()
 
-	// It's not necessary to receive in a separate goroutine, but this allows
-	// for testing the Wait() as well, which should block until all concurrent code is properly terminated.
-	go func() {
-		defer ctxCancel()
-		for r := range ch {
-			if r.Err != nil {
-				t.Errorf("unexpected error: %v", r.Err)
-			}
-			if r.Missing {
-				t.Errorf("unexpected missing: %s", r.Digest.Hash)
-			}
+	defer ctxCancel()
+	for r := range ch {
+		if r.Err != nil {
+			t.Errorf("unexpected error: %v", r.Err)
 		}
-	}()
-	u.Wait()
+		if r.Missing {
+			t.Errorf("unexpected missing: %s", r.Digest.Hash)
+		}
+	}
 }

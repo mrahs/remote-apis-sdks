@@ -13,8 +13,6 @@
 // The termination sequence is as follows:
 //   user cancels the batching or the streaming context, not the uploader's context, and closes input streaming channels.
 //       cancelling the context triggers aborting in-flight requests.
-//   user waits for the termination signal: return from batching uploader or response channel closed from streaming uploader.
-//       this ensures the whole pipeline is drained properly.
 //   user cancels uploader's context: cancels pending digestions and gRPC processors blocked on throttlers.
 //   client senders (top level) terminate.
 //   the digester channel is closed, and a termination signal is sent to the dispatcher.
@@ -27,6 +25,8 @@
 //   the dispatcher's receiver terminates.
 //   the dispatcher terminates and propagates the signal to the batcher and the streamer.
 //   the batcher and the streamer terminate.
+//   user waits for the termination signal: return from batching uploader or response channel closed from streaming uploader.
+//       this ensures the whole pipeline is drained properly.
 
 package casng
 

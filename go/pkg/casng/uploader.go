@@ -171,17 +171,10 @@ type uploader struct {
 	queryPubSub      *pubsub                 // Fan-out broker for query responses.
 	uploadPubSub     *pubsub                 // Fan-out broker for upload responses.
 
-	// The reference is used internally to terminate request workers or prevent them from running on a terminated uploader.
+	// ctx is used to make unified calls and terminate saturated throttlers and in-flight workers.
 	ctx context.Context
-	// wg is used to wait for the uploader to fully shutdown.
-	wg sync.WaitGroup
 
 	logBeatDoneCh chan struct{}
-}
-
-// Wait blocks until the context is cancelled and all resources held by the uploader are released.
-func (u *uploader) Wait() {
-	u.wg.Wait()
 }
 
 // Node looks up a node from the node cache which is populated during digestion.
@@ -210,7 +203,7 @@ func NewBatchingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
 ) (*BatchingUploader, error) {
-	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
+	uploader, err := newUploader(ctx, cas, byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -226,14 +219,14 @@ func NewStreamingUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
 ) (*StreamingUploader, error) {
-	uploader, err := newUploaderv2(ctx, cas, byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
+	uploader, err := newUploader(ctx, cas, byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
 	}
 	return &StreamingUploader{uploader: uploader}, nil
 }
 
-func newUploaderv2(
+func newUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
 ) (*uploader, error) {

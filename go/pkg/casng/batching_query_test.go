@@ -79,6 +79,7 @@ func TestQuery_Batching(t *testing.T) {
 			t.Parallel()
 			log.Infof("test: %s", test.name)
 			ctx, ctxCancel := context.WithCancel(context.Background())
+			defer ctxCancel()
 			u, err := casng.NewBatchingUploader(ctx, test.cas, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
@@ -95,8 +96,6 @@ func TestQuery_Batching(t *testing.T) {
 			if diff := cmp.Diff(test.wantDigests, missing); diff != "" {
 				t.Errorf("missing mismatch, (-want +got): %s", diff)
 			}
-			ctxCancel()
-			u.Wait()
 		})
 	}
 	log.Flush()

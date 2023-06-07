@@ -455,6 +455,7 @@ func TestUpload_Batching(t *testing.T) {
 				test.ioCfg.OpenLargeFilesLimit = 1
 			}
 			ctx, ctxCancel := context.WithCancel(context.Background())
+			defer ctxCancel()
 			u, err := casng.NewBatchingUploader(ctx, test.cc, test.bsc, "", rpcCfg, *test.batchRPCCfg, rpcCfg, test.ioCfg)
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
@@ -472,8 +473,6 @@ func TestUpload_Batching(t *testing.T) {
 			if diff := cmp.Diff(test.wantUploaded, uploaded); diff != "" {
 				t.Errorf("uploaded mismatch, (-want +got): %s", diff)
 			}
-			ctxCancel()
-			u.Wait()
 		})
 	}
 	log.Flush()
@@ -481,12 +480,11 @@ func TestUpload_Batching(t *testing.T) {
 
 func TestUpload_BatchingAbort(t *testing.T) {
 	ctx, ctxCancel := context.WithCancel(context.Background())
-	u, err := casng.NewBatchingUploader(ctx, &fakeCAS{}, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
+	defer ctxCancel()
+	_, err := casng.NewBatchingUploader(ctx, &fakeCAS{}, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
-	ctxCancel()
-	u.Wait()
 }
 
 func TestUpload_BatchingTree(t *testing.T) {
@@ -497,6 +495,7 @@ func TestUpload_BatchingTree(t *testing.T) {
 		},
 	}
 	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
 	u, err := casng.NewBatchingUploader(ctx, cc, bsc, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
@@ -513,6 +512,4 @@ func TestUpload_BatchingTree(t *testing.T) {
 	if diff := cmp.Diff("4b29476de8abdfcce452b64003ed82517aa003d9e447ff943723e556e723d75c/78", rootDigest.String()); diff != "" {
 		t.Errorf("root digest mismatch, (-want _got): %s", diff)
 	}
-	ctxCancel()
-	u.Wait()
 }
