@@ -50,7 +50,6 @@ gazelle_dependencies()
 
 load("//:go_deps.bzl", "remote_apis_sdks_go_deps")
 
-# gazelle:repository_macro go_deps.bzl%go_dependencies
 # gazelle:repository_macro go_deps.bzl%remote_apis_sdks_go_deps
 remote_apis_sdks_go_deps()
 

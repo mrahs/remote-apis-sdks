@@ -304,7 +304,9 @@ func (ec *Context) ngUploadInputs() error {
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
 	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, workingDir, remoteWorkingDir, reqs...)
 	if err != nil {
-		log.V(4).Infof("[casng] %s %s> upload error %q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
+		if log.V(4) {
+			log.Infof("[casng] %s %s> upload error %q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
+		}
 		return err
 	}
 	if log.V(5) {
