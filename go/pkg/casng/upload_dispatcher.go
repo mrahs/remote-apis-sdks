@@ -174,7 +174,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 
 			for _, t := range r.tags {
 				// Special case: do not decrement if the response was from a digestion error.
-				if !r.Digest.IsEmpty() && r.Digest.Hash != "" {
+				if r.Digest.Hash != "" {
 					counterCh <- tagCount{t, -1}
 				}
 			}
@@ -209,7 +209,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 				tagDone[tc.t] = true
 			}
 			tagReqCount[tc.t] += tc.c
-			log.V(3).Infof("[casng] upload.dispatcher.counter.count: tag=%s, count=%d", tc.t, tagReqCount[tc.t])
+			log.V(3).Infof("[casng] upload.dispatcher.counter.count: tag=%s, count=%d, pending_tags=%d", tc.t, tagReqCount[tc.t], len(tagReqCount))
 			if tagReqCount[tc.t] <= 0 && tagDone[tc.t] {
 				log.V(2).Infof("[casng] upload.dispatcher.counter.done.to: tag=%s", tc.t)
 				delete(tagDone, tc.t)

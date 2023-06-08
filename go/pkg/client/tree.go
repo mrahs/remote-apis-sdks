@@ -308,23 +308,23 @@ func (c *Client) ComputeMerkleTree(execRoot, workingDir, remoteWorkingDir string
 		return digest.Empty, nil, nil, err
 	}
 	var blobs map[digest.Digest]*uploadinfo.Entry
-	// var tree map[string]digest.Digest
-	// if log.V(4) {
-	// 	tree = make(map[string]digest.Digest)
-	// }
-	root, blobs, err = packageTree(ft, stats)
-	// if log.V(4) {
-	// 	treePaths := make([]string, 0, len(tree))
-	// 	for p := range tree {
-	// 		treePaths = append(treePaths, p)
-	// 	}
-	// 	sort.Strings(treePaths)
-	// 	sb := strings.Builder{}
-	// 	for _, p := range treePaths {
-	// 		sb.WriteString(fmt.Sprintf("  %s: %s\n", p, tree[p]))
-	// 	}
-	// 	log.V(4).Infof("Tree:\n  root=%s\n  tree=%d\n%s", root, len(tree), sb.String())
-	// }
+	var tree map[string]digest.Digest
+	if log.V(5) {
+		tree = make(map[string]digest.Digest)
+	}
+	root, blobs, err = packageTree(ft, stats, "", tree)
+	if log.V(5) {
+		treePaths := make([]string, 0, len(tree))
+		for p := range tree {
+			treePaths = append(treePaths, p)
+		}
+		sort.Strings(treePaths)
+		sb := strings.Builder{}
+		for _, p := range treePaths {
+			sb.WriteString(fmt.Sprintf("  %s: %s\n", p, tree[p]))
+		}
+		log.V(5).Infof("Tree:\n  root=%s\n  tree=%d\n%s", root, len(tree), sb.String())
+	}
 	if err != nil {
 		return digest.Empty, nil, nil, err
 	}
@@ -378,14 +378,25 @@ func buildTree(files map[string]*fileSysNode) (*treeNode, error) {
 	return root, nil
 }
 
-func packageTree(t *treeNode, stats *TreeStats) (root digest.Digest, blobs map[digest.Digest]*uploadinfo.Entry, err error) {
+// If tree is not nil, it will be populated with a flattened tree of path->digest.
+// prefix should always be provided as an empty string which will be used to accumolate path prefixes during recursion.
+func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]digest.Digest) (root digest.Digest, blobs map[digest.Digest]*uploadinfo.Entry, err error) {
 	dir := &repb.Directory{}
 	blobs = make(map[digest.Digest]*uploadinfo.Entry)
 
+	var path string
 	for name, child := range t.dirs {
-		dg, childBlobs, err := packageTree(child, stats)
+		if tree != nil {
+			path = prefix + "/" + name
+		}
+
+		dg, childBlobs, err := packageTree(child, stats, path, tree)
 		if err != nil {
 			return digest.Empty, nil, err
+		}
+
+		if tree != nil {
+			tree[path] = dg
 		}
 
 		dir.Directories = append(dir.Directories, &repb.DirectoryNode{Name: name, Digest: dg.ToProto()})
@@ -397,6 +408,9 @@ func packageTree(t *treeNode, stats *TreeStats) (root digest.Digest, blobs map[d
 
 	for name, fn := range t.files {
 		dg := fn.ue.Digest
+		if tree != nil {
+			tree[prefix + "/" + name] = dg
+		}
 		dir.Files = append(dir.Files, &repb.FileNode{Name: name, Digest: dg.ToProto(), IsExecutable: fn.isExecutable})
 		blobs[dg] = fn.ue
 		stats.InputFiles++
@@ -415,71 +429,14 @@ func packageTree(t *treeNode, stats *TreeStats) (root digest.Digest, blobs map[d
 		return digest.Empty, nil, err
 	}
 	dg := ue.Digest
+	if tree != nil {
+		tree[prefix] = dg
+	}
 	blobs[dg] = ue
 	stats.TotalInputBytes += dg.Size
 	stats.InputDirectories++
 	return dg, blobs, nil
 }
-
-// If tree is not nil, it will be populated with a flattened tree of path->digest.
-// prefix should always be provided as an empty string which will be used to accumolate path prefixes during recursion.
-// func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]digest.Digest) (root digest.Digest, blobs map[digest.Digest]*uploadinfo.Entry, err error) {
-// 	dir := &repb.Directory{}
-// 	blobs = make(map[digest.Digest]*uploadinfo.Entry)
-//
-// 	var path string
-// 	for name, child := range t.dirs {
-// 		if tree != nil {
-// 			path = prefix + "/" + name
-// 		}
-//
-// 		dg, childBlobs, err := packageTree(child, stats, path, tree)
-// 		if err != nil {
-// 			return digest.Empty, nil, err
-// 		}
-//
-// 		if tree != nil {
-// 			tree[path] = dg
-// 		}
-//
-// 		dir.Directories = append(dir.Directories, &repb.DirectoryNode{Name: name, Digest: dg.ToProto()})
-// 		for d, b := range childBlobs {
-// 			blobs[d] = b
-// 		}
-// 	}
-// 	sort.Slice(dir.Directories, func(i, j int) bool { return dir.Directories[i].Name < dir.Directories[j].Name })
-//
-// 	for name, fn := range t.files {
-// 		dg := fn.ue.Digest
-// 		if tree != nil {
-// 			tree[prefix + "/" + name] = dg
-// 		}
-// 		dir.Files = append(dir.Files, &repb.FileNode{Name: name, Digest: dg.ToProto(), IsExecutable: fn.isExecutable})
-// 		blobs[dg] = fn.ue
-// 		stats.InputFiles++
-// 		stats.TotalInputBytes += dg.Size
-// 	}
-// 	sort.Slice(dir.Files, func(i, j int) bool { return dir.Files[i].Name < dir.Files[j].Name })
-//
-// 	for name, sn := range t.symlinks {
-// 		dir.Symlinks = append(dir.Symlinks, &repb.SymlinkNode{Name: name, Target: sn.target})
-// 		stats.InputSymlinks++
-// 	}
-// 	sort.Slice(dir.Symlinks, func(i, j int) bool { return dir.Symlinks[i].Name < dir.Symlinks[j].Name })
-//
-// 	ue, err := uploadinfo.EntryFromProto(dir)
-// 	if err != nil {
-// 		return digest.Empty, nil, err
-// 	}
-// 	dg := ue.Digest
-// 	if tree != nil {
-// 		tree[prefix] = dg
-// 	}
-// 	blobs[dg] = ue
-// 	stats.TotalInputBytes += dg.Size
-// 	stats.InputDirectories++
-// 	return dg, blobs, nil
-// }
 
 // TreeOutput represents a leaf output node in a nested directory structure (a file, a symlink, or an empty directory).
 type TreeOutput struct {

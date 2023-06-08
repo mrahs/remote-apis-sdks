@@ -51,6 +51,11 @@
 //	Level 2 is used for internal functions that may be called per request.
 //	Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
 //  Level 4 is used for messages with large objects.
+//  Level 5 is used for messages that require custom processing (extra compute).
+//
+// To get a csv file of durations, enable verbosity level 3 and use the command:
+// rg -. $CHROME_SRC/src/out/reclient/.reproxy_tmp/logs/reproxy.INFO -e 'casng.*duration:' | \
+//   cut -d ' ' -f 6-8 | sed -e 's/: start=/,/' -e 's/, end=/,/' -e 's/,$//' > /tmp/durations.csv
 package casng
 
 import (
@@ -391,7 +396,7 @@ func (u *uploader) logBeat() {
 		case <-ticker.C:
 		}
 
-		log.V(4).Infof("[casng] beat: upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
+		log.V(3).Infof("[casng] beat: upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
 			u.uploadPubSub.len(), u.queryPubSub.len(), u.walkThrottler.len(), u.uploadThrottler.len(), u.streamThrottle.len(), u.queryThrottler.len(), u.ioThrottler.len(), u.ioLargeThrottler.len())
 	}
 }

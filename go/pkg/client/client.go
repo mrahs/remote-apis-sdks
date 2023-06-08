@@ -804,6 +804,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			return nil, fmt.Errorf("error initializing CASNG: %w", err)
 		}
 	}
+	client.RunBackgroundTasks(ctx)
 	return client, nil
 }
 

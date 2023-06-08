@@ -125,6 +125,7 @@ func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 	var received []tag
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
+	attemptCount := 1
 	for {
 		for _, t := range tags {
 			subscriber, ok := ps.subs[t]
@@ -147,6 +148,8 @@ func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 		if len(toRetry) == 0 {
 			break
 		}
+		attemptCount++
+		log.V(3).Infof("[casng] pubsub.retry: attempts=%d, tags=%d", attemptCount, len(toRetry))
 		// Reuse the underlying arrays by swapping slices and resetting one of them.
 		tags, toRetry = toRetry, tags
 		toRetry = toRetry[:0]

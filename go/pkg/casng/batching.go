@@ -498,7 +498,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	stack := make([]impath.Absolute, 0, len(dirChildren))
 	stack = append(stack, execRoot)
 	var logPathDigest map[string]string
-	if log.V(4) {
+	if log.V(5) {
 		logPathDigest = make(map[string]string, len(dirChildren))
 	}
 	for len(stack) > 0 {
@@ -523,7 +523,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		childrenNodes := make([]proto.Message, 0, len(children))
 		for _, n := range children {
 			childrenNodes = append(childrenNodes, n)
-			if log.V(4) {
+			if log.V(5) {
 				logPathDigest[dir.Append(impath.MustRel(n.(named).GetName())).String()] = n.(named).GetDigest().String()
 			}
 		}
@@ -534,7 +534,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			return
 		}
 		dirReqs = append(dirReqs, UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest)})
-		if log.V(4) {
+		if log.V(5) {
 			logPathDigest[dir.String()] = node.GetDigest().String()
 		}
 		if dir.String() == execRoot.String() {
@@ -553,7 +553,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	stats.Add(moreStats)
 	uploaded = append(uploaded, moreUploaded...)
 
-	if log.V(4) {
+	if log.V(5) {
 		logPaths := make([]string, 0, len(remotePath))
 		for p := range remotePath {
 			logPaths = append(logPaths, p.String())
