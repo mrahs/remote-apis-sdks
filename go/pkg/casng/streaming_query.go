@@ -14,15 +14,14 @@ import (
 
 // MissingBlobsResponse represents a query result for a single digest.
 //
-// If the error field is set, the boolean field value is meaningless.
-// I.e. users should check the error before evaluating the boolean field.
+// If Err is not nil, Missing is false.
 type MissingBlobsResponse struct {
 	Digest  digest.Digest
 	Missing bool
 	Err     error
 }
 
-// missingBlobRequest is a tuple of a digest, a tag the identifies the requester, and the ctx of the request.
+// missingBlobRequest associates a digest with its requester's context.
 type missingBlobRequest struct {
 	digest digest.Digest
 	tag    tag
@@ -43,13 +42,10 @@ type missingBlobRequestBundle = map[digest.Digest][]tag
 // The uploader's context is used to make remote calls using metadata from ctx.
 // Metadata unification assumes all requests share the same correlated invocation ID.
 //
-// The consumption speed is subject to the concurrency and timeout configurations of the gRPC call.
-// All received requests will have corresponding responses sent on the returned channel.
-//
 // The digests are unified (aggregated/bundled) based on ItemsLimit, BytesLimit and BundleTimeout of the gRPC config.
-// The returned channel is unbuffered and will be closed after the input channel is closed and no more responses are available for this call.
+// The returned channel is unbuffered and will be closed after the input channel is closed and all sent requests get their corresponding responses.
 // This could indicate completion or cancellation (in case the context was canceled).
-// Slow consumption speed on this channel affects the consumption speed on the input channel.
+// Slow consumption speed on the returned channel affects the consumption speed on in.
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
@@ -66,7 +62,7 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 	return out
 }
 
-// missingBlobsPipe is defined on the underlying uploader to be accessible by the upload code.
+// missingBlobsPipe is a shared implementation between batching and streaming interfaces.
 func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan MissingBlobsResponse {
 	ch := make(chan MissingBlobsResponse)
 
@@ -91,7 +87,7 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 	tag, resCh := u.queryPubSub.sub(ctxSub)
 	pendingCh := make(chan int)
 
-	// Sender.
+	// Sender. It terminates when in is closed, at which point it sends 0 as a termination signal to the counter.
 	u.querySenderWg.Add(1)
 	go func() {
 		defer u.querySenderWg.Done()
@@ -107,7 +103,7 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 		pendingCh <- 0
 	}()
 
-	// Receiver.
+	// Receiver. It terminates with resCh is closed, at which point it closes the returned channel.
 	u.receiverWg.Add(1)
 	go func() {
 		defer u.receiverWg.Done()
@@ -127,7 +123,8 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 		}
 	}()
 
-	// Counter.
+	// Counter. It terminates when count hits 0 after receiving a done signal from the sender.
+	// Upon termination, it sends a signal to pubsub to terminate the subscription which closes resCh.
 	u.workerWg.Add(1)
 	go func() {
 		defer u.workerWg.Done()
@@ -173,9 +170,7 @@ func (u *uploader) queryProcessor() {
 			for d := range bundle {
 				u.queryPubSub.pub(MissingBlobsResponse{
 					Digest:  d,
-					Missing: false,
-					// This should always be nil at this point.
-					Err: context.Canceled,
+					Err: u.ctx.Err(),
 				}, bundle[d]...)
 			}
 			return
@@ -277,7 +272,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 		d := digest.NewFromProtoUnvalidated(dpb)
 		u.queryPubSub.pub(MissingBlobsResponse{
 			Digest:  d,
-			Missing: true,
+			Missing: err == nil,
 			Err:     err,
 		}, bundle[d]...)
 		delete(bundle, d)
@@ -288,8 +283,6 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle missingBlobReque
 		u.queryPubSub.pub(MissingBlobsResponse{
 			Digest:  d,
 			Missing: false,
-			// This should always be nil at this point.
-			Err: err,
 		}, bundle[d]...)
 	}
 	log.V(3).Infof("[casng] query.pub.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())

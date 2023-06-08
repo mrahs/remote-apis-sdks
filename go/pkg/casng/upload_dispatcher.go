@@ -218,7 +218,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 				u.uploadPubSub.pub(UploadResponse{done: true}, tc.t)
 			}
 			// Covers waiting on subscribers.
-			log.Infof("[casng] upload.dispatcher.counter.pub.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+			log.V(3).Infof("[casng] upload.dispatcher.counter.pub.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 			if len(tagReqCount) == 0 && allDone {
 				return
 			}

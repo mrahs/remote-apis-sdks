@@ -6,7 +6,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// nodeSliceMap is a mutex-guarded map that supports an atomic append operation.
+// nodeSliceMap is a mutex-guarded map that supports an synchronized append operation.
 type nodeSliceMap struct {
 	store map[string][]proto.Message
 	mu    sync.RWMutex
@@ -24,9 +24,4 @@ func (c *nodeSliceMap) append(key string, m proto.Message) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.store[key] = append(c.store[key], m)
-}
-
-// initSliceCache returns a properly initialized struct (not a pointer, hence, init rather than new).
-func initSliceCache() nodeSliceMap {
-	return nodeSliceMap{store: make(map[string][]proto.Message)}
 }

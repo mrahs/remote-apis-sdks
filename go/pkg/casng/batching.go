@@ -26,7 +26,6 @@ import (
 // This method is useful when a large number of digests is already known. For other use cases, consider the streaming uploader.
 // This method does not use internal processors and does not use the uploader's context. It is safe to use even if the uploader's context is cancelled.
 //
-// Cancelling the context will cancel retries, but not a pending request which will be cancelled upon timeout.
 // The digests are batched based on ItemLimits of the gRPC config. BytesLimit and BundleTimeout are not used in this method.
 // Errors from a batch do not affect other batches, but all digests from such bad batches will be reported as missing by this call.
 // In other words, if an error is returned, any digest that is not in the returned slice is not missing.
@@ -97,10 +96,10 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 //
 // r must return io.EOF to terminate the call.
 //
-// ctx is used to make the remote calls.
+// ctx is used to make and cancel remote calls.
 // This method does not use the uploader's context which means it is safe to call even after that context is cancelled.
 //
-// size is used to toggle compression as well as report some stats. It must be reflect the actual number of bytes the specified reader has to give.
+// size is used to toggle compression as well as report some stats. It must reflect the actual number of bytes r has to give.
 // The server is notified to finalize the resource name and subsequent writes may not succeed.
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
 // If an error was returned, the returned stats may indicate that all the bytes were sent, but that does not guarantee that the server committed all of them.
@@ -176,8 +175,9 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 		return stats, errors.Join(ErrGRPC, errStream)
 	}
 
+	// buf slice is never resliced which makes it safe to use a pointer-like type.
 	buf := u.buffers.Get().([]byte)
-	defer u.buffers.Put(buf) // buf slice is never resliced which makes it safe to use a pointer-like type.
+	defer u.buffers.Put(buf)
 
 	cacheHit := false
 	var err error
@@ -287,9 +287,10 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	return stats, err
 }
 
-// Upload processes reqs for upload. Blobs that already exist in the CAS are not uploaded.
-// Additionally, any path that is not a regular file, a directory or a symlink file is skipped (e.g. sockets and pipes).
-// For requests with non-empty Bytes fields, only the Content field is used. In that case, the Path field is ignored.
+// Upload processes reqs for upload.
+//
+// Blobs that already exist in the CAS are not uploaded.
+// Any path that is not a regular file, a directory or a symlink file is skipped (e.g. sockets and pipes).
 //
 // Cancelling ctx gracefully aborts the upload process.
 //
@@ -385,16 +386,15 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	return uploaded, stats, err
 }
 
-// UploadTree is a convenient method to upload a sub-tree described with multiple requests. This is useful when the list of paths is known
+// UploadTree is a convenient method to upload a tree described with multiple requests. This is useful when the list of paths is known
 // and the root might have too many descendants such that traversing and filtering might add a significant overhead.
 //
 // The following constraints are enforced on the reqs set to ensure proper hierarchy caching during the internal digestion process:
 //
-//	localPrefix and the exclusion filter is shared among all paths.
 //	No digests are set on any request.
 //	The paths are mutually exclusive.
 //
-// remotePrefix replaces localPrefix inside the merkle tree such that the server is only aware of remotePrefix.
+// remoteWorkingDir replaces workingDir inside the merkle tree such that the server is only aware of remoteWorkingDir.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
 	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree: reqs=%d", len(reqs))
 	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree.done")
@@ -524,7 +524,8 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		for _, n := range children {
 			childrenNodes = append(childrenNodes, n)
 			if log.V(5) {
-				logPathDigest[dir.Append(impath.MustRel(n.(named).GetName())).String()] = n.(named).GetDigest().String()
+				nd := n.(namedDigest)
+				logPathDigest[dir.Append(impath.MustRel(nd.GetName())).String()] = nd.GetDigest().String()
 			}
 		}
 
@@ -580,8 +581,8 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	return
 }
 
-// named is used to conveniently extract the file name and its digest from nodes for logging purposes.
-type named interface {
+// namedDigest is used to conveniently extract the file name and its digest from nodes for logging purposes.
+type namedDigest interface {
 	GetName() string
 	GetDigest() *repb.Digest
 }

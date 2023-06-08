@@ -284,7 +284,7 @@ func newUploader(
 		walkThrottler:    newThrottler(int64(ioCfg.ConcurrentWalksLimit)),
 		ioThrottler:      newThrottler(int64(ioCfg.OpenFilesLimit)),
 		ioLargeThrottler: newThrottler(int64(ioCfg.OpenLargeFilesLimit)),
-		dirChildren:      initSliceCache(),
+		dirChildren:      nodeSliceMap{store: make(map[string][]proto.Message)},
 
 		queryCh:          make(chan missingBlobRequest),
 		queryPubSub:      newPubSub(),

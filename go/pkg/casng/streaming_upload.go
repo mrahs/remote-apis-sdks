@@ -129,15 +129,16 @@ type uploadRequestBundleItem struct {
 // uploadRequestBundle is used to aggregate (unify) requests by digest.
 type uploadRequestBundle = map[digest.Digest]uploadRequestBundleItem
 
-// blob is a tuple of (digest, content, client_id, client_ctx, done_signal, queried_flag).
+// blob is a tuple of bytes, their owner, and signaling flags.
 // The digest is the blob's unique identifier.
-// The content must be one of reader, path, or bytes, in that order. Depending on which field is set, resources are acquired and released.
 type blob struct {
+	// The zero value (not to be confused with Digest.IsEmpty) is used a signal between the digster and the dispatcher.
 	digest digest.Digest
+	// One of bytes, path or reader may be set. If more than one is set, the precedence is reader, path, bytes.
 	bytes  []byte
 	path   string
 	reader io.ReadSeekCloser
-	// ctx is client's context.
+	// ctx is client's context which is used to extract metadata from and abort in-flight tasks for this blob.
 	ctx context.Context
 	// tag identifies the client of this blob.
 	tag tag

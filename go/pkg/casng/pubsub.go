@@ -25,12 +25,11 @@ type pubsub struct {
 //
 // Only messages associated with the returned tag are sent on the returned channel.
 // This allows the subscriber to send a tagged message (request) that propagates across the system and eventually
-// received related messages (responses) on the returned channel.
+// receive related messages (responses) from publishers on the returned channel.
 //
 // ctx is only used to wait for a an unsubscription signal. It is not propagated with any messages.
-// The subscriber must unsubscribe by cancelling the specified context.
-// The subscriber must continue draining the returned channel until it's closed.
-// The returned channel is unbuffered and only closed when the specified context is done.
+// The subscriber must unsubscribe by cancelling the specified context, and continue draining the returned channel until it's closed.
+// The returned channel is unbuffered and closed only when the specified context is done.
 //
 // To properly terminate the subscription, the subscriber must wait until all expected responses are received
 // on the returned channel before cancelling the context.
@@ -79,20 +78,21 @@ func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
 // To prevent a temporarily infinite round-robin loop from consuming too much CPU, each subscriber
 // gets at most 10ms to receive before getting rescheduled.
 // Blocking 10ms for every subscriber amortizes much better than blocking 10ms for every
-// iteration on the subscribers, even though both have the same worst-case cost.
+// iteration on subscribers, even though both have the same worst-case cost.
 // For example, if out of 10 subscribers 5 were busy for 1ms, the attempt will cost ~5ms instead of 10ms.
 func (ps *pubsub) pub(m any, tags ...tag) {
 	_ = ps.pubN(m, len(tags), tags...)
 }
 
-// mpub (multi-publish) delivers the "once" message to a single consumer then delivers the "rest" message to the rest of the consumers.
-// It's useful for cases where the message holds shared information that should not be duplicated among consumers, such as stats.
+// mpub (multi-publish) delivers the "once" message to a single subscriber then delivers the "rest" message to the rest of the subscribers.
+// It's useful for cases where the message holds shared information that should not be duplicated among subscribers, such as stats.
 func (ps *pubsub) mpub(once any, rest any, tags ...tag) {
 	t := ps.pubOnce(once, tags...)
 	_ = ps.pubN(rest, len(tags)-1, excludeTag(tags, t)...)
 }
 
-// pubOnce is like pub, but delivers the message only once. The tag of the subscriber that got the message is returned.
+// pubOnce is like pub, but delivers the message to a single subscriber.
+// The tag of the subscriber that got the message is returned.
 func (ps *pubsub) pubOnce(m any, tags ...tag) tag {
 	received := ps.pubN(m, 1, tags...)
 	if len(received) == 0 {

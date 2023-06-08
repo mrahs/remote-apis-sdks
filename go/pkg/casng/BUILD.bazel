@@ -5,8 +5,9 @@ go_library(
     srcs = [
         "batching.go",
         "config.go",
+        "downloader.go",
+        "node_slice_cache.go",
         "pubsub.go",
-        "slice_cache.go",
         "streaming_query.go",
         "streaming_upload.go",
         "throttler.go",
