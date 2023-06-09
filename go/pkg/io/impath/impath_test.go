@@ -222,7 +222,7 @@ func Test_Dir(t *testing.T) {
 	pathAbs := impath.MustAbs(impath.Root, "a", "b")
 	wantAbs := impath.MustAbs(impath.Root, "a")
 	gotAbs := pathAbs.Dir()
-	if  wantAbs.String() != gotAbs.String() {
+	if wantAbs.String() != gotAbs.String() {
 		t.Errorf("path mismatch: want %q, got %q", wantAbs, gotAbs)
 	}
 

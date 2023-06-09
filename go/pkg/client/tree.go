@@ -2,6 +2,7 @@ package client
 
 // This module provides functionality for constructing a Merkle tree of uploadable inputs.
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -275,7 +276,7 @@ func loadFiles(execRoot, localWorkingDir, remoteWorkingDir string, excl []*comma
 }
 
 // ComputeMerkleTree packages an InputSpec into uploadable inputs, returned as uploadinfo.Entrys
-func (c *Client) ComputeMerkleTree(execRoot, workingDir, remoteWorkingDir string, is *command.InputSpec, cache filemetadata.Cache) (root digest.Digest, inputs []*uploadinfo.Entry, stats *TreeStats, err error) {
+func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, remoteWorkingDir string, is *command.InputSpec, cache filemetadata.Cache) (root digest.Digest, inputs []*uploadinfo.Entry, stats *TreeStats, err error) {
 	stats = &TreeStats{}
 	fs := make(map[string]*fileSysNode)
 	for _, i := range is.VirtualInputs {
@@ -314,16 +315,18 @@ func (c *Client) ComputeMerkleTree(execRoot, workingDir, remoteWorkingDir string
 	}
 	root, blobs, err = packageTree(ft, stats, "", tree)
 	if log.V(5) {
-		treePaths := make([]string, 0, len(tree))
-		for p := range tree {
-			treePaths = append(treePaths, p)
+		if s, ok := ctx.Value("cl_tree").(*string); ok {
+			treePaths := make([]string, 0, len(tree))
+			for p := range tree {
+				treePaths = append(treePaths, p)
+			}
+			sort.Strings(treePaths)
+			sb := strings.Builder{}
+			for _, p := range treePaths {
+				sb.WriteString(fmt.Sprintf("  %s: %s\n", p, tree[p]))
+			}
+			*s = sb.String()
 		}
-		sort.Strings(treePaths)
-		sb := strings.Builder{}
-		for _, p := range treePaths {
-			sb.WriteString(fmt.Sprintf("  %s: %s\n", p, tree[p]))
-		}
-		log.V(5).Infof("Tree:\n  root=%s\n  tree=%d\n%s", root, len(tree), sb.String())
 	}
 	if err != nil {
 		return digest.Empty, nil, nil, err
@@ -409,7 +412,7 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 	for name, fn := range t.files {
 		dg := fn.ue.Digest
 		if tree != nil {
-			tree[prefix + "/" + name] = dg
+			tree[prefix+"/"+name] = dg
 		}
 		dir.Files = append(dir.Files, &repb.FileNode{Name: name, Digest: dg.ToProto(), IsExecutable: fn.isExecutable})
 		blobs[dg] = fn.ue

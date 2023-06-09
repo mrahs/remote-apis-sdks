@@ -38,4 +38,3 @@ func (f Filter) String() string {
 	}
 	return f.ID()
 }
-

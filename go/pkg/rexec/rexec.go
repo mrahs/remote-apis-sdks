@@ -188,7 +188,7 @@ func (ec *Context) computeInputs() error {
 	log.V(1).Infof("%s %s> Command digest: %s", cmdID, executionID, cmdDg)
 	log.V(1).Infof("%s %s> Computing input Merkle tree...", cmdID, executionID)
 	execRoot, workingDir, remoteWorkingDir := ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir
-	root, blobs, stats, err := ec.client.GrpcClient.ComputeMerkleTree(execRoot, workingDir, remoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
+	root, blobs, stats, err := ec.client.GrpcClient.ComputeMerkleTree(ec.ctx, execRoot, workingDir, remoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
 	if err != nil {
 		return err
 	}
@@ -240,7 +240,7 @@ func (ec *Context) ngUploadInputs() error {
 	log.V(2).Infof("[casng] %s %s> exec_root=%s, working_dir=%s, remote_working_dir=%s, symlink_opts=%s, inputs=%d, virtual_inputs=%d", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, slo, len(ec.cmd.InputSpec.Inputs), len(ec.cmd.InputSpec.VirtualInputs))
 	log.V(4).Infof("[casng] %s %s> exec_root=%s, working_dir=%s, remote_working_dir=%s, symlink_opts=%s, inputs=%+v, virtual_inputs=%+v", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, slo, ec.cmd.InputSpec.Inputs, ec.cmd.InputSpec.VirtualInputs)
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+len(ec.cmd.InputSpec.VirtualInputs))
-	seenPath := make(map[impath.Absolute]bool)
+	pathSeen := make(map[impath.Absolute]bool)
 	for _, p := range ec.cmd.InputSpec.Inputs {
 		rel, err := impath.Rel(p)
 		if err != nil {
@@ -250,17 +250,17 @@ func (ec *Context) ngUploadInputs() error {
 		if err != nil {
 			return err
 		}
-		if seenPath[absPath] {
-			return fmt.Errorf("[casng] %s %s> cannot have shared paths among inputs: %q", cmdID, executionID, absPath)
-		}
-		reqs = append(reqs, casng.UploadRequest{Path: absPath, SymlinkOptions: slo, Exclude: filter})
-		seenPath[absPath] = true
-		// Mark ancestors as seen to ensure mutually exclusive paths.
+		// if seenPath[absPath] {
+		// return fmt.Errorf("[casng] %s %s> cannot have shared paths among inputs: %q", cmdID, executionID, absPath)
+		// }
+		pathSeen[absPath] = true
+		// Mark ancestors as seen to ensure any potential virtual parent is excluded.
 		parent := absPath.Dir()
-		for !seenPath[parent] && parent.String() != execRoot.String() {
-			seenPath[parent] = true
+		for !pathSeen[parent] && parent.String() != execRoot.String() {
+			pathSeen[parent] = true
 			parent = parent.Dir()
 		}
+		reqs = append(reqs, casng.UploadRequest{Path: absPath, SymlinkOptions: slo, Exclude: filter})
 	}
 	// Append virtual inputs after real inputs in order to ignore any redundant virtual inputs.
 	for _, p := range ec.cmd.InputSpec.VirtualInputs {
@@ -268,7 +268,7 @@ func (ec *Context) ngUploadInputs() error {
 			return fmt.Errorf("[casng] %s %s> empty virtual path", cmdID, executionID)
 		}
 		// If execRoot is a virtual path, ignore it.
-		if p.Path == "." {
+		if p.Path == "." || p.Path == "" {
 			continue
 		}
 		rel, err := impath.Rel(p.Path)
@@ -280,12 +280,12 @@ func (ec *Context) ngUploadInputs() error {
 			return err
 		}
 		// If redundant, ignore it to avoid corrupting the node cache.
-		if seenPath[absPath] {
+		if pathSeen[absPath] {
 			continue
 		}
 		parent := absPath.Dir()
-		for !seenPath[parent] && parent.String() != execRoot.String() {
-			seenPath[parent] = true
+		for !pathSeen[parent] && parent.String() != execRoot.String() {
+			pathSeen[parent] = true
 			parent = parent.Dir()
 		}
 
@@ -302,7 +302,15 @@ func (ec *Context) ngUploadInputs() error {
 		reqs = append(reqs, r)
 	}
 	log.V(1).Infof("[casng] %s %s> uploading %d inputs", cmdID, executionID, len(reqs))
-	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ec.ctx, execRoot, workingDir, remoteWorkingDir, reqs...)
+	ctx := ec.ctx
+	var ngTree, clTree *string
+	if log.V(5) {
+		ngTree = new(string)
+		clTree = new(string)
+		ctx = context.WithValue(ctx, "ng_tree", ngTree)
+		ctx = context.WithValue(ctx, "cl_tree", clTree)
+	}
+	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ctx, execRoot, workingDir, remoteWorkingDir, reqs...)
 	if err != nil {
 		if log.V(5) {
 			log.Infof("[casng] %s %s> upload error %q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
@@ -310,18 +318,17 @@ func (ec *Context) ngUploadInputs() error {
 		return err
 	}
 	if log.V(5) {
-		rootDg2, _, _, err := ec.client.GrpcClient.ComputeMerkleTree(ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
+		rootDg2, _, _, err := ec.client.GrpcClient.ComputeMerkleTree(ctx, ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
 		if err != nil {
 			return err
 		}
 		specStr := formatInputSpec(ec.cmd.InputSpec, "    ")
-		msg := fmt.Sprintf("new=%s\n  old=%s\n  spec=%s\n  client_slo=%+v\n  ng_slo=%s", rootDg, rootDg2, specStr, ec.client.GrpcClient.TreeSymlinkOpts, slo)
+		msg := fmt.Sprintf("ng=%s\n  cl=%s\n  spec\n%s\n  client_slo=%+v\n  ng_slo=%s\n  ng_tree\n%s\n  cl_tree\n%s", rootDg, rootDg2, specStr, ec.client.GrpcClient.TreeSymlinkOpts, slo, *ngTree, *clTree)
 		if rootDg.Hash != rootDg2.Hash {
 			log.Infof("root digest mismatch:\n  %s", msg)
-			return fmt.Errorf("root digest mismatch:\n  %s", msg)
-		} else {
-			log.Infof("root digest match:\n  %s", msg)
+			return fmt.Errorf("root digest mismatch: ng=%s, cl=%s", rootDg, rootDg2)
 		}
+		log.Infof("root digest match:\n  %s", msg)
 	}
 	ec.Metadata.InputFiles = int(stats.InputFileCount)
 	ec.Metadata.InputDirectories = int(stats.InputDirCount)

@@ -392,7 +392,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 // The following constraints are enforced on the reqs set to ensure proper hierarchy caching during the internal digestion process:
 //
 //	No digests are set on any request.
-//	The paths are mutually exclusive.
+//	The paths are mutually exclusive. TODO
 //
 // remoteWorkingDir replaces workingDir inside the merkle tree such that the server is only aware of remoteWorkingDir.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
@@ -403,17 +403,25 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		return
 	}
 
-	// 1st, Validate the set.
+	// 1st, Preprocess the set to deduplicate by ancestor and generate a deterministic filter ID.
 
 	// Multiple reqs sets may share some of the paths which would cause the the u.dirChildren lookup below to mix children from two different sets which would corrupt the merkle tree.
 	// Updating the filterID for the set to a deterministic one ensures it gets its unique keys that are still shared between identical sets.
+	// The deterministic ID is the digest of the sorted list of paths concatenated with the ID of the original filter.
 	filter := reqs[0].Exclude
 	filterID := filter.String()
-	pathList := make([]string, 0, len(reqs))
+	paths := make([]string, 0, len(reqs)+1)
+	paths = append(paths, filterID)
+
+	// An ancestor directory takes precedence over all of its descendants to ensure unlited files are also included in traversal.
+	// Sorting the requests by path length ensures ancestors appear before descendants.
+	sort.Slice(reqs, func(i, j int) bool { return len(reqs[i].Path.String()) < len(reqs[j].Path.String()) })
 	// Cache the mapping between local and remote paths.
-	remotePath := make(map[impath.Absolute]impath.Absolute, len(reqs))
+	// remotePath := make(map[impath.Absolute]impath.Absolute, len(reqs))
 	// Fast lookup for potentially shared paths between requests.
-	disallowedPath := make(map[impath.Absolute]bool, len(reqs)*2) // over-allocate to avoid copying on growth.
+	pathSeen := make(map[impath.Absolute]bool, len(reqs))
+	localPrefix := execRoot.Append(workingDir)
+	i := 0
 	for _, r := range reqs {
 		if r.Digest.Hash != "" {
 			err = fmt.Errorf("cannot create a tree with a pre-digesetd path: %q", r.Path)
@@ -424,26 +432,41 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			return
 		}
 
-		if disallowedPath[r.Path] {
-			err = fmt.Errorf("cannot create a tree from non-mutually exclusive paths: %q", r.Path)
-			return
+		if pathSeen[r.Path] {
+			continue
+		}
+		pathSeen[r.Path] = true
+		parent := r.Path.Dir()
+		skip := false
+		for ; parent.String() != execRoot.String() && parent.String() != localPrefix.String(); parent = parent.Dir() {
+			if pathSeen[parent] {
+				// First iteration, parent == r.Path, and this means a duplicate request because the list is sorted (If not sorted, it may also mean a redundant ancestor).
+				// Other iterations, it means this request is redundant because an ancestor request already exist.
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
 		}
 
-		rpStr := strings.TrimPrefix(r.Path.String(), execRoot.String()+string(filepath.Separator))
-		if strings.HasPrefix(rpStr, workingDir.String()) {
-			rpStr = strings.Replace(rpStr, workingDir.String(), remoteWorkingDir.String(), 1)
-		}
-		rp := execRoot.Append(impath.MustRel(rpStr))
-		pathList = append(pathList, r.Path.String())
-		remotePath[r.Path] = rp
-		parent := r.Path.Dir()
-		for !disallowedPath[parent] && parent.String() != workingDir.String() {
-			disallowedPath[parent] = true
-			parent = parent.Dir()
-		}
+		// rpStr := strings.TrimPrefix(r.Path.String(), execRoot.String()+string(filepath.Separator))
+		// if strings.HasPrefix(rpStr, workingDir.String()) {
+		// rpStr = strings.Replace(rpStr, workingDir.String(), remoteWorkingDir.String(), 1)
+		// }
+		// rp := execRoot.Append(impath.MustRel(rpStr))
+		paths = append(paths, r.Path.String())
+		// remotePath[r.Path] = rp
+		// Shift left to accumulate included requests at the beginning of the array to avoid allocating another one.
+		reqs[i] = r
+		i++
 	}
-	sort.Strings(pathList)
-	filterID = digest.NewFromBlob([]byte(strings.Join(pathList, "") + filterID)).String()
+	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree: got=%d, uploading=%d", len(reqs), i)
+
+	// Reslice to take included (shifted) requests only.
+	reqs = reqs[:i]
+	// paths is already sorted because reqs was sorted.
+	filterID = digest.NewFromBlob([]byte(strings.Join(paths, ""))).String()
 	filterIDFunc := func() string { return filterID }
 	for _, r := range reqs {
 		r.Exclude.ID = filterIDFunc // r is a copy, but r.Exclude is a reference.
@@ -460,7 +483,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// This block creates a flattened tree of the paths in reqs rooted at execRoot.
 	// Each key is an absolute path to a node in the tree and its value is a list of absolute paths that any of them can be a key as well.
 	// Example: /a: [/a/b /a/c], /a/b: [/a/b/foo.go], /a/c: [/a/c/bar.go]
-	dirChildren := make(map[impath.Absolute]map[impath.Absolute]proto.Message, len(disallowedPath))
+	dirChildren := make(map[impath.Absolute]map[impath.Absolute]proto.Message, len(pathSeen))
 	for _, r := range reqs {
 		// Each request in reqs must correspond to a cached node.
 		node := u.Node(r)
@@ -470,7 +493,12 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		}
 
 		// Add this leaf node to its ancestors.
-		rp := remotePath[r.Path]
+		rpStr := strings.TrimPrefix(r.Path.String(), execRoot.String()+string(filepath.Separator))
+		if strings.HasPrefix(rpStr, workingDir.String()) {
+			rpStr = strings.Replace(rpStr, workingDir.String(), remoteWorkingDir.String(), 1)
+		}
+		rp := execRoot.Append(impath.MustRel(rpStr))
+		// rp := remotePath[r.Path]
 		parent := rp
 		for {
 			rp = parent
@@ -547,6 +575,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	}
 
 	// Upload the blobs of the shared ancestors.
+	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree: dirs=%d", len(dirReqs))
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
 	if moreErr != nil {
 		err = moreErr
@@ -555,27 +584,35 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	uploaded = append(uploaded, moreUploaded...)
 
 	if log.V(5) {
-		logPaths := make([]string, 0, len(remotePath))
-		for p := range remotePath {
-			logPaths = append(logPaths, p.String())
+		s, ok := ctx.Value("ng_tree").(*string)
+		if !ok {
+			return
 		}
-		sort.Strings(logPaths)
-		logDirs := make([]string, 0, len(dirChildren))
+		paths := make([]string, 0, len(reqs))
+		for _, r := range reqs {
+			paths = append(paths, r.Path.String())
+		}
+		dirs := make([]string, 0, len(dirChildren))
 		for p := range dirChildren {
-			logDirs = append(logDirs, p.String())
+			dirs = append(dirs, p.String())
 		}
-		sort.Strings(logDirs)
-		logTreePaths := make([]string, 0, len(logPathDigest))
+		sort.Strings(dirs)
+		treePaths := make([]string, 0, len(logPathDigest))
 		for p := range logPathDigest {
-			logTreePaths = append(logTreePaths, p)
+			treePaths = append(treePaths, p)
 		}
-		sort.Strings(logTreePaths)
+		sort.Strings(treePaths)
 		sb := strings.Builder{}
-		for _, p := range logTreePaths {
+		sb.WriteString("  paths:\n  ")
+		sb.WriteString(strings.Join(paths, "\n  "))
+		sb.WriteString("\n  dir_paths:\n  ")
+		sb.WriteString(strings.Join(dirs, "\n  "))
+		sb.WriteString("\n  tree:\n")
+		for _, p := range treePaths {
 			pp, _ := filepath.Rel(execRoot.String(), p)
 			sb.WriteString(fmt.Sprintf("  %s: %s\n", pp, logPathDigest[p]))
 		}
-		log.Infof("[casng] upload.tree.result:\n  root=%s\n  paths=%d\n%v\n  tree=%d\n%s", rootDigest, len(logPaths), strings.Join(logPaths, "\n"), len(logPathDigest), sb.String())
+		*s = sb.String()
 	}
 
 	return

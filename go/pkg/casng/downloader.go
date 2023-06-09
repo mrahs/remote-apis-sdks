@@ -30,4 +30,3 @@ func (d *downloader) Read(ctx context.Context, digests ...digest.Digest) (map[di
 func (d *downloader) ReadBytes(ctx context.Context, name string, offset int64, limit int64, writer io.Writer) (Stats, error) {
 	return Stats{}, errors.New("not yet implemented")
 }
-

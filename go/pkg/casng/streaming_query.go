@@ -169,8 +169,8 @@ func (u *uploader) queryProcessor() {
 			// Ensure responses are dispatched before aborting.
 			for d := range bundle {
 				u.queryPubSub.pub(MissingBlobsResponse{
-					Digest:  d,
-					Err: u.ctx.Err(),
+					Digest: d,
+					Err:    u.ctx.Err(),
 				}, bundle[d]...)
 			}
 			return

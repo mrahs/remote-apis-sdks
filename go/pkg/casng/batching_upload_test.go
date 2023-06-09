@@ -501,15 +501,19 @@ func TestUpload_BatchingTree(t *testing.T) {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
 	tmp := makeFs(t, map[string][]byte{"wd/a/b/c/foo.go": []byte("foo"), "wd/a/b/bar.go": []byte("bar"), "wd/e/f/baz.go": []byte("baz")})
+	ngTree := new(string)
+	ctx = context.WithValue(ctx, "ng_tree", ngTree)
 	rootDigest, _, _, err := u.UploadTree(ctx, impath.MustAbs(tmp), impath.MustRel("wd"), impath.MustRel("rwd"),
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/c/foo.go")},
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/bar.go")},
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/e/f/baz.go")},
+		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/e/f")}, // This should cause baz.go to be skipped as a redundant request since it's part of f's tree.
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if diff := cmp.Diff("4b29476de8abdfcce452b64003ed82517aa003d9e447ff943723e556e723d75c/78", rootDigest.String()); diff != "" {
-		t.Errorf("root digest mismatch, (-want _got): %s", diff)
+		t.Errorf("root digest mismatch, (-want _got): %s\nng_tree:\n%s", diff, *ngTree)
 	}
+	t.Errorf("ng_tree:\n%s", *ngTree)
 }

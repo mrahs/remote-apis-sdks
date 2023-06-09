@@ -467,27 +467,33 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *rep
 			node = proto.Clone(node).(*repb.FileNode)
 		}
 	}()
-	// Check the cache first. If not cached or claimed, claim it.
+
+	// Check the cache first. If not cached or previously claimed, claim it.
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
-	m, ok := u.fileNodeCache.LoadOrStore(path, wg)
-	if ok {
-		// If cached, return it.
+	// Keep trying to claim it unless it gets cached.
+	for {
+		m, ok := u.fileNodeCache.LoadOrStore(path, wg)
+		// Claimed.
+		if !ok {
+			break
+		}
+		// Cached.
 		if n, ok := m.(*repb.FileNode); ok {
 			return n, nil, nil
 		}
-		// If calimed, wait for it.
-		wg = m.(*sync.WaitGroup)
-		wg.Wait()
-		if n, ok := u.fileNodeCache.Load(path); ok {
-			return n.(*repb.FileNode), nil, nil
-		}
-		return nil, nil, fmt.Errorf("file node was not cached for path %q", path)
+		// Previously calimed; wait for it.
+		m.(*sync.WaitGroup).Wait()
 	}
-	// Not cached or calimed before. Compute it.
+	// Not cached or previously calimed; Compute it.
+	defer wg.Done()
 	defer func() {
+		// In case of an error, unclaim it.
+		if err != nil {
+			u.fileNodeCache.Delete(path)
+			return
+		}
 		u.fileNodeCache.Store(path, node)
-		wg.Done()
 	}()
 
 	node = &repb.FileNode{
