@@ -14,12 +14,20 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
 	"github.com/klauspost/compress/zstd"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/protobuf/proto"
 )
+
+// namedDigest is used to conveniently extract the base name and its digest from repb.FileNode, repb.DirectoryNode and repb.SymlinkNode.
+type namedDigest interface {
+	GetName() string
+	GetDigest() *repb.Digest
+}
 
 // MissingBlobs queries the CAS for digests and returns a slice of the missing ones.
 //
@@ -104,16 +112,25 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
 // If an error was returned, the returned stats may indicate that all the bytes were sent, but that does not guarantee that the server committed all of them.
 func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64) (Stats, error) {
+	if !u.streamThrottle.acquire(ctx) {
+		return Stats{}, ctx.Err()
+	}
+	defer u.streamThrottle.release()
 	return u.writeBytes(ctx, name, r, size, offset, true)
 }
 
 // WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
 func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size int64, offset int64) (Stats, error) {
+	if !u.streamThrottle.acquire(ctx) {
+		return Stats{}, ctx.Err()
+	}
+	defer u.streamThrottle.release()
 	return u.writeBytes(ctx, name, r, size, offset, false)
 }
 
 func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error) {
-	contextmd.Infof(ctx, log.Level(1), "[casng] upload.write_bytes: name=%s, size=%d, offset=%d, finish=%t", name, size, offset)
+	contextmd.Infof(ctx, log.Level(1), "[casng] upload.write_bytes: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
+	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.write_bytes.done: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
@@ -122,11 +139,6 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	}
 
 	var stats Stats
-	if !u.streamThrottle.acquire(ctx) {
-		return stats, ctx.Err()
-	}
-	defer u.streamThrottle.release()
-
 	// Read raw bytes if compression is disabled.
 	src := r
 
@@ -363,7 +375,6 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.sender.stop")
 
 		for _, r := range reqs {
-			r.ctx = ctx
 			select {
 			case ch <- r:
 			case <-u.ctx.Done():
@@ -386,14 +397,38 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	return uploaded, stats, err
 }
 
-// UploadTree is a convenient method to upload a tree described with multiple requests. This is useful when the list of paths is known
-// and the root might have too many descendants such that traversing and filtering might add a significant overhead.
+// DigestTree returns the digest of the merkle tree for root.
+func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute, slo symlinkopts.Options, exclude walker.Filter) (digest.Digest, Stats, error) {
+	ch := make(chan UploadRequest)
+	resCh := u.streamPipe(ctx, ch)
+
+	req := UploadRequest{Path: root, SymlinkOptions: slo, Exclude: exclude, ctx: ctx, digestOnly: true}
+	select {
+	case ch <- req:
+	case <-ctx.Done():
+	}
+	close(ch)
+
+	var stats Stats
+	var err error
+	for r := range resCh {
+		stats.Add(r.Stats)
+		err = errors.Join(r.Err, err)
+	}
+	rootNode := u.Node(req)
+	if rootNode == nil {
+		err = errors.Join(fmt.Errorf("root node was not found for %q", root), err)
+		return digest.Digest{}, stats, err
+	}
+	dg := digest.NewFromProtoUnvalidated(rootNode.(namedDigest).GetDigest())
+	return dg, stats, err
+}
+
+// UploadTree is a convenient method to upload a tree described with multiple requests.
 //
-// The following constraints are enforced on the reqs set to ensure proper hierarchy caching during the internal digestion process:
+// This is useful when the list of paths is known and the root might have too many descendants such that traversing and filtering might add a significant overhead.
 //
-//	No digests are set on any request.
-//	The paths are mutually exclusive. TODO
-//
+// All requests must share the same filter. Digest fields on the requests are ignored to ensure proper hierarchy caching via the internal digestion process.
 // remoteWorkingDir replaces workingDir inside the merkle tree such that the server is only aware of remoteWorkingDir.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
 	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree: reqs=%d", len(reqs))
@@ -416,21 +451,18 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// An ancestor directory takes precedence over all of its descendants to ensure unlited files are also included in traversal.
 	// Sorting the requests by path length ensures ancestors appear before descendants.
 	sort.Slice(reqs, func(i, j int) bool { return len(reqs[i].Path.String()) < len(reqs[j].Path.String()) })
-	// Cache the mapping between local and remote paths.
-	// remotePath := make(map[impath.Absolute]impath.Absolute, len(reqs))
 	// Fast lookup for potentially shared paths between requests.
 	pathSeen := make(map[impath.Absolute]bool, len(reqs))
 	localPrefix := execRoot.Append(workingDir)
 	i := 0
 	for _, r := range reqs {
-		if r.Digest.Hash != "" {
-			err = fmt.Errorf("cannot create a tree with a pre-digesetd path: %q", r.Path)
-			return
-		}
 		if r.Exclude.String() != filterID {
 			err = fmt.Errorf("cannot create a tree from requests with different exclusion filters: %q and %q", filterID, r.Exclude.String())
 			return
 		}
+
+		// Clear the digest to ensure proper hierarchy caching in the digester.
+		r.Digest = digest.Digest{}
 
 		if pathSeen[r.Path] {
 			continue
@@ -449,14 +481,8 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		if skip {
 			continue
 		}
-
-		// rpStr := strings.TrimPrefix(r.Path.String(), execRoot.String()+string(filepath.Separator))
-		// if strings.HasPrefix(rpStr, workingDir.String()) {
-		// rpStr = strings.Replace(rpStr, workingDir.String(), remoteWorkingDir.String(), 1)
-		// }
-		// rp := execRoot.Append(impath.MustRel(rpStr))
 		paths = append(paths, r.Path.String())
-		// remotePath[r.Path] = rp
+
 		// Shift left to accumulate included requests at the beginning of the array to avoid allocating another one.
 		reqs[i] = r
 		i++
@@ -616,10 +642,4 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	}
 
 	return
-}
-
-// namedDigest is used to conveniently extract the file name and its digest from nodes for logging purposes.
-type namedDigest interface {
-	GetName() string
-	GetDigest() *repb.Digest
 }

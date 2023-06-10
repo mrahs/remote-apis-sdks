@@ -24,6 +24,12 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// blob is returned by digestFile with only one of its fields set.
+type blob struct {
+	r io.ReadSeekCloser
+	b []byte
+}
+
 // digester reveives upload requests from multiple concurrent requesters.
 // For each request, a file system walk is started concurrently to digest and forward blobs to the dispatcher.
 // If the request is for an already digested blob, it is forwarded to the dispatcher.
@@ -42,7 +48,7 @@ func (u *uploader) digester() {
 	defer func() {
 		u.walkerWg.Wait()
 		// Let the dispatcher know that the digester has terminated by sending an untagged done blob.
-		u.dispatcherBlobCh <- blob{done: true}
+		u.dispatcherReqCh <- UploadRequest{done: true}
 	}()
 
 	requesterWalkWg := make(map[tag]*sync.WaitGroup)
@@ -56,7 +62,7 @@ func (u *uploader) digester() {
 			if wg == nil {
 				log.V(2).Infof("[casng] upload.digester.req.done: no pending walks for tag=%s", req.tag)
 				// Let the dispatcher know that this requester is done.
-				u.dispatcherBlobCh <- blob{tag: req.tag, done: true}
+				u.dispatcherReqCh <- req
 				// Covers waiting on the dispatcher.
 				log.V(3).Infof("[casng] upload.digester.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
 				continue
@@ -71,7 +77,7 @@ func (u *uploader) digester() {
 				log.V(2).Infof("[casng] upload.digester.walk.wait.start: tag=%s", t)
 				wg.Wait()
 				log.V(2).Infof("[casng] upload.digester.walk.wait.done: tag=%s", t)
-				u.dispatcherBlobCh <- blob{tag: t, done: true}
+				u.dispatcherReqCh <- UploadRequest{tag: t, done: true}
 			}(req.tag)
 			continue
 		}
@@ -97,10 +103,10 @@ func (u *uploader) digester() {
 				// Parent nodes may have already been generated and cached in u.nodeCache; updating the u.dirChildren cache will not regenerate them.
 			}
 			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, path=%s, tag=%s", len(req.Bytes), req.Path, req.tag)
+		}
 
-			if len(req.Bytes) > 0 {
-				u.dispatcherBlobCh <- blob{digest: req.Digest, bytes: req.Bytes, path: req.Path.String(), tag: req.tag, ctx: req.ctx}
-			}
+		if req.Digest.Hash != "" {
+			u.dispatcherReqCh <- req
 			// Covers waiting on the node cache and waiting on the dispatcher.
 			log.V(3).Infof("[casng] upload.digester.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
 			continue
@@ -198,7 +204,7 @@ func (u *uploader) digest(req UploadRequest) {
 			// Forward it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
 			switch node := node.(type) {
 			case *repb.FileNode:
-				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), path: realPath.String(), tag: req.tag, ctx: req.ctx}
+				u.dispatcherReqCh <- UploadRequest{Path: realPath, Digest: digest.NewFromProtoUnvalidated(node.Digest), tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 			case *repb.DirectoryNode:
 				// The blob of the directory node is the bytes of a repb.Directory message.
 				// Generate and forward it. If it was uploaded before, it'll be reported as a cache hit.
@@ -208,7 +214,7 @@ func (u *uploader) digest(req UploadRequest) {
 					err = errors.Join(errDigest, err)
 					return walker.SkipPath, false
 				}
-				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
+				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
 			default:
@@ -261,7 +267,7 @@ func (u *uploader) digest(req UploadRequest) {
 					return false
 				}
 				u.dirChildren.append(parentKey, node)
-				u.dispatcherBlobCh <- blob{digest: digest.NewFromProtoUnvalidated(node.Digest), bytes: b, tag: req.tag, ctx: req.ctx}
+				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 				u.nodeCache.Store(key, node)
 				log.V(3).Infof("[casng] upload.digester.visit.post.dir: path=%s, real_path=%s, digset=%v, tag=%s, walk_id=%s", path, realPath, node.Digest, req.tag, walkId)
 				return true
@@ -269,7 +275,7 @@ func (u *uploader) digest(req UploadRequest) {
 			case info.Mode().IsRegular():
 				stats.DigestCount += 1
 				stats.InputFileCount += 1
-				node, blb, errDigest := u.digestFile(realPath, info)
+				node, blb, errDigest := u.digestFile(realPath, info, req.digestOnly)
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
 					return false
@@ -281,9 +287,7 @@ func (u *uploader) digest(req UploadRequest) {
 					log.V(3).Infof("[casng] upload.digester.visit.post.file.cached: path=%s, real_path=%s, digest=%v, tag=%s, walk_id=%s", path, realPath, node.Digest, req.tag, walkId)
 					return true
 				}
-				blb.tag = req.tag
-				blb.ctx = req.ctx
-				u.dispatcherBlobCh <- *blb
+				u.dispatcherReqCh <- UploadRequest{Bytes: blb.b, reader: blb.r, Digest: digest.NewFromProtoUnvalidated(node.Digest), tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 				log.V(3).Infof("[casng] upload.digester.visit.post.file: path=%s, real_path=%s, digest=%v, tag=%s, walk_id=%s", path, realPath, node.Digest, req.tag, walkId)
 				return true
 
@@ -345,11 +349,9 @@ func (u *uploader) digest(req UploadRequest) {
 		},
 	})
 
+	// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
 	// err includes any IO errors that happened during the walk.
-	if err != nil {
-		// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
-		u.dispatcherResCh <- UploadResponse{tags: []tag{req.tag}, Err: err}
-	}
+	u.dispatcherResCh <- UploadResponse{tags: []tag{req.tag}, Stats: stats, Err: err}
 }
 
 // digestSymlink follows the target and/or constructs a symlink node.
@@ -460,7 +462,7 @@ func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.Dire
 // The caller must assume ownership of that token and release it.
 //
 // If the returned err is not nil, both tokens are released before returning.
-func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *repb.FileNode, blb *blob, err error) {
+func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo, closeLargeFile bool) (node *repb.FileNode, blb *blob, err error) {
 	// Always return a clone to ensure the cached version remains owned by the cache.
 	defer func() {
 		if node != nil {
@@ -520,7 +522,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *rep
 		}
 		node.Digest = dg.ToProto()
 		log.V(3).Infof("[casng] upload.digester.file.xattr: path=%s, size=%d", path, info.Size())
-		return node, &blob{digest: dg, path: path.String()}, nil
+		return node, &blob{}, nil
 	}
 
 	// Start by acquiring a token for the large file.
@@ -534,7 +536,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *rep
 		log.V(3).Infof("[casng] upload.digester.io_large_throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 		defer func() {
 			// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
-			if blb == nil || blb.reader == nil {
+			if blb == nil || blb.r == nil {
 				u.ioLargeThrottler.release()
 			}
 		}()
@@ -547,7 +549,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *rep
 	log.V(3).Infof("[casng] upload.digester.io_throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 	defer func() {
 		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
-		if blb == nil || blb.reader == nil {
+		if blb == nil || blb.r == nil {
 			u.ioThrottler.release()
 		}
 	}()
@@ -571,7 +573,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *rep
 		}
 		dg := digest.NewFromBlob(b)
 		node.Digest = dg.ToProto()
-		return node, &blob{bytes: b, digest: dg}, nil
+		return node, &blob{b: b}, nil
 	}
 
 	// Medium: blob with path.
@@ -582,7 +584,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *rep
 			return nil, nil, errDigest
 		}
 		node.Digest = dg.ToProto()
-		return node, &blob{digest: dg, path: path.String()}, nil
+		return node, &blob{}, nil
 	}
 
 	// Large: blob with a reader.
@@ -592,11 +594,12 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *rep
 		return nil, nil, err
 	}
 	defer func() {
-		if err != nil {
-			errClose := f.Close()
-			if errClose != nil {
+		if err != nil || closeLargeFile {
+			if errClose := f.Close(); errClose != nil {
 				err = errors.Join(errClose, err)
 			}
+			// Ensures IO holds are released in subsequent deferred functions.
+			blb = nil
 		}
 	}()
 
@@ -613,5 +616,5 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo) (node *rep
 
 	node.Digest = dg.ToProto()
 	// The streamer is responsible for closing the file and releasing both ioThrottler and ioLargeThrottler.
-	return node, &blob{digest: dg, reader: f}, nil
+	return node, &blob{r: f}, nil
 }

@@ -179,8 +179,8 @@ func (u *uploader) queryProcessor() {
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b missingBlobRequestBundle) {
-			defer u.queryThrottler.release()
 			defer u.workerWg.Done()
+			defer u.queryThrottler.release()
 			u.callMissingBlobs(ctx, b)
 		}(ctx, bundle)
 

@@ -168,11 +168,11 @@ type uploader struct {
 	walkerWg         sync.WaitGroup          // Tracks all walkers.
 	queryCh          chan missingBlobRequest // Fan-in channel for query requests.
 	digesterCh       chan UploadRequest      // Fan-in channel for upload requests.
-	dispatcherBlobCh chan blob               // Fan-in channel for dispatched blobs.
-	dispatcherPipeCh chan blob               // A pipe channel for presence checking before uploading.
+	dispatcherReqCh  chan UploadRequest      // Fan-in channel for dispatched requests.
+	dispatcherPipeCh chan UploadRequest      // A pipe channel for presence checking before uploading.
 	dispatcherResCh  chan UploadResponse     // Fan-in channel for responses.
-	batcherCh        chan blob               // Fan-in channel for unified requests to the batching API.
-	streamerCh       chan blob               // Fan-in channel for unified requests to the byte streaming API.
+	batcherCh        chan UploadRequest      // Fan-in channel for unified requests to the batching API.
+	streamerCh       chan UploadRequest      // Fan-in channel for unified requests to the byte streaming API.
 	queryPubSub      *pubsub                 // Fan-out broker for query responses.
 	uploadPubSub     *pubsub                 // Fan-out broker for upload responses.
 
@@ -289,11 +289,11 @@ func newUploader(
 		queryCh:          make(chan missingBlobRequest),
 		queryPubSub:      newPubSub(),
 		digesterCh:       make(chan UploadRequest),
-		dispatcherBlobCh: make(chan blob),
-		dispatcherPipeCh: make(chan blob),
+		dispatcherReqCh:  make(chan UploadRequest),
+		dispatcherPipeCh: make(chan UploadRequest),
 		dispatcherResCh:  make(chan UploadResponse),
-		batcherCh:        make(chan blob),
-		streamerCh:       make(chan blob),
+		batcherCh:        make(chan UploadRequest),
+		streamerCh:       make(chan UploadRequest),
 		uploadPubSub:     newPubSub(),
 
 		queryRequestBaseSize:      proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),

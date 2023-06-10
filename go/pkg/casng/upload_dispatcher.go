@@ -8,6 +8,13 @@ import (
 	log "github.com/golang/glog"
 )
 
+// tagCount is a tuple used by the dispatcher to track the number of in-flight requests for each requester.
+// A request is in-flight if it has been dispatched, but no corresponding response has been received for it yet.
+type tagCount struct {
+	t tag
+	c int
+}
+
 // dispatcher receives digested blobs and forwards them to the uploader or back to the requester in case of a cache hit or error.
 // The dispatcher handles counting in-flight requests per requester and notifying requesters when all of their requests are completed.
 func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
@@ -32,32 +39,36 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 		defer wg.Done()
 		defer func() {
 			// Let the piper know that the sender will not be sending any more blobs.
-			u.dispatcherPipeCh <- blob{done: true}
+			u.dispatcherPipeCh <- UploadRequest{done: true}
 		}()
 		log.V(1).Info("[casng] upload.dispatcher.sender.start")
 		defer log.V(1).Info("[casng] upload.dispatcher.sender.stop")
 
-		for b := range u.dispatcherBlobCh {
+		for req := range u.dispatcherReqCh {
 			startTime := time.Now()
-			if b.done { // The digester will not be sending any further blobs.
-				log.V(3).Infof("[casng] upload.dispatcher.blob.done: tag=%s", b.tag)
-				counterCh <- tagCount{b.tag, 0}
+			if req.done { // The digester will not be sending any further blobs.
+				log.V(3).Infof("[casng] upload.dispatcher.req.done: tag=%s", req.tag)
+				counterCh <- tagCount{req.tag, 0}
 				// Covers waiting on the counter.
-				log.V(3).Infof("[casng] upload.dispatcher.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), b.tag)
-				if b.tag == "" { // In fact, the digester (and all requesters) have terminated.
+				log.V(3).Infof("[casng] upload.dispatcher.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
+				if req.tag == "" { // In fact, the digester (and all requesters) have terminated.
 					return
 				}
 				continue
 			}
-			if b.digest.Hash == "" {
-				log.Errorf("[casng] upload.dispatcher: received a blob without a digest for tag=%s; ignoring", b.tag)
+			if req.Digest.Hash == "" {
+				log.Errorf("[casng] upload.dispatcher: received a request without a digest for tag=%s; ignoring", req.tag)
 				continue
 			}
-			log.V(3).Infof("[casng] upload.dispatcher.blob: digest=%s, bytes=%d, tag=%s", b.digest, len(b.bytes), b.tag)
-			u.dispatcherPipeCh <- b
-			counterCh <- tagCount{b.tag, 1}
+			log.V(3).Infof("[casng] upload.dispatcher.req: digest=%s, bytes=%d, tag=%s", req.Digest, len(req.Bytes), req.tag)
+			if req.digestOnly {
+				u.dispatcherResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{}, tags: []tag{req.tag}}
+				continue
+			}
+			u.dispatcherPipeCh <- req
+			counterCh <- tagCount{req.tag, 1}
 			// Covers waiting on the counter and the dispatcher.
-			log.V(3).Infof("[casng] upload.dispatcher.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), b.tag)
+			log.V(3).Infof("[casng] upload.dispatcher.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
 		}
 	}()
 
@@ -73,34 +84,34 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 		batchItemSizeLimit := int64(u.batchRPCCfg.BytesLimit - u.uploadRequestBaseSize - u.uploadRequestItemBaseSize)
 		// Keep track of blobs that are associated with a digest since the query API only accepts digests.
 		// Each blob may have a different tag and context so all must be dispathced.
-		digestBlobs := make(map[digest.Digest][]blob)
+		digestReqs := make(map[digest.Digest][]UploadRequest)
 
 		for {
 			select {
 			// The dispatcher sends blobs on this channel, but never closes it.
-			case b := <-u.dispatcherPipeCh:
+			case req := <-u.dispatcherPipeCh:
 				startTime := time.Now()
 				// In the off chance that a request is received after a done signal, ignore it to avoid sending on a closed channel.
 				if done {
-					log.Errorf("[casng] upload.dispatcher.pipe: received a request after a done signal from tag=%s; ignoring", b.tag)
+					log.Errorf("[casng] upload.dispatcher.pipe: received a request after a done signal from tag=%s; ignoring", req.tag)
 					continue
 				}
 				// If the dispatcher has terminated, tell the streamer we're done and continue draining the response channel.
-				if b.done {
+				if req.done {
 					log.V(2).Info("upload.dispatcher.pipe.done")
 					done = true
 					close(queryCh)
 					continue
 				}
 
-				log.V(3).Infof("[casng] upload.dispatcher.pipe.blob: digest=%s, tag=%s", b.digest, b.tag)
-				digestBlobs[b.digest] = append(digestBlobs[b.digest], b)
-				if len(digestBlobs[b.digest]) > 1 {
+				log.V(3).Infof("[casng] upload.dispatcher.pipe.blob: digest=%s, tag=%s", req.Digest, req.tag)
+				digestReqs[req.Digest] = append(digestReqs[req.Digest], req)
+				if len(digestReqs[req.Digest]) > 1 {
 					continue
 				}
-				queryCh <- missingBlobRequest{digest: b.digest, ctx: b.ctx}
+				queryCh <- missingBlobRequest{digest: req.Digest, ctx: req.ctx}
 				// Covers waiting on the query processor.
-				log.V(3).Infof("[casng] upload.dispatcher.pipe.send.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), b.tag)
+				log.V(3).Infof("[casng] upload.dispatcher.pipe.send.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
 
 			// This channel is closed by the query pipe when queryCh is closed, which happens when the sender
 			// sends a done signal. This ensures all responses are forwarded to the dispatcher.
@@ -110,8 +121,8 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 				}
 				startTime := time.Now()
 				log.V(3).Infof("[casng] upload.dispatcher.pipe.res: digest=%s, missing=%t, err=%v", r.Digest, r.Missing, r.Err)
-				blobs := digestBlobs[r.Digest]
-				delete(digestBlobs, r.Digest)
+				reqs := digestReqs[r.Digest]
+				delete(digestReqs, r.Digest)
 				res := UploadResponse{Digest: r.Digest, Err: r.Err}
 
 				if !r.Missing {
@@ -123,10 +134,10 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 				}
 
 				if r.Err != nil || !r.Missing {
-					res.tags = make([]tag, len(blobs))
-					for i, b := range blobs {
-						res.tags[i] = b.tag
-						if b.reader != nil {
+					res.tags = make([]tag, len(reqs))
+					for i, req := range reqs {
+						res.tags[i] = req.tag
+						if req.reader != nil {
 							u.ioThrottler.release()
 							u.ioLargeThrottler.release()
 						}
@@ -138,12 +149,12 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 					continue
 				}
 
-				for _, b := range blobs {
-					if b.digest.Size <= batchItemSizeLimit {
-						u.batcherCh <- b
+				for _, req := range reqs {
+					if req.Digest.Size <= batchItemSizeLimit {
+						u.batcherCh <- req
 						continue
 					}
-					u.streamerCh <- b
+					u.streamerCh <- req
 				}
 				// Covers waiting on the batcher and streamer.
 				log.V(3).Infof("[casng] upload.dispatcher.pipe.upload.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
@@ -173,7 +184,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 			}
 
 			for _, t := range r.tags {
-				// Special case: do not decrement if the response was from a digestion error.
+				// Special case: Do not decrement if it's an end of walk response.
 				if r.Digest.Hash != "" {
 					counterCh <- tagCount{t, -1}
 				}

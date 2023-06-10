@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -263,6 +264,10 @@ func (ec *Context) ngUploadInputs() error {
 		reqs = append(reqs, casng.UploadRequest{Path: absPath, SymlinkOptions: slo, Exclude: filter})
 	}
 	// Append virtual inputs after real inputs in order to ignore any redundant virtual inputs.
+	// Sorting by path length descending is necessary to skip redundant ancestors. Otherwise, the conslidation in casng.UploadTree will skip descendants.
+	sort.Slice(ec.cmd.InputSpec.VirtualInputs, func(i, j int) bool {
+		return len(ec.cmd.InputSpec.VirtualInputs[i].Path) > len(ec.cmd.InputSpec.VirtualInputs[j].Path)
+	})
 	for _, p := range ec.cmd.InputSpec.VirtualInputs {
 		if p.Path == "" {
 			return fmt.Errorf("[casng] %s %s> empty virtual path", cmdID, executionID)
@@ -279,7 +284,7 @@ func (ec *Context) ngUploadInputs() error {
 		if err != nil {
 			return err
 		}
-		// If redundant, ignore it to avoid corrupting the node cache.
+		// If it collides with a real path, ignore it to avoid corrupting the node cache.
 		if pathSeen[absPath] {
 			continue
 		}

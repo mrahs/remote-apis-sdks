@@ -10,6 +10,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -513,7 +514,32 @@ func TestUpload_BatchingTree(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if diff := cmp.Diff("4b29476de8abdfcce452b64003ed82517aa003d9e447ff943723e556e723d75c/78", rootDigest.String()); diff != "" {
-		t.Errorf("root digest mismatch, (-want _got): %s\nng_tree:\n%s", diff, *ngTree)
+		t.Errorf("root digest mismatch, (-want +got): %s\nng_tree:\n%s", diff, *ngTree)
 	}
-	t.Errorf("ng_tree:\n%s", *ngTree)
+}
+
+func TestUpload_BatchingDigestTree(t *testing.T) {
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+
+	u, err := casng.NewBatchingUploader(ctx, &fakeCAS{}, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
+	if err != nil {
+		t.Fatalf("error creating batching uploader: %v", err)
+	}
+	tmp := makeFs(t, map[string][]byte{"rwd/a/b/c/foo.go": []byte("foo"), "rwd/a/b/bar.go": []byte("bar"), "rwd/e/f/baz.go": []byte("baz")})
+	rootDigest, stats, err := u.DigestTree(ctx, impath.MustAbs(tmp), symlinkopts.ResolveAlways(), walker.Filter{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if diff := cmp.Diff("4b29476de8abdfcce452b64003ed82517aa003d9e447ff943723e556e723d75c/78", rootDigest.String()); diff != "" {
+		t.Errorf("root digest mismatch, (-want +got): %s", diff)
+	}
+	wantStats := casng.Stats{
+		InputFileCount: 3,
+		InputDirCount:  7,
+		DigestCount:    10,
+	}
+	if diff := cmp.Diff(wantStats, stats); diff != "" {
+		t.Errorf("stats mismatch, (-want +got): %s", diff)
+	}
 }
