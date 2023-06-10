@@ -319,6 +319,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 // The returned error wraps a number of errors proportional to the length of the specified slice.
 //
 // This method must not be called after cancelling the uploader's context.
+// TODO: repb.Tree
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, Stats, error) {
 	contextmd.Infof(ctx, log.Level(1), "[casng] upload: %d requests", len(reqs))
 	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.done")
@@ -398,6 +399,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 }
 
 // DigestTree returns the digest of the merkle tree for root.
+// TODO: repb.Tree
 func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute, slo symlinkopts.Options, exclude walker.Filter) (digest.Digest, Stats, error) {
 	ch := make(chan UploadRequest)
 	resCh := u.streamPipe(ctx, ch)
@@ -430,6 +432,7 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 //
 // All requests must share the same filter. Digest fields on the requests are ignored to ensure proper hierarchy caching via the internal digestion process.
 // remoteWorkingDir replaces workingDir inside the merkle tree such that the server is only aware of remoteWorkingDir.
+// TODO: repb.Tree
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
 	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree: reqs=%d", len(reqs))
 	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree.done")

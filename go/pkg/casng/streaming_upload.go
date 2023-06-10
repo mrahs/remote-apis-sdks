@@ -153,6 +153,7 @@ type uploadRequestBundle = map[digest.Digest]uploadRequestBundleItem
 // digest receives a copy of the coorresponding UploadResponse.
 //
 // This method must not be called after cancelling the uploader's context.
+// TODO: repb.Tree
 func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
 	return u.streamPipe(ctx, in)
 }
