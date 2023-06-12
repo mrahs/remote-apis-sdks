@@ -8,7 +8,6 @@ go_library(
         "downloader.go",
         "node_slice_cache.go",
         "pubsub.go",
-        "retry.go",
         "streaming_query.go",
         "streaming_upload.go",
         "throttler.go",

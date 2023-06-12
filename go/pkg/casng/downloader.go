@@ -12,6 +12,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
@@ -99,7 +100,7 @@ func (d *BatchingDownloader) ReadBytes(ctx context.Context, name string, offset 
 	var err error
 	for {
 		var resp *bspb.ReadResponse
-		errStream := withRetry(ctx, d.streamRPCCfg.RetryPredicate, d.streamRPCCfg.RetryPolicy, func() error {
+		errStream := retry.WithPolicy(ctx, d.streamRPCCfg.RetryPredicate, d.streamRPCCfg.RetryPolicy, func() error {
 			timer := time.NewTimer(d.streamRPCCfg.Timeout)
 			// Ensure the timer goroutine terminates if Recv does not timeout.
 			success := make(chan struct{})

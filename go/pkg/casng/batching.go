@@ -15,6 +15,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
@@ -75,7 +76,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	req := &repb.FindMissingBlobsRequest{InstanceName: u.instanceName}
 	for _, batch := range batches {
 		req.BlobDigests = batch
-		errRes = withRetry(ctx, u.queryRPCCfg.RetryPredicate, u.queryRPCCfg.RetryPolicy, func() error {
+		errRes = retry.WithPolicy(ctx, u.queryRPCCfg.RetryPredicate, u.queryRPCCfg.RetryPolicy, func() error {
 			ctx, ctxCancel := context.WithTimeout(ctx, u.queryRPCCfg.Timeout)
 			defer ctxCancel()
 			res, errRes = u.cas.FindMissingBlobs(ctx, req)
@@ -211,7 +212,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 
 		req.Data = buf[:n]
 		req.FinishWrite = finish && errRead == io.EOF
-		errStream := withRetry(ctx, u.streamRPCCfg.RetryPredicate, u.streamRPCCfg.RetryPolicy, func() error {
+		errStream := retry.WithPolicy(ctx, u.streamRPCCfg.RetryPredicate, u.streamRPCCfg.RetryPolicy, func() error {
 			timer := time.NewTimer(u.streamRPCCfg.Timeout)
 			// Ensure the timer goroutine terminates if Send does not timeout.
 			success := make(chan struct{})
