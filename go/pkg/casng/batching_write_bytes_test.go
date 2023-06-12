@@ -275,11 +275,17 @@ func TestUpload_WriteBytes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("error creating batching uploader: %v", err)
 			}
+			var name string
+			if len(test.b) >= int(defaultIOCfg.CompressionSizeThreshold) {
+				name = casng.MakeCompressedWriteResourceName("instance", "hash", 0)
+			} else {
+				name = casng.MakeWriteResourceName("instance", "hash", 0)
+			}
 			var stats casng.Stats
 			if test.finish {
-				stats, err = u.WriteBytes(context.Background(), "", bytes.NewReader(test.b), int64(len(test.b)), test.offset)
+				stats, err = u.WriteBytes(context.Background(), name, bytes.NewReader(test.b), int64(len(test.b)), test.offset)
 			} else {
-				stats, err = u.WriteBytesPartial(context.Background(), "", bytes.NewReader(test.b), int64(len(test.b)), test.offset)
+				stats, err = u.WriteBytesPartial(context.Background(), name, bytes.NewReader(test.b), int64(len(test.b)), test.offset)
 			}
 			if test.wantErr == nil && err != nil {
 				t.Errorf("WriteBytes failed: %v", err)

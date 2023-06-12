@@ -65,7 +65,9 @@ func TestUpload_Batching(t *testing.T) {
 			wantStats: casng.Stats{
 				BytesRequested:     6,
 				LogicalBytesCached: 6,
+				InputFileCount:     1,
 				CacheHitCount:      1,
+				DigestCount:        1,
 			},
 			wantUploaded: nil,
 		},
@@ -117,6 +119,8 @@ func TestUpload_Batching(t *testing.T) {
 				LogicalBytesBatched: 6,
 				CacheMissCount:      1,
 				BatchedCount:        1,
+				InputFileCount:      1,
+				DigestCount:         1,
 			},
 			wantUploaded: []digest.Digest{{Hash: "62f74d0e355efb6101ee13172d05e89592d4aef21ba0e4041584d8653e60c4c3", Size: 6}},
 		},
@@ -168,6 +172,8 @@ func TestUpload_Batching(t *testing.T) {
 				LogicalBytesStreamed: 6,
 				CacheMissCount:       1,
 				StreamedCount:        1,
+				InputFileCount:       1,
+				DigestCount:          1,
 			},
 			wantUploaded: []digest.Digest{{Hash: "62f74d0e355efb6101ee13172d05e89592d4aef21ba0e4041584d8653e60c4c3", Size: 6}},
 		},
@@ -225,6 +231,9 @@ func TestUpload_Batching(t *testing.T) {
 				LogicalBytesBatched: 407,
 				CacheMissCount:      6,
 				BatchedCount:        6,
+				InputFileCount:      3,
+				InputDirCount:       3,
+				DigestCount:         6,
 			},
 			wantUploaded: []digest.Digest{
 				{Hash: "62f74d0e355efb6101ee13172d05e89592d4aef21ba0e4041584d8653e60c4c3", Size: 6},   // foo/a/b/c.c
@@ -289,6 +298,9 @@ func TestUpload_Batching(t *testing.T) {
 				LogicalBytesStreamed: 407,
 				CacheMissCount:       6,
 				StreamedCount:        6,
+				InputFileCount:       3,
+				InputDirCount:        3,
+				DigestCount:          6,
 			},
 			wantUploaded: []digest.Digest{
 				{Hash: "62f74d0e355efb6101ee13172d05e89592d4aef21ba0e4041584d8653e60c4c3", Size: 6},   // foo/a/b/c.c
@@ -360,6 +372,9 @@ func TestUpload_Batching(t *testing.T) {
 				CacheMissCount:       2,
 				CacheHitCount:        1,
 				StreamedCount:        2,
+				InputFileCount:       2,
+				InputDirCount:        1,
+				DigestCount:          3,
 			},
 			wantUploaded: []digest.Digest{
 				{Hash: "9877358cfe402635019ce7bf591e9fd86d27953b0077e1f173b7875f0043d87a", Size: 8},   // the file
@@ -417,6 +432,9 @@ func TestUpload_Batching(t *testing.T) {
 				CacheMissCount:      2,
 				CacheHitCount:       1,
 				BatchedCount:        2,
+				InputFileCount:      2,
+				InputDirCount:       1,
+				DigestCount:         3,
 			},
 			wantUploaded: []digest.Digest{
 				{Hash: "9877358cfe402635019ce7bf591e9fd86d27953b0077e1f173b7875f0043d87a", Size: 8},   // the file
