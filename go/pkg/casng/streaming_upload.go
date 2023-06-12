@@ -340,7 +340,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 	digestRetryCount := make(map[digest.Digest]int64)
 
 	startTime := time.Now()
-	err := u.withRetry(ctx, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
+	err := withRetry(ctx, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
 		// This call can have partial failures. Only retry retryable failed requests.
 		ctx, ctxCancel := context.WithTimeout(ctx, u.batchRPCCfg.Timeout)
 		defer ctxCancel()

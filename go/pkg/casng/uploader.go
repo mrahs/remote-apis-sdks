@@ -6,34 +6,34 @@
 /*
 
 
-                                 Dispatcher
-                      ┌─────────────────────────┐
-                      │                         │
-       ┌───────────┐  │ ┌─────┐       ┌──────┐  │ Digest
-       │           │  │ │     │ Digest│ Pipe ├──┼───────┐
-       │ Digester  ├──┼─► Req ├───────► Req  │  │       │
-       │           │  │ └─────┘       └──────┘  │  ┌────▼─────┐
-       └─────▲─────┘  │                         │  │          │
-     Upload  │        │                         │  │  Query   │
-     Request │        │                         │  │ Processor│
-             │        │                         │  │          │
-        ┌────┴───┐    │ ┌─────┐ Cache ┌──────┐  │  └────┬─────┘
-        │        ◄────┼─┤ Res │  Hit  │ Pipe │  │       │
-        │  User  │    │ │     ◄───────┤ Res  ◄──┼───────┘
-        │        │    │ └▲──▲─┘       └┬────┬┘  │  Query
-        └────────┘    │  │  │     Small│    │   │ Response
-                      │  │  │     Blob │    │   │
-                      └──┼──┼──────────┼────┼───┘
-                         │  │          │    │
-                         │  │ ┌────────▼─┐  │Large
-                         │  │ │  Batcher │  │Blob
-                         │  └─┤   gRPC   │  │
-                         │    └──────────┘  │
-                         │                  │
-                         │    ┌──────────┐  │
-                         │    │ Streamer │  │
-                         └────┤   gRPC   ◄──┘
-                              └──────────┘
+                               Dispatcher
+                    ┌─────────────────────────┐
+                    │                         │
+     ┌───────────┐  │ ┌─────┐       ┌──────┐  │ Digest
+     │           │  │ │     │ Digest│ Pipe ├──┼───────┐
+     │ Digester  ├──┼─► Req ├───────► Req  │  │       │
+     │           │  │ └─────┘       └──────┘  │  ┌────▼─────┐
+     └─────▲─────┘  │                         │  │          │
+   Upload  │        │                         │  │  Query   │
+   Request │        │                         │  │ Processor│
+           │        │                         │  │          │
+      ┌────┴───┐    │ ┌─────┐ Cache ┌──────┐  │  └────┬─────┘
+      │        ◄────┼─┤ Res │  Hit  │ Pipe │  │       │
+      │  User  │    │ │     ◄───────┤ Res  ◄──┼───────┘
+      │        │    │ └▲──▲─┘       └┬────┬┘  │  Query
+      └────────┘    │  │  │     Small│    │   │ Response
+                    │  │  │     Blob │    │   │
+                    └──┼──┼──────────┼────┼───┘
+                       │  │          │    │
+                       │  │ ┌────────▼─┐  │Large
+                       │  │ │  Batcher │  │Blob
+                       │  └─┤   gRPC   │  │
+                       │    └──────────┘  │
+                       │                  │
+                       │    ┌──────────┐  │
+                       │    │ Streamer │  │
+                       └────┤   gRPC   ◄──┘
+                            └──────────┘
 */
 // The overall streaming flow is as follows:
 //   digester        -> dispatcher/req
@@ -68,15 +68,16 @@
 
 // A note about logging:
 //
-//	Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
-//	Level 2 is used for internal functions that may be called per request.
-//	Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
-//  Level 4 is used for messages with large objects.
-//  Level 5 is used for messages that require custom processing (extra compute).
+//		Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
+//		Level 2 is used for internal functions that may be called per request.
+//		Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
+//	 Level 4 is used for messages with large objects.
+//	 Level 5 is used for messages that require custom processing (extra compute).
 //
 // To get a csv file of durations, enable verbosity level 3 and use the command:
-// rg -. $CHROME_SRC/src/out/reclient/.reproxy_tmp/logs/reproxy.INFO -e 'casng.*duration:' | \
-//   cut -d ' ' -f 6-8 | sed -e 's/: start=/,/' -e 's/, end=/,/' -e 's/,$//' > /tmp/durations.csv
+//
+//	rg -. $CHROME_SRC/src/out/reclient/.reproxy_tmp/logs/reproxy.INFO -e 'casng.*duration:' | \
+//	  cut -d ' ' -f 6-8 | sed -e 's/: start=/,/' -e 's/, end=/,/' -e 's/,$//' > /tmp/durations.csv
 package casng
 
 import (
@@ -84,11 +85,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
 	"github.com/klauspost/compress/zstd"
@@ -125,6 +126,11 @@ func MakeWriteResourceName(instanceName, hash string, size int64) string {
 // MakeCompressedWriteResourceName returns a valid resource name for writing a compressed blob.
 func MakeCompressedWriteResourceName(instanceName, hash string, size int64) string {
 	return fmt.Sprintf("%s/uploads/%s/compressed-blobs/zstd/%s/%d", instanceName, uuid.New(), hash, size)
+}
+
+// IsCompressedResourceName returns true if the name was generated using MakeCompressedWriteResourceName.
+func IsCompressedResourceName(name string) bool {
+	return strings.Contains(name, "compressed-blobs/zstd")
 }
 
 // BatchingUplodaer provides a blocking interface to query and upload to the CAS.
@@ -420,10 +426,6 @@ func (u *uploader) logBeat() {
 		log.V(3).Infof("[casng] beat: upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
 			u.uploadPubSub.len(), u.queryPubSub.len(), u.walkThrottler.len(), u.uploadThrottler.len(), u.streamThrottle.len(), u.queryThrottler.len(), u.ioThrottler.len(), u.ioLargeThrottler.len())
 	}
-}
-
-func (u *uploader) withRetry(ctx context.Context, predicate retry.ShouldRetry, policy retry.BackoffPolicy, fn func() error) error {
-	return retry.WithPolicy(ctx, predicate, policy, fn)
 }
 
 func isExec(mode fs.FileMode) bool {
