@@ -1,50 +1,71 @@
 // This file includes the implementation for uploading blobs to the CAS.
 //
 // The following diagram illustrates the overview of the design implemented in this package.
+// The request follows a linear path through the system: request -> digest -> query -> upload -> response.
+// Each box represents a processor with its own state to manage concurrent requests and proper messaging with other processors.
 /*
-// TODO: update diagram
 
-                              ┌──────────┐
-                              │          │
-                      ┌───────► User     ├─────┐
-                      │       │          │     │
-                      │       └──────────┘     │
-                      │                        │
-                      │       ┌──────────┐     └─►┌─────────────┐
-                      │       │          │        │   Upload    │
-                      ├───────► User     ├───────►│  Processor  │
-                      │       │          │        │             │
-                      │       └──────────┘    ┌──►│             │
-                      │                       │   └──────┬──────┘
-                      │       ┌──────────┐    │          │
-                      │       │          │    │          │
-                      ├───────► User     ├────┘          │
-                      │       │          │        ┌──────▼──────┐
-                      │       └──────────┘        │             │
-                      │                           │             │
-    ┌──────────────┐  └───────────────────────────┤ Dispatcher  │◄─────────────┐
-    │              │                              │             │              │
-    │   Query      │                   ┌──────────┤             ├──────────┐   │
-    │  Processor   │◄─────┐            │          └─────▲───────┘          │   │
-    │              │      │            │                │                  │   │
-    │              ├───┐  │            │                │                  │   │
-    └──────┬──▲────┘   │  │    ┌───────▼────┐     ┌─────┴──────┐     ┌─────▼───┴──┐
-           │  │        │  │    │            │     │            │     │            │
-           │  │        │  │    │            │     │            │     │            │
-           │  │        │  └────┤ Pipe       ├─────►  Batch     ├─────►  Stream    │
-   ┌───────▼──┴────┐   │       │            │     │            │     │            │
-   │               │   └──────►│            │     │            │     │            │
-   │   CAS         │           └────────────┘     └───┬───▲────┘     └──────┬───▲─┘
-   │ Missing Blobs │                                  │   │                 │   │
-   │               │                                  │   │                 │   │
-   └───────────────┘                                  │   │                 │   │
-                                                ┌─────▼───┴─────┐       ┌───▼───┴───────┐
-                                                │               │       │               │
-                                                │   CAS         │       │   CAS         │
-                                                │ Batch gRPC    │       │ Byte Stream   │
-                                                │               │       │               │
-                                                └───────────────┘       └───────────────┘
+
+                                 Dispatcher
+                      ┌─────────────────────────┐
+                      │                         │
+       ┌───────────┐  │ ┌─────┐       ┌──────┐  │ Digest
+       │           │  │ │     │ Digest│ Pipe ├──┼───────┐
+       │ Digester  ├──┼─► Req ├───────► Req  │  │       │
+       │           │  │ └─────┘       └──────┘  │  ┌────▼─────┐
+       └─────▲─────┘  │                         │  │          │
+     Upload  │        │                         │  │  Query   │
+     Request │        │                         │  │ Processor│
+             │        │                         │  │          │
+        ┌────┴───┐    │ ┌─────┐ Cache ┌──────┐  │  └────┬─────┘
+        │        ◄────┼─┤ Res │  Hit  │ Pipe │  │       │
+        │  User  │    │ │     ◄───────┤ Res  ◄──┼───────┘
+        │        │    │ └▲──▲─┘       └┬────┬┘  │  Query
+        └────────┘    │  │  │     Small│    │   │ Response
+                      │  │  │     Blob │    │   │
+                      └──┼──┼──────────┼────┼───┘
+                         │  │          │    │
+                         │  │ ┌────────▼─┐  │Large
+                         │  │ │  Batcher │  │Blob
+                         │  └─┤   gRPC   │  │
+                         │    └──────────┘  │
+                         │                  │
+                         │    ┌──────────┐  │
+                         │    │ Streamer │  │
+                         └────┤   gRPC   ◄──┘
+                              └──────────┘
 */
+// The overall streaming flow is as follows:
+//   digester        -> dispatcher/req
+//   dispatcher/req  -> dispatcher/pipe
+//   dispatcher/pipe -> query processor
+//   query processor -> dispatcher/pipe
+//   dispatcher/pipe -> dispatcher/res (cache hit)
+//   dispatcher/res  -> requester (cache hit)
+//   dispatcher/pipe -> batcher (small file)
+//   dispatcher/pipe -> streamer (medium and large file)
+//   batcher         -> dispatcher/res
+//   streamer        -> dispatcher/res
+//   dispatcher/res  -> requester
+//
+// The termination sequence is as follows:
+//   user cancels the batching or the streaming context, not the uploader's context, and closes input streaming channels.
+//       cancelling the context triggers aborting in-flight requests.
+//   user cancels uploader's context: cancels pending digestions and gRPC processors blocked on throttlers.
+//   client senders (top level) terminate.
+//   the digester channel is closed, and a termination signal is sent to the dispatcher.
+//   the dispatcher terminates its sender and propagates the signal to its piper.
+//   the dispatcher's piper propagtes the signal to the intermediate query streamer.
+//   the intermediate query streamer terimnates and propagates the signal to the query processor and dispatcher's piper.
+//   the query processor terminates.
+//   the dispatcher's piper terminates.
+//   the dispatcher's counter termiantes (after observing all the remaining blobs) and propagates the signal to the receiver.
+//   the dispatcher's receiver terminates.
+//   the dispatcher terminates and propagates the signal to the batcher and the streamer.
+//   the batcher and the streamer terminate.
+//   user waits for the termination signal: return from batching uploader or response channel closed from streaming uploader.
+//       this ensures the whole pipeline is drained properly.
+
 // A note about logging:
 //
 //	Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.

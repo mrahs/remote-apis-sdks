@@ -1,33 +1,3 @@
-// This file includes the streaming implementation.
-// The overall streaming flow is as follows:
-//   digester        -> dispatcher/blob
-//   dispatcher/blob -> dispatcher/pipe
-//   dispatcher/pipe -> dispatcher/res
-//   dispatcher/res  -> requester (cache hit)
-//   dispatcher/pipe -> batcher (small)
-//   dispatcher/pipe -> streamer (medium and large)
-//   batcher         -> dispatcher/res
-//   streamer        -> dispatcher/res
-//   dispatcher/res  -> requester
-//
-// The termination sequence is as follows:
-//   user cancels the batching or the streaming context, not the uploader's context, and closes input streaming channels.
-//       cancelling the context triggers aborting in-flight requests.
-//   user cancels uploader's context: cancels pending digestions and gRPC processors blocked on throttlers.
-//   client senders (top level) terminate.
-//   the digester channel is closed, and a termination signal is sent to the dispatcher.
-//   the dispatcher terminates its sender and propagates the signal to its piper.
-//   the dispatcher's piper propagtes the signal to the intermediate query streamer.
-//   the intermediate query streamer terimnates and propagates the signal to the query processor and dispatcher's piper.
-//   the query processor terminates.
-//   the dispatcher's piper terminates.
-//   the dispatcher's counter termiantes (after observing all the remaining blobs) and propagates the signal to the receiver.
-//   the dispatcher's receiver terminates.
-//   the dispatcher terminates and propagates the signal to the batcher and the streamer.
-//   the batcher and the streamer terminate.
-//   user waits for the termination signal: return from batching uploader or response channel closed from streaming uploader.
-//       this ensures the whole pipeline is drained properly.
-
 package casng
 
 import (
