@@ -207,7 +207,6 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 		}
 
 		n64 := int64(n)
-		stats.LogicalBytesMoved += n64 // This may be adjusted later to exclude compression. See below.
 		stats.EffectiveBytesMoved += n64
 
 		req.Data = buf[:n]
@@ -264,8 +263,8 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 
 	// Capture stats before processing errors.
 	stats.BytesRequested = size
-	if nRawBytes > 0 {
-		// Compression was turned on.
+	stats.LogicalBytesMoved = stats.EffectiveBytesMoved
+	if withCompression {
 		// nRawBytes may be smaller than compressed bytes (additional headers without effective compression).
 		stats.LogicalBytesMoved = nRawBytes
 	}

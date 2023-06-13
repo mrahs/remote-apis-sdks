@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,8 +16,21 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
+	"github.com/klauspost/compress/zstd"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 )
+
+func MakeReadResourceName(instanceName, hash string, size int64) string {
+	return fmt.Sprintf("%s/blobs/%s/%d", instanceName, hash, size)
+}
+
+func MakeCompressedReadResourceName(instanceName, hash string, size int64) string {
+	return fmt.Sprintf("%s/compressed-blobs/zstd/%s/%d", instanceName, hash, size)
+}
+
+func IsCompressedReadResourceName(name string) bool {
+	return strings.Contains(name, "compressed-blobs/zstd")
+}
 
 type DownloadRequest struct {
 	Digest digest.Digest
@@ -44,6 +58,7 @@ type downloader struct {
 	ioCfg        IOConfig
 	buffers      sync.Pool
 	zstdEncoders sync.Pool
+	zstdDecoders sync.Pool
 }
 
 func NewDownloader() *BatchingDownloader {
@@ -72,14 +87,56 @@ func (d *BatchingDownloader) ReadBytes(ctx context.Context, name string, offset 
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
-			log.Infof("[casng] download.read_bytes.duration: start=%d, end=%d, name=%s, chunk_size=%d", startTime.UnixNano(), time.Now().UnixNano(), name, d.ioCfg.BufferSize)
+			log.Infof("[casng] download.read_bytes.duration: start=%d, end=%d, name=%s", startTime.UnixNano(), time.Now().UnixNano(), name)
 		}()
 	}
-	var stats Stats
-	var digest digest.Digest
 
-	// TODO: create a pipe for digestion.
-	// TODO: create a pipe for decompression.
+	var wg sync.WaitGroup
+	var dg digest.Digest
+	var stats Stats
+
+	// Tee the (decoded) bytes to the digester.
+	var errDg error
+	pr, pw := io.Pipe()
+	r := io.TeeReader(pr, writer)
+	writer = pw
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		dg, errDg = digest.NewFromReader(r)
+	}()
+
+	// If compression is on, plug in the decoder via a pipe.
+	w := writer
+	var errDec error
+	var nRawBytes int64 // Track the actual number of written raw bytes.
+	var withDecompression bool
+	if IsCompressedReadResourceName(name) {
+		contextmd.Infof(ctx, log.Level(1), "[casng] download.read_bytes.decompressing: name=%s", name)
+		withDecompression = true
+		pr, pw := io.Pipe()
+		// Closing pw always returns a nil error, but also sends EOF to pr.
+		defer pw.Close()
+		w = pw
+
+		dec := d.zstdDecoders.Get().(*zstd.Decoder)
+		defer d.zstdDecoders.Put(dec)
+		// (Re)initialize the encoder with this reader.
+		dec.Reset(pr)
+		// Get it going.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			nRawBytes, errDec = dec.WriteTo(writer)
+			// Closing the decoder is necessary to flush remaining bytes.
+			dec.Close()
+			if errors.Is(errDec, io.ErrClosedPipe) {
+				// pr was closed first, which means the actual error is on that end.
+				errDec = nil
+			}
+		}()
+	}
 
 	ctx, ctxCancel := context.WithCancel(ctx)
 	defer ctxCancel()
@@ -90,12 +147,8 @@ func (d *BatchingDownloader) ReadBytes(ctx context.Context, name string, offset 
 		ReadLimit:    limit,
 	})
 	if errStream != nil {
-		return digest, stats, errors.Join(ErrGRPC, errStream)
+		return dg, stats, errors.Join(ErrGRPC, errStream)
 	}
-
-	// buf slice is never resliced which makes it safe to use a pointer-like type.
-	buf := d.buffers.Get().([]byte)
-	defer d.buffers.Put(buf)
 
 	var err error
 	for {
@@ -121,7 +174,7 @@ func (d *BatchingDownloader) ReadBytes(ctx context.Context, name string, offset 
 		})
 
 		if resp != nil {
-			stats.LogicalBytesMoved += int64(len(resp.Data))
+			stats.EffectiveBytesMoved += int64(len(resp.Data))
 		}
 
 		if errStream == io.EOF {
@@ -132,7 +185,7 @@ func (d *BatchingDownloader) ReadBytes(ctx context.Context, name string, offset 
 			break
 		}
 
-		n, errWrite := writer.Write(resp.Data)
+		n, errWrite := w.Write(resp.Data)
 		if errWrite != nil {
 			err = errors.Join(ErrIO, errWrite, err)
 			break
@@ -143,10 +196,23 @@ func (d *BatchingDownloader) ReadBytes(ctx context.Context, name string, offset 
 		}
 	}
 
-	// TODO: update stats based on compression.
+	// The decoder and the digester should terminate on EOF or another error.
+	wg.Wait()
+	if errDec != nil {
+		err = errors.Join(ErrCompression, errDec, err)
+	}
+	if errDg != nil {
+		err = errors.Join(ErrIO, errDg, err)
+	}
+
+	stats.LogicalBytesMoved = stats.EffectiveBytesMoved
+	if withDecompression {
+		// nRawBytes may be smaller than compressed bytes (additional headers without effective compression).
+		stats.LogicalBytesMoved = nRawBytes
+	}
 	stats.LogicalBytesStreamed = stats.LogicalBytesMoved
 	if err == nil {
 		stats.StreamedCount = 1
 	}
-	return digest, stats, err
+	return dg, stats, err
 }
