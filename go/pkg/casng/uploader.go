@@ -128,8 +128,8 @@ func MakeCompressedWriteResourceName(instanceName, hash string, size int64) stri
 	return fmt.Sprintf("%s/uploads/%s/compressed-blobs/zstd/%s/%d", instanceName, uuid.New(), hash, size)
 }
 
-// IsCompressedResourceName returns true if the name was generated using MakeCompressedWriteResourceName.
-func IsCompressedResourceName(name string) bool {
+// IsCompressedWriteResourceName returns true if the name was generated using MakeCompressedWriteResourceName.
+func IsCompressedWriteResourceName(name string) bool {
 	return strings.Contains(name, "compressed-blobs/zstd")
 }
 
@@ -227,6 +227,7 @@ func (u *uploader) Node(req UploadRequest) proto.Message {
 }
 
 // NewBatchingUploader creates a new instance of the batching uploader.
+// WIP: While this is intended to replace the uploader in the client and cas packages, it is not yet ready for production envionrments.
 //
 // The specified configs must be compatible with the capabilities of the server that the specified clients are connected to.
 // ctx must be cancelled after all batching calls have returned to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
@@ -243,6 +244,7 @@ func NewBatchingUploader(
 }
 
 // NewStreamingUploader creates a new instance of the streaming uploader.
+// WIP: While this is intended to replace the uploader in the client and cas packages, it is not yet ready for production envionrments.
 //
 // The specified configs must be compatible with the capabilities of the server which the specified clients are connected to.
 // ctx must be cancelled after all response channels have been closed to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).

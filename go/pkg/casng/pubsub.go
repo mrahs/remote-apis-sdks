@@ -27,7 +27,7 @@ type pubsub struct {
 // This allows the subscriber to send a tagged message (request) that propagates across the system and eventually
 // receive related messages (responses) from publishers on the returned channel.
 //
-// ctx is only used to wait for a an unsubscription signal. It is not propagated with any messages.
+// ctx is only used to wait for an unsubscription signal. It is not propagated with any messages.
 // The subscriber must unsubscribe by cancelling the specified context, and continue draining the returned channel until it's closed.
 // The returned channel is unbuffered and closed only when the specified context is done.
 //
@@ -162,16 +162,19 @@ func (ps *pubsub) wait() {
 	ps.wg.Wait()
 }
 
+// len returns the number of active subscribers.
 func (ps *pubsub) len() int {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	return len(ps.subs)
 }
 
+// newPubSub initializes a new instance.
 func newPubSub() *pubsub {
 	return &pubsub{subs: make(map[tag]chan any)}
 }
 
+// excludeTag is used by mpub to filter out the tag that received the "once" message.
 func excludeTag(tags []tag, et tag) []tag {
 	if len(tags) == 0 {
 		return []tag{}

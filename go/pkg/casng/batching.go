@@ -149,7 +149,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	var nRawBytes int64 // Track the actual number of the consumed raw bytes.
 	var encWg sync.WaitGroup
 	var withCompression bool // Used later to ensure the pipe is closed.
-	if IsCompressedResourceName(name) {
+	if IsCompressedWriteResourceName(name) {
 		contextmd.Infof(ctx, log.Level(1), "[casng] upload.write_bytes.compressing: name=%s, size=%d", name, size)
 		withCompression = true
 		pr, pw := io.Pipe()
