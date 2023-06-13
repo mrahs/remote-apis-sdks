@@ -113,7 +113,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // The server is notified to finalize the resource name and subsequent writes may not succeed.
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
 // If an error was returned, the returned stats may indicate that all the bytes were sent, but that does not guarantee that the server committed all of them.
-func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64) (Stats, error) {
+func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size, offset int64) (Stats, error) {
 	if !u.streamThrottle.acquire(ctx) {
 		return Stats{}, ctx.Err()
 	}
@@ -122,7 +122,7 @@ func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Rea
 }
 
 // WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
-func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size int64, offset int64) (Stats, error) {
+func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size, offset int64) (Stats, error) {
 	if !u.streamThrottle.acquire(ctx) {
 		return Stats{}, ctx.Err()
 	}
@@ -130,7 +130,7 @@ func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r
 	return u.writeBytes(ctx, name, r, size, offset, false)
 }
 
-func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, size int64, offset int64, finish bool) (Stats, error) {
+func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, size, offset int64, finish bool) (Stats, error) {
 	contextmd.Infof(ctx, log.Level(1), "[casng] upload.write_bytes: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
 	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.write_bytes.done: name=%s, size=%d, offset=%d, finish=%t", name, size, offset, finish)
 	if log.V(3) {
