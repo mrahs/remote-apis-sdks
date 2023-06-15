@@ -114,19 +114,23 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
 // If an error was returned, the returned stats may indicate that all the bytes were sent, but that does not guarantee that the server committed all of them.
 func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size, offset int64) (Stats, error) {
+	startTime := time.Now()
 	if !u.streamThrottle.acquire(ctx) {
 		return Stats{}, ctx.Err()
 	}
 	defer u.streamThrottle.release()
+	log.V(3).Infof("[casng] upload.write_bytes.throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 	return u.writeBytes(ctx, name, r, size, offset, true)
 }
 
 // WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
 func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size, offset int64) (Stats, error) {
+	startTime := time.Now()
 	if !u.streamThrottle.acquire(ctx) {
 		return Stats{}, ctx.Err()
 	}
 	defer u.streamThrottle.release()
+	log.V(3).Infof("[casng] upload.write_bytes.throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 	return u.writeBytes(ctx, name, r, size, offset, false)
 }
 
@@ -314,7 +318,6 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 // The returned error wraps a number of errors proportional to the length of the specified slice.
 //
 // This method must not be called after cancelling the uploader's context.
-// TODO: repb.Tree
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, Stats, error) {
 	contextmd.Infof(ctx, log.Level(1), "[casng] upload: %d requests", len(reqs))
 	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.done")
@@ -394,7 +397,6 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 }
 
 // DigestTree returns the digest of the merkle tree for root.
-// TODO: repb.Tree
 func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute, slo symlinkopts.Options, exclude walker.Filter) (digest.Digest, Stats, error) {
 	ch := make(chan UploadRequest)
 	resCh := u.streamPipe(ctx, ch)
@@ -427,7 +429,6 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 //
 // All requests must share the same filter. Digest fields on the requests are ignored to ensure proper hierarchy caching via the internal digestion process.
 // remoteWorkingDir replaces workingDir inside the merkle tree such that the server is only aware of remoteWorkingDir.
-// TODO: repb.Tree
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
 	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree: reqs=%d", len(reqs))
 	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree.done")

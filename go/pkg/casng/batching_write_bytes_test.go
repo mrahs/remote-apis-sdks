@@ -28,9 +28,9 @@ func TestUpload_WriteBytes(t *testing.T) {
 		b           []byte
 		offset      int64
 		finish      bool
-		wantErr     error
-		wantStats   casng.Stats
 		retryPolicy *retry.BackoffPolicy
+		wantStats   casng.Stats
+		wantErr     error
 	}{
 		{
 			name: "no_compression",

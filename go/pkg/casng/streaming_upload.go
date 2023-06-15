@@ -123,7 +123,6 @@ type uploadRequestBundle = map[digest.Digest]uploadRequestBundleItem
 // digest receives a copy of the coorresponding UploadResponse.
 //
 // This method must not be called after cancelling the uploader's context.
-// TODO: repb.Tree
 func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
 	return u.streamPipe(ctx, in)
 }
@@ -219,6 +218,7 @@ func (u *uploader) batcher() {
 		go func(ctx context.Context, b uploadRequestBundle) {
 			defer u.workerWg.Done()
 			defer u.uploadThrottler.release()
+			// TODO: cancel ctx if all requesters have cancelled their contexts.
 			u.callBatchUpload(ctx, b)
 		}(ctx, bundle)
 
@@ -306,12 +306,11 @@ func (u *uploader) batcher() {
 				handle()
 			}
 
-			r := &repb.BatchUpdateBlobsRequest_Request{
+			item.tags = append(item.tags, req.tag)
+			item.req = &repb.BatchUpdateBlobsRequest_Request{
 				Digest: req.Digest.ToProto(),
 				Data:   req.Bytes, // TODO: add compression support as in https://github.com/bazelbuild/remote-apis-sdks/pull/443/files
 			}
-			item.tags = append(item.tags, req.tag)
-			item.req = r
 			bundle[req.Digest] = item
 			bundleSize += rSize
 			ctx, _ = contextmd.FromContexts(ctx, req.ctx) // ignore non-essential error.
@@ -508,6 +507,7 @@ func (u *uploader) streamer() {
 			u.workerWg.Add(1)
 			go func(req UploadRequest) {
 				defer u.workerWg.Done()
+				// BUG: the call should not be cancelled if the blob is unified (other requesters are still interested).
 				s, err := u.callStream(req.ctx, name, req)
 				// Release before sending on the channel to avoid blocking without actually using the gRPC resources.
 				u.streamThrottle.release()

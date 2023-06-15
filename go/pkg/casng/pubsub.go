@@ -29,15 +29,12 @@ type pubsub struct {
 // This allows the subscriber to send a tagged message (request) that propagates across the system and eventually
 // receive related messages (responses) from publishers on the returned channel.
 //
-// ctx is only used to wait for an unsubscription signal. It is not propagated with any messages.
-// The subscriber must unsubscribe by cancelling the specified context, and continue draining the returned channel until it's closed.
-// The returned channel is unbuffered and closed only when the specified context is done.
+// The subscriber must continue draining the returned channel until it's closed.
+// The returned channel is unbuffered and closed only when unsub is called with the returned tag.
 //
 // To properly terminate the subscription, the subscriber must wait until all expected responses are received
-// on the returned channel before cancelling the context.
-// Once the context is cancelled, any tagged messages for this subscription are dropped.
-//
-// A slow subscriber affects all other subscribers that are waiting for the same message.
+// on the returned channel before unsubscribing.
+// Once unsubscribed, any tagged messages for this subscription are dropped.
 func (ps *pubsub) sub() (tag, <-chan any) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -67,19 +64,12 @@ func (ps *pubsub) unsub(t tag) {
 	log.V(3).Infof("[casng] pubsub.unsub: tag=%s", t)
 }
 
-// pub is a blocking call that fans-out a response to all specified (by tag) subscribers sequentially.
+// pub is a blocking call that fans-out a response to all specified (by tag) subscribers concurrently.
 //
-// Returns when all active subscribers have received their copies.
-// Will deadlock if an active subscriber never reveives its copy.
+// Returns when all active subscribers have received their copies or timed out.
 // Inactive subscribers (expired by cancelling their context) are skipped (their copies are dropped).
 //
-// A busy subscriber does not block others from receiving their copies. It is instead
-// rescheduled for another attempt once all others get a chance to receive.
-// To prevent a temporarily infinite round-robin loop from consuming too much CPU, each subscriber
-// gets at most 10ms to receive before getting rescheduled.
-// Blocking 10ms for every subscriber amortizes much better than blocking 10ms for every
-// iteration on subscribers, even though both have the same worst-case cost.
-// For example, if out of 10 subscribers 5 were busy for 1ms, the attempt will cost ~5ms instead of 10ms.
+// A busy subscriber does not block others from receiving their copies, but will delay this call by up to the specified timeout on the broker.
 func (ps *pubsub) pub(m any, tags ...tag) {
 	_ = ps.pubN(m, len(tags), tags...)
 }
@@ -161,7 +151,11 @@ func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 			}
 		}(t)
 	}
+
+	// Wait for subscribers.
 	wg.Wait()
+
+	// Wait for the aggregator.
 	wg.Add(1)
 	close(r)
 	wg.Wait()

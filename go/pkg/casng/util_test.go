@@ -1,4 +1,3 @@
-// Using a different package name to strictly exclude types defined here from the original package.
 package casng_test
 
 import (
@@ -74,6 +73,7 @@ func makeFs(t *testing.T, paths map[string][]byte) string {
 type fakeByteStreamClient struct {
 	bspb.ByteStreamClient
 	write func(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error)
+	read  func(ctx context.Context, in *bspb.ReadRequest, opts ...grpc.CallOption) (bspb.ByteStream_ReadClient, error)
 }
 
 type fakeByteStream_WriteClient struct {
@@ -82,11 +82,23 @@ type fakeByteStream_WriteClient struct {
 	closeAndRecv func() (*bspb.WriteResponse, error)
 }
 
+type fakeByteStreamClient_ReadClient struct {
+	bspb.ByteStream_ReadClient
+	recv func() (*bspb.ReadResponse, error)
+}
+
 func (s *fakeByteStreamClient) Write(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 	if s.write != nil {
 		return s.write(ctx, opts...)
 	}
 	return &fakeByteStream_WriteClient{}, nil
+}
+
+func (s *fakeByteStreamClient) Read(ctx context.Context, in *bspb.ReadRequest, opts ...grpc.CallOption) (bspb.ByteStream_ReadClient, error) {
+	if s.read != nil {
+		return s.read(ctx, in, opts...)
+	}
+	return &fakeByteStreamClient_ReadClient{}, nil
 }
 
 func (s *fakeByteStream_WriteClient) Send(wr *bspb.WriteRequest) error {
@@ -101,6 +113,13 @@ func (s *fakeByteStream_WriteClient) CloseAndRecv() (*bspb.WriteResponse, error)
 		return s.closeAndRecv()
 	}
 	return &bspb.WriteResponse{}, nil
+}
+
+func (s *fakeByteStreamClient_ReadClient) Recv() (*bspb.ReadResponse, error) {
+	if s.recv != nil {
+		return s.recv()
+	}
+	return &bspb.ReadResponse{}, nil
 }
 
 type fakeCAS struct {

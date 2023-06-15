@@ -260,6 +260,7 @@ func NewStreamingUploader(
 	return &StreamingUploader{uploader: uploader}, nil
 }
 
+// TODO: support uploading repb.Tree.
 func newUploader(
 	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
 	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
