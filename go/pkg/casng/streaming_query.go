@@ -82,10 +82,7 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 	default:
 	}
 
-	// This broker should not cancel until the sender tells it to, hence, the background context.
-	// The broker uses the context for cancellation only. It's not propagated further.
-	ctxSub, ctxSubCancel := context.WithCancel(context.Background())
-	tag, resCh := u.queryPubSub.sub(ctxSub)
+	tag, resCh := u.queryPubSub.sub()
 	pendingCh := make(chan int)
 
 	// Sender. It terminates when in is closed, at which point it sends 0 as a termination signal to the counter.
@@ -129,7 +126,7 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 	u.workerWg.Add(1)
 	go func() {
 		defer u.workerWg.Done()
-		defer ctxSubCancel() // let the broker and the receiver terminate.
+		defer u.queryPubSub.unsub(tag)
 
 		log.V(1).Info("[casng] query.streamer.counter.start")
 		defer log.V(1).Info("[casng] query.streamer.counter.stop")

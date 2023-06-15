@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	log "github.com/golang/glog"
 	"github.com/pborman/uuid"
 )
@@ -16,9 +15,12 @@ type tag string
 
 // pubsub provides a simple pubsub implementation to route messages and wait for them.
 type pubsub struct {
-	subs map[tag]chan any
-	mu   sync.RWMutex
-	wg   sync.WaitGroup
+	subs    map[tag]chan any
+	mu      sync.RWMutex
+	timeout time.Duration
+	// A signalling channel that gets a message everytime the broker hits 0 subscriptions.
+	// Unlike sync.WaitGroup, this allows the broker to accept more subs while a client is waiting for signal.
+	done chan struct{}
 }
 
 // sub returns a routing tag and a channel to the subscriber to read messages from.
@@ -36,35 +38,33 @@ type pubsub struct {
 // Once the context is cancelled, any tagged messages for this subscription are dropped.
 //
 // A slow subscriber affects all other subscribers that are waiting for the same message.
-func (ps *pubsub) sub(ctx context.Context) (tag, <-chan any) {
-	t := tag(uuid.New())
-	contextmd.Infof(ctx, log.Level(4), "[casng] pubsub.sub: tag=%s", t)
-
-	// Serialize this block to avoid concurrent map-read-write errors.
+func (ps *pubsub) sub() (tag, <-chan any) {
 	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	t := tag(uuid.New())
+	subscriber := make(chan any)
+	ps.subs[t] = subscriber
+
+	log.V(3).Infof("[casng] pubsub.sub: tag=%s", t)
+	return t, subscriber
+}
+
+// unsub removes the subscription for tag, if any, and closes the related channel.
+func (ps *pubsub) unsub(t tag) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
 	subscriber, ok := ps.subs[t]
 	if !ok {
-		subscriber = make(chan any)
-		ps.subs[t] = subscriber
+		return
 	}
-	ps.mu.Unlock()
-
-	ps.wg.Add(1)
-	go func() {
-		defer ps.wg.Done()
-		<-ctx.Done()
-
-		contextmd.Infof(ctx, log.Level(4), "[casng] pubsub.unsub: tag=%s", t)
-
-		// Serialize this block to avoid concurrent map-read-write and send-on-closed-channel errors.
-		ps.mu.Lock()
-		delete(ps.subs, t)
-		ps.mu.Unlock()
-
-		close(subscriber)
-	}()
-
-	return t, subscriber
+	delete(ps.subs, t)
+	close(subscriber)
+	if len(ps.subs) == 0 {
+		close(ps.done)
+		ps.done = make(chan struct{})
+	}
+	log.V(3).Infof("[casng] pubsub.unsub: tag=%s", t)
 }
 
 // pub is a blocking call that fans-out a response to all specified (by tag) subscribers sequentially.
@@ -110,56 +110,68 @@ func (ps *pubsub) pubN(m any, n int, tags ...tag) []tag {
 		}()
 	}
 	if len(tags) == 0 {
-		log.Warning("[casng] pubsub.pub: called without tags")
-		log.V(4).Infof("[casng] pubsub.pub: called without tags: msg=%v", m)
+		log.Warning("[casng] pubsub.pub: called without tags, dropping message")
+		log.V(4).Infof("[casng] pubsub.pub: called without tags for msg=%v", m)
+		return nil
 	}
 	if n <= 0 {
 		log.Warningf("[casng] pubsub.pub: nothing published because n=%d", n)
 		return nil
 	}
+
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
 	log.V(4).Infof("[casng] pubsub.pub.msg: type=%[1]T, value=%[1]v", m)
-	toRetry := make([]tag, 0, len(tags))
-	var received []tag
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	attemptCount := 1
-	for {
-		for _, t := range tags {
-			subscriber, ok := ps.subs[t]
-			if !ok {
-				log.V(3).Infof("[casng] pubsub.pub.drop: tag=%s", t)
-				continue
-			}
-			// Send now or reschedule if the subscriber is not ready.
-			select {
-			case subscriber <- m:
-				log.V(3).Infof("[casng] pubsub.pub.send: tag=%s", t)
-				received = append(received, t)
-				if len(received) >= n {
-					return received
-				}
-			case <-ticker.C:
-				toRetry = append(toRetry, t)
-			}
+	ctx, ctxCancel := context.WithTimeout(context.Background(), ps.timeout)
+	defer ctxCancel()
+
+	// Optimize for the usual case of a single receiver.
+	if len(tags) == 1 {
+		t := tags[0]
+		s := ps.subs[t]
+		select {
+		case s <- m:
+		case <-ctx.Done():
+			log.Errorf("pubsub timeout for %s", t)
+			return nil
 		}
-		if len(toRetry) == 0 {
-			break
-		}
-		attemptCount++
-		log.V(3).Infof("[casng] pubsub.retry: attempts=%d, tags=%d", attemptCount, len(toRetry))
-		// Reuse the underlying arrays by swapping slices and resetting one of them.
-		tags, toRetry = toRetry, tags
-		toRetry = toRetry[:0]
+		return tags
 	}
+
+	wg := sync.WaitGroup{}
+	received := make([]tag, 0, len(tags))
+	r := make(chan tag)
+	go func() {
+		for t := range r {
+			received = append(received, t)
+		}
+		wg.Done()
+	}()
+	for _, t := range tags {
+		s := ps.subs[t]
+		wg.Add(1)
+		go func(t tag) {
+			defer wg.Done()
+			select {
+			case s <- m:
+				r <- t
+			case <-ctx.Done():
+				log.Errorf("pubsub timeout for %s", t)
+			}
+		}(t)
+	}
+	wg.Wait()
+	wg.Add(1)
+	close(r)
+	wg.Wait()
 	return received
 }
 
-// wait blocks until all subscribers have unsubscribed.
+// wait blocks until all existing subscribers unsubscribe.
+// The signal is a snapshot. The broker my get more subscribers after returning from this call.
 func (ps *pubsub) wait() {
-	ps.wg.Wait()
+	<-ps.done
 }
 
 // len returns the number of active subscribers.
@@ -169,9 +181,13 @@ func (ps *pubsub) len() int {
 	return len(ps.subs)
 }
 
-// newPubSub initializes a new instance.
-func newPubSub() *pubsub {
-	return &pubsub{subs: make(map[tag]chan any)}
+// newPubSub initializes a new instance where subscribers must receive messages within timeout.
+func newPubSub(timeout time.Duration) *pubsub {
+	return &pubsub{
+		subs:    make(map[tag]chan any),
+		timeout: timeout,
+		done:    make(chan struct{}),
+	}
 }
 
 // excludeTag is used by mpub to filter out the tag that received the "once" message.

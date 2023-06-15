@@ -316,14 +316,14 @@ func newUploader(
 		dirChildren:      nodeSliceMap{store: make(map[string][]proto.Message)},
 
 		queryCh:          make(chan missingBlobRequest),
-		queryPubSub:      newPubSub(),
+		queryPubSub:      newPubSub(time.Second),
 		digesterCh:       make(chan UploadRequest),
 		dispatcherReqCh:  make(chan UploadRequest),
 		dispatcherPipeCh: make(chan UploadRequest),
 		dispatcherResCh:  make(chan UploadResponse),
 		batcherCh:        make(chan UploadRequest),
 		streamerCh:       make(chan UploadRequest),
-		uploadPubSub:     newPubSub(),
+		uploadPubSub:     newPubSub(time.Second),
 
 		queryRequestBaseSize:      proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),
 		uploadRequestBaseSize:     proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),

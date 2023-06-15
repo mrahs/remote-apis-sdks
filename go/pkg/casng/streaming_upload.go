@@ -146,10 +146,8 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	}
 
 	// Register a new requester with the internal processor.
-	// This borker should not remove the subscription until the sender tells it to, hence, the background context.
-	// The broker uses the context for cancellation only. It's not propagated further.
-	ctxSub, ctxSubCancel := context.WithCancel(context.Background())
-	tag, resChan := u.uploadPubSub.sub(ctxSub)
+	// This borker should not remove the subscription until the sender tells it to.
+	tag, resChan := u.uploadPubSub.sub()
 
 	// Forward the requests to the internal processor.
 	u.uploadSenderWg.Add(1)
@@ -177,7 +175,7 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 		for rawR := range resChan {
 			r := rawR.(UploadResponse)
 			if r.done {
-				ctxSubCancel() // let the broker terminate the subscription.
+				u.uploadPubSub.unsub(tag)
 				continue
 			}
 			ch <- r
