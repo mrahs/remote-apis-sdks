@@ -47,7 +47,7 @@ func (ps *pubsub) sub() (tag, <-chan any) {
 	return t, subscriber
 }
 
-// unsub removes the subscription for tag, if any, and closes the related channel.
+// unsub removes the subscription for tag, if any, and closes the corresponding channel.
 func (ps *pubsub) unsub(t tag) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -70,6 +70,12 @@ func (ps *pubsub) unsub(t tag) {
 // Inactive subscribers (expired by cancelling their context) are skipped (their copies are dropped).
 //
 // A busy subscriber does not block others from receiving their copies, but will delay this call by up to the specified timeout on the broker.
+//
+// A pool of workers of the same size of tags is used. Each worker attempts to deliver the message to the corresponding subscriber.
+// The pool size is a function of the client's concurrency.
+// E.g. if 500 workers are publishing messages, with an average of 10 clients per message, the pool size will be 5,000.
+// The maximum theoretical pool size for n publishers publishing every message to m subscribers is nm.
+// However, the expected average case is few clients per message so the pool size should be close to the concurrency limit.
 func (ps *pubsub) pub(m any, tags ...tag) {
 	_ = ps.pubN(m, len(tags), tags...)
 }

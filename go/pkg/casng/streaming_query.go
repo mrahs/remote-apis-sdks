@@ -1,3 +1,39 @@
+// The query processor provides a streaming interface to query the CAS for digests.
+//
+// Multiple concurrent clients can use the same uploader instance at the same time.
+// The processor bundles requests from multiple concurrent clients to amortize the cost of querying
+// the batching API. That is, it attempts to bundle the maximum possible number of digests in a single gRPC call.
+//
+// This is done using 3 factors: the size (bytes) limit, the items limit, and a time limit.
+// If any of these limits is reached, the processor will dispatch the call and start a new bundle.
+// This means that a request can be delayed by the processor (not including network and server time) up to the time limit.
+// However, in high throughput sessions, the processor will dispatch calls sooner.
+//
+// To properly manage multiple concurrent clients while providing the bundling behaviour, the processor becomes a serialization point.
+// That is, all requests go through a single channel. To minimize blocking and leverage server concurrency, the processor loop
+// is optimized for high throughput and it launches gRPC calls concurrently.
+// In other words, it's many-one-many relationship, where many clients send to one processor which sends to many workers.
+//
+// To avoid forcing another serialization point through the processor, each worker notifies relevant clients of the results
+// it acquired from the server. In this case, it's a one-many relationship, where one worker sends to many clients.
+//
+// All in all, the design implements a many-one-many-one-many pipeline.
+// Many clients send to one processor, which sends to many workers; each worker sends to many clients.
+//
+// Each client is provided with a channel they send their requests on. The handler of that channel, marks each request
+// with a unique tag and forwards it to the processor.
+//
+// The processor receives multiple requests, each potentially with a different tag.
+// Each worker receives a bundle of requests that may contain multiple tags.
+//
+// To facilitate the routing between workers and clients, a simple pubsub implementation is used.
+// Each instance, a broker, manages routing messages between multiple subscribers (clients) and multiple publishers (workers).
+// Each client gets their own channel on which they receive messages marked for them.
+// Each publisher specifies which clients the messages should be routed to.
+// The broker attempts at-most-once delivery.
+//
+// The client handler manages the pubsub subscription by waiting until a matching number of responses was received, after which
+// it cancels the subscription.
 package casng
 
 import (
