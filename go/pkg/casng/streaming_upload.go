@@ -38,7 +38,7 @@ type UploadRequest struct {
 	// Bytes is meant for small blobs. Using a large slice of bytes might cause memory thrashing.
 	//
 	// If Bytes is nil, BytesFileMode is ignored and Path is used for traversal.
-	// If Bytes is not nil (may be empty), Path is used to refer to the bytes content and is not used for traversal.
+	// If Bytes is not nil (may be empty), Path is used as the corresponding path for the bytes content and is not used for traversal.
 	Bytes []byte
 
 	// BytesFileMode describes the bytes content. It is ignored if Bytes is not set.
