@@ -11,7 +11,10 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
+	// Redundant imports are required for the google3 mirror. Aliases should not be changed.
+	regrpc "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
+	bsgrpc "google.golang.org/genproto/googleapis/bytestream"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/grpc"
 )
@@ -71,51 +74,50 @@ func makeFs(t *testing.T, paths map[string][]byte) string {
 }
 
 type fakeByteStreamClient struct {
-	bspb.ByteStreamClient
-	write func(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error)
-	read  func(ctx context.Context, in *bspb.ReadRequest, opts ...grpc.CallOption) (bspb.ByteStream_ReadClient, error)
+	bsgrpc.ByteStreamClient
+	write func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error)
 }
 
-type fakeByteStream_WriteClient struct {
-	bspb.ByteStream_WriteClient
+type fakeByteStreamWriteClient struct {
+	bsgrpc.ByteStream_WriteClient
 	send         func(*bspb.WriteRequest) error
 	closeAndRecv func() (*bspb.WriteResponse, error)
 }
 
-type fakeByteStreamClient_ReadClient struct {
-	bspb.ByteStream_ReadClient
+type fakeByteStreamClientReadClient struct {
+	bspb.ByteStreamReadClient
 	recv func() (*bspb.ReadResponse, error)
 }
 
-func (s *fakeByteStreamClient) Write(ctx context.Context, opts ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
+func (s *fakeByteStreamClient) Write(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
 	if s.write != nil {
 		return s.write(ctx, opts...)
 	}
-	return &fakeByteStream_WriteClient{}, nil
+	return &fakeByteStreamWriteClient{}, nil
 }
 
-func (s *fakeByteStreamClient) Read(ctx context.Context, in *bspb.ReadRequest, opts ...grpc.CallOption) (bspb.ByteStream_ReadClient, error) {
+func (s *fakeByteStreamClient) Read(ctx context.Context, in *bspb.ReadRequest, opts ...grpc.CallOption) (bspb.ByteStreamReadClient, error) {
 	if s.read != nil {
 		return s.read(ctx, in, opts...)
 	}
-	return &fakeByteStreamClient_ReadClient{}, nil
+	return &fakeByteStreamClientReadClient{}, nil
 }
 
-func (s *fakeByteStream_WriteClient) Send(wr *bspb.WriteRequest) error {
+func (s *fakeByteStreamWriteClient) Send(wr *bspb.WriteRequest) error {
 	if s.send != nil {
 		return s.send(wr)
 	}
 	return nil
 }
 
-func (s *fakeByteStream_WriteClient) CloseAndRecv() (*bspb.WriteResponse, error) {
+func (s *fakeByteStreamWriteClient) CloseAndRecv() (*bspb.WriteResponse, error) {
 	if s.closeAndRecv != nil {
 		return s.closeAndRecv()
 	}
 	return &bspb.WriteResponse{}, nil
 }
 
-func (s *fakeByteStreamClient_ReadClient) Recv() (*bspb.ReadResponse, error) {
+func (s *fakeByteStreamClientReadClient) Recv() (*bspb.ReadResponse, error) {
 	if s.recv != nil {
 		return s.recv()
 	}
@@ -123,7 +125,7 @@ func (s *fakeByteStreamClient_ReadClient) Recv() (*bspb.ReadResponse, error) {
 }
 
 type fakeCAS struct {
-	repb.ContentAddressableStorageClient
+	regrpc.ContentAddressableStorageClient
 	findMissingBlobs func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error)
 	batchUpdateBlobs func(ctx context.Context, in *repb.BatchUpdateBlobsRequest, opts ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error)
 }

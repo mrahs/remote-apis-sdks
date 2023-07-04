@@ -1,3 +1,9 @@
+// Package casng provides a CAS client implementation with the following incomplete list of features:
+//   - Streaming interface to upload files during the digestion process rather than after.
+//   - Unified uploads and downloads.
+//   - Simplifed public API.
+package casng
+
 // This file includes the implementation for uploading blobs to the CAS.
 //
 // The following diagram illustrates the overview of the design implemented in this package.
@@ -90,11 +96,14 @@ import (
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
+	// Redundant imports are required for the google3 mirror. Aliases should not be changed.
+	regrpc "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pborman/uuid"
-	bspb "google.golang.org/genproto/googleapis/bytestream"
+	// Alias should not be changed because it's used as is for the google3 mirror.
+	bsgrpc "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -133,7 +142,7 @@ func IsCompressedWriteResourceName(name string) bool {
 	return strings.Contains(name, "compressed-blobs/zstd")
 }
 
-// BatchingUplodaer provides a blocking interface to query and upload to the CAS.
+// BatchingUploader provides a blocking interface to query and upload to the CAS.
 type BatchingUploader struct {
 	*uploader
 }
@@ -145,8 +154,8 @@ type StreamingUploader struct {
 
 // uploader represents the state of an uploader implementation.
 type uploader struct {
-	cas          repb.ContentAddressableStorageClient
-	byteStream   bspb.ByteStreamClient
+	cas          regrpc.ContentAddressableStorageClient
+	byteStream   bsgrpc.ByteStreamClient
 	instanceName string
 
 	queryRPCCfg  GRPCConfig
@@ -233,7 +242,7 @@ func (u *uploader) Node(req UploadRequest) proto.Message {
 // ctx must be cancelled after all batching calls have returned to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
 // gRPC timeouts are multiplied by retries. Batched RPCs are retried per batch. Streaming PRCs are retried per chunk.
 func NewBatchingUploader(
-	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
+	ctx context.Context, cas regrpc.ContentAddressableStorageClient, byteStream bsgrpc.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
 ) (*BatchingUploader, error) {
 	uploader, err := newUploader(ctx, cas, byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
@@ -250,7 +259,7 @@ func NewBatchingUploader(
 // ctx must be cancelled after all response channels have been closed to properly shutdown the uploader. It is only used for cancellation (not used with remote calls).
 // gRPC timeouts are multiplied by retries. Batched RPCs are retried per batch. Streaming PRCs are retried per chunk.
 func NewStreamingUploader(
-	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
+	ctx context.Context, cas regrpc.ContentAddressableStorageClient, byteStream bsgrpc.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
 ) (*StreamingUploader, error) {
 	uploader, err := newUploader(ctx, cas, byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
@@ -262,7 +271,7 @@ func NewStreamingUploader(
 
 // TODO: support uploading repb.Tree.
 func newUploader(
-	ctx context.Context, cas repb.ContentAddressableStorageClient, byteStream bspb.ByteStreamClient, instanceName string,
+	ctx context.Context, cas regrpc.ContentAddressableStorageClient, byteStream bsgrpc.ByteStreamClient, instanceName string,
 	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
 ) (*uploader, error) {
 	if cas == nil || byteStream == nil {
@@ -299,9 +308,8 @@ func newUploader(
 		ioCfg: ioCfg,
 		buffers: sync.Pool{
 			New: func() any {
-				// Since the buffers are never resized, treating the slice as a pointer-like type for this pool is safe.
 				buf := make([]byte, ioCfg.BufferSize)
-				return buf
+				return &buf
 			},
 		},
 		zstdEncoders: sync.Pool{

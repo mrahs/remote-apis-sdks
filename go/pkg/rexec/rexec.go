@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
@@ -83,15 +84,20 @@ func (c *Client) NewContext(ctx context.Context, cmd *command.Command, opt *comm
 	}, nil
 }
 
-func (ec *Context) downloadStream(raw []byte, dgPb *repb.Digest, write func([]byte)) error {
+// downloadStream reads the blob for the digest dgPb into memory and forwards the bytes to the write function.
+func (ec *Context) downloadStream(raw []byte, dgPb *repb.Digest, offset int64, write func([]byte)) error {
 	if raw != nil {
-		write(raw)
+		o := int(offset)
+		if int64(o) != offset || o > len(raw) {
+			return fmt.Errorf("offset %d is out of range for length %d", offset, len(raw))
+		}
+		write(raw[o:])
 	} else if dgPb != nil {
 		dg, err := digest.NewFromProto(dgPb)
 		if err != nil {
 			return err
 		}
-		bytes, stats, err := ec.client.GrpcClient.ReadBlob(ec.ctx, dg)
+		bytes, stats, err := ec.client.GrpcClient.ReadBlobRange(ec.ctx, dg, offset, 0)
 		if err != nil {
 			return err
 		}
@@ -144,10 +150,10 @@ func (ec *Context) setOutputMetadata() {
 }
 
 func (ec *Context) downloadOutErr() *command.Result {
-	if err := ec.downloadStream(ec.resPb.StdoutRaw, ec.resPb.StdoutDigest, ec.oe.WriteOut); err != nil {
+	if err := ec.downloadStream(ec.resPb.StdoutRaw, ec.resPb.StdoutDigest, 0, ec.oe.WriteOut); err != nil {
 		return command.NewRemoteErrorResult(err)
 	}
-	if err := ec.downloadStream(ec.resPb.StderrRaw, ec.resPb.StderrDigest, ec.oe.WriteErr); err != nil {
+	if err := ec.downloadStream(ec.resPb.StderrRaw, ec.resPb.StderrDigest, 0, ec.oe.WriteErr); err != nil {
 		return command.NewRemoteErrorResult(err)
 	}
 	return command.NewResultFromExitCode((int)(ec.resPb.ExitCode))
@@ -611,12 +617,60 @@ func (ec *Context) ExecuteRemotely() {
 
 	log.V(1).Infof("%s %s> Executing remotely...\n%s", cmdID, executionID, strings.Join(ec.cmd.Args, " "))
 	ec.Metadata.EventTimes[command.EventExecuteRemotely] = &command.TimeInterval{From: time.Now()}
-	op, err := ec.client.GrpcClient.ExecuteAndWait(ec.ctx, &repb.ExecuteRequest{
+	// Initiate each streaming request once at most.
+	var streamOut, streamErr sync.Once
+	var streamWg sync.WaitGroup
+	// These variables are owned by the progress callback (which is async but not concurrent) until the execution returns.
+	var nOutStreamed, nErrStreamed int64
+	op, err := ec.client.GrpcClient.ExecuteAndWaitProgress(ec.ctx, &repb.ExecuteRequest{
 		InstanceName:    ec.client.GrpcClient.InstanceName,
 		SkipCacheLookup: !ec.opt.AcceptCached || ec.opt.DoNotCache,
 		ActionDigest:    ec.Metadata.ActionDigest.ToProto(),
+	}, func(md *repb.ExecuteOperationMetadata) {
+		if !ec.opt.StreamOutErr {
+			return
+		}
+		// The server may return either, both, or neither of the stream names, and not necessarily in the same or first call.
+		// The streaming request for each must be initiated once at most.
+		if name := md.GetStdoutStreamName(); name != "" {
+			streamOut.Do(func() {
+				streamWg.Add(1)
+				go func() {
+					defer streamWg.Done()
+					path := fmt.Sprintf("%s/logstreams/%s", ec.client.GrpcClient.InstanceName, name)
+					log.V(1).Infof("%s %s> Streaming to stdout from %q", cmdID, executionID, path)
+					// Ignoring the error here since the net result is downloading the full stream after the fact.
+					n, err := ec.client.GrpcClient.ReadResourceTo(ec.ctx, path, outerr.NewOutWriter(ec.oe))
+					if err != nil {
+						log.Errorf("%s %s> error streaming stdout: %v", cmdID, executionID, err)
+					}
+					nOutStreamed += n
+				}()
+			})
+		}
+		if name := md.GetStderrStreamName(); name != "" {
+			streamErr.Do(func() {
+				streamWg.Add(1)
+				go func() {
+					defer streamWg.Done()
+					path := fmt.Sprintf("%s/logstreams/%s", ec.client.GrpcClient.InstanceName, name)
+					log.V(1).Infof("%s %s> Streaming to stdout from %q", cmdID, executionID, path)
+					// Ignoring the error here since the net result is downloading the full stream after the fact.
+					n, err := ec.client.GrpcClient.ReadResourceTo(ec.ctx, path, outerr.NewErrWriter(ec.oe))
+					if err != nil {
+						log.Errorf("%s %s> error streaming stderr: %v", cmdID, executionID, err)
+					}
+					nErrStreamed += n
+				}()
+			})
+		}
 	})
 	ec.Metadata.EventTimes[command.EventExecuteRemotely].To = time.Now()
+	// This will always be called after both of the Add calls above if any, because the execution call above returns
+	// after all invokations of the progress callback.
+	// The server will terminate the streams when the execution finishes, regardless of its result, which will ensure the goroutines
+	// will have terminated at this point.
+	streamWg.Wait()
 	if err != nil {
 		ec.Result = command.NewRemoteErrorResult(err)
 		return
@@ -645,7 +699,16 @@ func (ec *Context) ExecuteRemotely() {
 		ec.setOutputMetadata()
 		ec.Result = command.NewResultFromExitCode((int)(ec.resPb.ExitCode))
 		if ec.opt.DownloadOutErr {
-			ec.Result = ec.downloadOutErr()
+			if ec.resPb.StdoutDigest == nil || ec.resPb.StdoutDigest.SizeBytes > nOutStreamed {
+				if err := ec.downloadStream(ec.resPb.StdoutRaw, ec.resPb.StdoutDigest, nOutStreamed, ec.oe.WriteOut); err != nil {
+					ec.Result = command.NewRemoteErrorResult(err)
+				}
+			}
+			if ec.resPb.StderrDigest == nil || ec.resPb.StderrDigest.SizeBytes > nErrStreamed {
+				if err := ec.downloadStream(ec.resPb.StderrRaw, ec.resPb.StderrDigest, nErrStreamed, ec.oe.WriteErr); err != nil {
+					ec.Result = command.NewRemoteErrorResult(err)
+				}
+			}
 		}
 		if ec.Result.Err == nil && ec.opt.DownloadOutputs {
 			log.V(1).Infof("%s %s> Downloading outputs...", cmdID, executionID)
