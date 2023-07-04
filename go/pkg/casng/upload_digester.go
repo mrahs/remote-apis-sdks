@@ -51,20 +51,20 @@ func (u *uploader) digester() {
 		u.dispatcherReqCh <- UploadRequest{done: true}
 	}()
 
-	requesterWalkWg := make(map[tag]*sync.WaitGroup)
+	requesterWalkWg := make(map[string]*sync.WaitGroup)
 	for req := range u.digesterCh {
 		startTime := time.Now()
 		// If the requester will not be sending any further requests, wait for in-flight walks from previous requests
 		// then tell the dispatcher to forward the signal once all dispatched blobs are done.
 		if req.done {
-			log.V(2).Infof("[casng] upload.digester.req.done: tag=%s", req.tag)
+			log.V(2).Infof("[casng] upload.digester.req.done; tag=%s", req.tag)
 			wg := requesterWalkWg[req.tag]
 			if wg == nil {
-				log.V(2).Infof("[casng] upload.digester.req.done: no pending walks for tag=%s", req.tag)
+				log.V(2).Infof("[casng] upload.digester.req.done: no more pending walks; tag=%s", req.tag)
 				// Let the dispatcher know that this requester is done.
 				u.dispatcherReqCh <- req
 				// Covers waiting on the dispatcher.
-				log.V(3).Infof("[casng] upload.digester.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
+				log.V(3).Infof("[casng] upload.digester.req.duration; start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
 				continue
 			}
 			// Remove the wg to ensure a new one is used if the requester decides to send more requests.
@@ -72,12 +72,12 @@ func (u *uploader) digester() {
 			requesterWalkWg[req.tag] = nil
 			u.workerWg.Add(1)
 			// Wait for the walkers to finish dispatching blobs then tell the dispatcher that no further blobs are expected from this requester.
-			go func(t tag) {
+			go func(tag string) {
 				defer u.workerWg.Done()
-				log.V(2).Infof("[casng] upload.digester.walk.wait.start: tag=%s", t)
+				log.V(2).Infof("[casng] upload.digester.walk.wait.start; tag=%s", tag)
 				wg.Wait()
-				log.V(2).Infof("[casng] upload.digester.walk.wait.done: tag=%s", t)
-				u.dispatcherReqCh <- UploadRequest{tag: t, done: true}
+				log.V(2).Infof("[casng] upload.digester.walk.wait.done; tag=%s", tag)
+				u.dispatcherReqCh <- UploadRequest{tag: tag, done: true}
 			}(req.tag)
 			continue
 		}
@@ -102,24 +102,24 @@ func (u *uploader) digester() {
 				// This node cannot be added to the u.dirChildren cache because the cache is owned by the walker callback.
 				// Parent nodes may have already been generated and cached in u.nodeCache; updating the u.dirChildren cache will not regenerate them.
 			}
-			log.V(3).Infof("[casng] upload.digester.req: bytes=%d, path=%s, tag=%s", len(req.Bytes), req.Path, req.tag)
+			log.V(3).Infof("[casng] upload.digester.req; bytes=%d, path=%s, req=%s, tag=%s", len(req.Bytes), req.Path, req.id, req.tag)
 		}
 
 		if req.Digest.Hash != "" {
 			u.dispatcherReqCh <- req
 			// Covers waiting on the node cache and waiting on the dispatcher.
-			log.V(3).Infof("[casng] upload.digester.duration: start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
+			log.V(3).Infof("[casng] upload.digester.req.duration; start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 			continue
 		}
 
-		log.V(3).Infof("[casng] upload.digester.req: path=%s, filter=%s, slo=%s, tag=%s", req.Path, req.Exclude, req.SymlinkOptions, req.tag)
+		log.V(3).Infof("[casng] upload.digester.req; path=%s, filter=%s, slo=%s, req=%s, tag=%s", req.Path, req.Exclude, req.SymlinkOptions, req.id, req.tag)
 		// Wait if too many walks are in-flight.
 		startTimeThrottle := time.Now()
 		if !u.walkThrottler.acquire(req.ctx) {
-			log.V(3).Infof("[casng] upload.digester.walk_throttle.duration: start=%d, end=%d, tag=%s", startTimeThrottle.UnixNano(), time.Now().UnixNano(), req.tag)
+			log.V(3).Infof("[casng] upload.digester.walk.throttle.duration; start=%d, end=%d, req=%s, tag=%s", startTimeThrottle.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 			continue
 		}
-		log.V(3).Infof("[casng] upload.digester.walk_throttle.duration: start=%d, end=%d, tag=%s", startTimeThrottle.UnixNano(), time.Now().UnixNano(), req.tag)
+		log.V(3).Infof("[casng] upload.digester.walk.throttle.duration; start=%d, end=%d, req=%s, tag=%s", startTimeThrottle.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 		wg := requesterWalkWg[req.tag]
 		if wg == nil {
 			wg = &sync.WaitGroup{}
@@ -138,11 +138,11 @@ func (u *uploader) digester() {
 
 // digest initiates a file system walk to digest files and dispatch them for uploading.
 func (u *uploader) digest(req UploadRequest) {
-	walkId := uuid.New()
+	walkID := uuid.New()
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
-			log.V(3).Infof("[casng] upload.digester.digest.duration: start=%d, end=%d, root=%s, tag=%s, walk_id=%s", startTime.UnixNano(), time.Now().UnixNano(), req.Path, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digester.visit.duration; start=%d, end=%d, root=%s, req=%s, tag=%s, walk=%s", startTime.UnixNano(), time.Now().UnixNano(), req.Path, req.id, req.tag, walkID)
 		}()
 	}
 
@@ -151,21 +151,21 @@ func (u *uploader) digest(req UploadRequest) {
 	deferredWg := make(map[string]*sync.WaitGroup)
 	walker.DepthFirst(req.Path, req.Exclude, walker.Callback{
 		Err: func(path impath.Absolute, realPath impath.Absolute, errVisit error) bool {
-			log.V(3).Infof("[casng] upload.digester.visit.err: path=%s, real_path=%s, err=%v, tag=%s, walk_id=%s, walk_id=%s", path, realPath, errVisit, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digester.visit.err; path=%s, real_path=%s, err=%v, req=%s, tag=%s, walk=%s", path, realPath, errVisit, req.id, req.tag, walkID)
 			err = errors.Join(errVisit, err)
 			return false
 		},
 		Pre: func(path impath.Absolute, realPath impath.Absolute) (walker.PreAction, bool) {
-			log.V(3).Infof("[casng] upload.digester.visit.pre: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digester.visit.pre; path=%s, real_path=%s, req=%s, tag=%s, walk=%s", path, realPath, req.id, req.tag, walkID)
 
 			select {
 			// If request aborted, abort.
 			case <-req.ctx.Done():
-				log.V(3).Infof("upload.digester.req.cancel: tag=%s, walk_id=%s", req.tag, walkId)
+				log.V(3).Infof("upload.digester.req.cancel; tag=%s, walk=%s", req.tag, walkID)
 				return walker.SkipPath, false
 			// This is intended to short-circuit a cancelled uploader. It is not intended to abort by cancelling the uploader's context.
 			case <-u.ctx.Done():
-				log.V(3).Infof("upload.digester.cancel: tag=%s, walk_id=%s", req.tag, walkId)
+				log.V(3).Infof("upload.digester.cancel; tag=%s, walk=%s", req.tag, walkID)
 				return walker.SkipPath, false
 			default:
 			}
@@ -179,7 +179,7 @@ func (u *uploader) digest(req UploadRequest) {
 			m, ok := u.nodeCache.LoadOrStore(key, wg)
 			if !ok {
 				// Claimed. Access it.
-				log.V(3).Infof("[casng] upload.digester.visit.claimed: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
+				log.V(3).Infof("[casng] upload.digester.visit.claimed; path=%s, real_path=%s, req=%s, tag=%s, walk=%s", path, realPath, req.id, req.tag, walkID)
 				return walker.Access, true
 			}
 
@@ -187,19 +187,19 @@ func (u *uploader) digest(req UploadRequest) {
 			if wg, ok := m.(*sync.WaitGroup); ok {
 				if deferredWg[key] == nil {
 					deferredWg[key] = wg
-					log.V(3).Infof("[casng] upload.digester.visit.defer: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
+					log.V(3).Infof("[casng] upload.digester.visit.defer; path=%s, real_path=%s, req=%s, tag=%s, walk=%s", path, realPath, req.id, req.tag, walkID)
 					return walker.Defer, true
 				}
-				log.V(3).Infof("[casng] upload.digester.visit.defer.wait: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
+				log.V(3).Infof("[casng] upload.digester.visit.wait; path=%s, real_path=%s, req=%s, tag=%s, walk=%s", path, realPath, req.id, req.tag, walkID)
 				startTime := time.Now()
 				wg.Wait()
-				log.V(3).Infof("[casng] upload.digester.visit.defer.wait.duration: start=%d, end=%d, path=%s, real_path=%s, tag=%s, walk_id=%s", startTime.UnixNano(), time.Now().UnixNano(), path, realPath, req.tag, walkId)
+				log.V(3).Infof("[casng] upload.digester.visit.wait.duration; start=%d, end=%d, path=%s, real_path=%s, req=%s, tag=%s, walk=%s", startTime.UnixNano(), time.Now().UnixNano(), path, realPath, req.id, req.tag, walkID)
 				delete(deferredWg, key)
 				return walker.Defer, true
 			}
 
 			node := m.(proto.Message) // Guaranteed assertion because the cache is an internal field.
-			log.V(3).Infof("[casng] upload.digester.visit.cached: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digester.visit.cached; path=%s, real_path=%s, req=%s, tag=%s, walk=%s", path, realPath, req.id, req.tag, walkID)
 
 			// Forward it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
 			switch node := node.(type) {
@@ -218,22 +218,22 @@ func (u *uploader) digest(req UploadRequest) {
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
 			default:
-				log.Errorf("[casng] cached node has unexpected type: %T", node)
+				log.Errorf("[casng] cached node has unexpected type: %T; req=%s, tag=%s, walk=%s", node, req.id, req.tag, walkID)
 				return walker.SkipPath, false
 			}
 
 			return walker.SkipPath, true
 		},
 		Post: func(path impath.Absolute, realPath impath.Absolute, info fs.FileInfo) (ok bool) {
-			log.V(3).Infof("[casng] upload.digester.visit.post: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digester.visit.post; path=%s, real_path=%s, req=%s, tag=%s, walk=%s", path, realPath, req.id, req.tag, walkID)
 
 			select {
 			case <-req.ctx.Done():
-				log.V(3).Infof("upload.digester.req.cancel: tag=%s, walk_id=%s", req.tag, walkId)
+				log.V(3).Infof("upload.digester.req.cancel; req=%s, tag=%s, walk=%s", req.id, req.tag, walkID)
 				return false
 			// This is intended to short-circuit a cancelled uploader. It is not intended to abort by cancelling the uploader's context.
 			case <-u.ctx.Done():
-				log.V(3).Infof("upload.digester.cancel: tag=%s, walk_id=%s", req.tag, walkId)
+				log.V(3).Infof("upload.digester.cancel; req=%s, tag=%s, walk=%s", req.id, req.tag, walkID)
 				return false
 			default:
 			}
@@ -245,7 +245,7 @@ func (u *uploader) digest(req UploadRequest) {
 			// Capture it here before it's overwritten with the actual result.
 			wg, pathClaimed := u.nodeCache.Load(key)
 			if !pathClaimed {
-				err = errors.Join(fmt.Errorf("attempted to post-access a non-claimed path %q, tag=%s", path, req.tag), err)
+				err = errors.Join(fmt.Errorf("attempted to post-access a non-claimed path %q; req=%s, tag=%s, walk=%s", path, req.id, req.tag, walkID), err)
 				return false
 			}
 			defer func() {
@@ -269,13 +269,13 @@ func (u *uploader) digest(req UploadRequest) {
 				u.dirChildren.append(parentKey, node)
 				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 				u.nodeCache.Store(key, node)
-				log.V(3).Infof("[casng] upload.digester.visit.post.dir: path=%s, real_path=%s, digset=%v, tag=%s, walk_id=%s", path, realPath, node.Digest, req.tag, walkId)
+				log.V(3).Infof("[casng] upload.digester.visit.post.dir; path=%s, real_path=%s, digset=%v, req=%s, tag=%s, walk=%s", path, realPath, node.Digest, req.id, req.tag, walkID)
 				return true
 
 			case info.Mode().IsRegular():
 				stats.DigestCount += 1
 				stats.InputFileCount += 1
-				node, blb, errDigest := u.digestFile(realPath, info, req.digestOnly)
+				node, blb, errDigest := u.digestFile(realPath, info, req.digestOnly, req.id, req.tag, walkID)
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
 					return false
@@ -284,29 +284,29 @@ func (u *uploader) digest(req UploadRequest) {
 				u.nodeCache.Store(key, node)
 				u.dirChildren.append(parentKey, node)
 				if blb == nil {
-					log.V(3).Infof("[casng] upload.digester.visit.post.file.cached: path=%s, real_path=%s, digest=%v, tag=%s, walk_id=%s", path, realPath, node.Digest, req.tag, walkId)
+					log.V(3).Infof("[casng] upload.digester.visit.post.file.cached; path=%s, real_path=%s, digest=%v, req=%s, tag=%s, walk=%s", path, realPath, node.Digest, req.id, req.tag, walkID)
 					return true
 				}
 				u.dispatcherReqCh <- UploadRequest{Bytes: blb.b, reader: blb.r, Digest: digest.NewFromProtoUnvalidated(node.Digest), tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
-				log.V(3).Infof("[casng] upload.digester.visit.post.file: path=%s, real_path=%s, digest=%v, tag=%s, walk_id=%s", path, realPath, node.Digest, req.tag, walkId)
+				log.V(3).Infof("[casng] upload.digester.visit.post.file; path=%s, real_path=%s, digest=%v, req=%s, tag=%s, walk=%s", path, realPath, node.Digest, req.id, req.tag, walkID)
 				return true
 
 			default:
 				// Ignore everything else (e.g. sockets and pipes).
-				log.V(3).Infof("[casng] upload.digester.visit.post.other: path=%s, real_path=%s, tag=%s, walk_id=%s", path, realPath, req.tag, walkId)
+				log.V(3).Infof("[casng] upload.digester.visit.post.other; path=%s, real_path=%s, req=%s, tag=%s, walk=%s", path, realPath, req.id, req.tag, walkID)
 			}
 			return true
 		},
 		Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (action walker.SymlinkAction, ok bool) {
-			log.V(3).Infof("[casng] upload.digester.visit.symlink: path=%s, real_path=%s, slo=%s, tag=%s, walk_id=%s", path, realPath, req.SymlinkOptions, req.tag, walkId)
+			log.V(3).Infof("[casng] upload.digester.visit.symlink; path=%s, real_path=%s, slo=%s, req=%s, tag=%s, walk=%s", path, realPath, req.SymlinkOptions, req.id, req.tag, walkID)
 
 			select {
 			case <-req.ctx.Done():
-				log.V(3).Infof("upload.digester.req.cancel: tag=%s, walk_id=%s", req.tag, walkId)
+				log.V(3).Infof("upload.digester.req.cancel; req=%s, tag=%s, walk=%s", req.id, req.tag, walkID)
 				return walker.SkipSymlink, false
 			// This is intended to short-circuit a cancelled uploader. It is not intended to abort by cancelling the uploader's context.
 			case <-u.ctx.Done():
-				log.V(3).Infof("upload.digester.cancel: tag=%s, walk_id=%s", req.tag, walkId)
+				log.V(3).Infof("upload.digester.cancel; req=%s, tag=%s, walk=%s", req.id, req.tag, walkID)
 				return walker.SkipSymlink, false
 			default:
 			}
@@ -318,7 +318,7 @@ func (u *uploader) digest(req UploadRequest) {
 			// Capture it here before it's overwritten with the actual result.
 			wg, pathClaimed := u.nodeCache.Load(key)
 			if !pathClaimed {
-				err = errors.Join(fmt.Errorf("attempted to post-access a non-claimed path %q, tag=%s", path, req.tag), err)
+				err = errors.Join(fmt.Errorf("attempted to post-access a non-claimed path %q; req=%s, tag=%s, walk=%s", path, req.id, req.tag, walkID), err)
 				return walker.SkipSymlink, false
 			}
 			defer func() {
@@ -344,14 +344,14 @@ func (u *uploader) digest(req UploadRequest) {
 				// Unclaim so that other walkers can add the target to their queue.
 				u.nodeCache.Delete(key)
 			}
-			log.V(3).Infof("[casng] upload.digester.visit.symlink.symlink: path=%s, real_path=%s, slo=%s, tag=%s, step=%s, walk_id=%s", path, realPath, req.SymlinkOptions, req.tag, nextStep, walkId)
+			log.V(3).Infof("[casng] upload.digester.visit.symlink.symlink; path=%s, real_path=%s, slo=%s, step=%s, req=%s, tag=%s, walk=%s", path, realPath, req.SymlinkOptions, nextStep, req.id, req.tag, walkID)
 			return nextStep, true
 		},
 	})
 
 	// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
 	// err includes any IO errors that happened during the walk.
-	u.dispatcherResCh <- UploadResponse{tags: []tag{req.tag}, Stats: stats, Err: err}
+	u.dispatcherResCh <- UploadResponse{tags: []string{req.tag}, Stats: stats, Err: err}
 }
 
 // digestSymlink follows the target and/or constructs a symlink node.
@@ -462,7 +462,7 @@ func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.Dire
 // The caller must assume ownership of that token and release it.
 //
 // If the returned err is not nil, both tokens are released before returning.
-func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo, closeLargeFile bool) (node *repb.FileNode, blb *blob, err error) {
+func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo, closeLargeFile bool, reqID string, tag string, walkID string) (node *repb.FileNode, blb *blob, err error) {
 	// Always return a clone to ensure the cached version remains owned by the cache.
 	defer func() {
 		if node != nil {
@@ -506,11 +506,11 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo, closeLarge
 	// TODO: do not import filemetadata.
 	if filemetadata.XattrDigestName != "" {
 		if !xattr.XATTR_SUPPORTED {
-			return nil, nil, fmt.Errorf("failed to read digest from x-attribute for %q: x-attributes are not supported by the system", path)
+			return nil, nil, fmt.Errorf("[casng] failed to read digest from x-attribute for %q: x-attributes are not supported by the system; req=%s, tag=%s, walk=%s", path, reqID, tag, walkID)
 		}
 		xattrValue, err := xattr.Get(path.String(), filemetadata.XattrDigestName)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read digest from x-attribute for %q: %v", path, err)
+			return nil, nil, fmt.Errorf("[casng] failed to read digest from x-attribute for %q: %v; req=%s, tag=%s, walk=%s", path, err, reqID, tag, walkID)
 		}
 		xattrStr := string(xattrValue)
 		if !strings.ContainsRune(xattrStr, '/') {
@@ -518,10 +518,10 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo, closeLarge
 		}
 		dg, err := digest.NewFromString(xattrStr)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to parse digest from x-attribute for %q: %v", path, err)
+			return nil, nil, fmt.Errorf("[casng] failed to parse digest from x-attribute for %q: %v; req=%s, tag=%s, walk=%s", path, err, reqID, tag, walkID)
 		}
 		node.Digest = dg.ToProto()
-		log.V(3).Infof("[casng] upload.digester.file.xattr: path=%s, size=%d", path, info.Size())
+		log.V(3).Infof("[casng] upload.digester.file.xattr; path=%s, size=%d, req=%s, tag=%s, walk=%s", path, info.Size(), reqID, tag, walkID)
 		return node, &blob{}, nil
 	}
 
@@ -533,7 +533,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo, closeLarge
 		if !u.ioLargeThrottler.acquire(u.ctx) {
 			return nil, nil, u.ctx.Err()
 		}
-		log.V(3).Infof("[casng] upload.digester.io_large_throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+		log.V(3).Infof("[casng] upload.digester.io_large_throttle.duration; start=%d, end=%d, req=%s, tag=%s, walk=%s", startTime.UnixNano(), time.Now().UnixNano(), reqID, tag, walkID)
 		defer func() {
 			// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 			if blb == nil || blb.r == nil {
@@ -546,7 +546,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo, closeLarge
 	if !u.ioThrottler.acquire(u.ctx) {
 		return nil, nil, u.ctx.Err()
 	}
-	log.V(3).Infof("[casng] upload.digester.io_throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("[casng] upload.digester.io_throttle.duration; start=%d, end=%d, req=%s, tag=%s, walk=%s", startTime.UnixNano(), time.Now().UnixNano(), reqID, tag, walkID)
 	defer func() {
 		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 		if blb == nil || blb.r == nil {
@@ -556,7 +556,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo, closeLarge
 
 	// Small: in-memory blob.
 	if info.Size() <= u.ioCfg.SmallFileSizeThreshold {
-		log.V(3).Infof("[casng] upload.digester.file.small: path=%s, size=%d", path, info.Size())
+		log.V(3).Infof("[casng] upload.digester.file.small; path=%s, size=%d, req=%s, tag=%s, walk=%s", path, info.Size(), reqID, tag, walkID)
 		f, err := os.Open(path.String())
 		if err != nil {
 			return nil, nil, err
@@ -578,7 +578,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo, closeLarge
 
 	// Medium: blob with path.
 	if info.Size() < u.ioCfg.LargeFileSizeThreshold {
-		log.V(3).Infof("[casng] upload.digester.file.medium: path=%s, size=%d", path, info.Size())
+		log.V(3).Infof("[casng] upload.digester.file.medium; path=%s, size=%d, req=%s, tag=%s, walk=%s", path, info.Size(), reqID, tag, walkID)
 		dg, errDigest := digest.NewFromFile(path.String())
 		if errDigest != nil {
 			return nil, nil, errDigest
@@ -588,7 +588,7 @@ func (u *uploader) digestFile(path impath.Absolute, info fs.FileInfo, closeLarge
 	}
 
 	// Large: blob with a reader.
-	log.V(3).Infof("[casng] upload.digester.file.large: path=%s, size=%d", path, info.Size())
+	log.V(3).Infof("[casng] upload.digester.file.large; path=%s, size=%d, req=%s, tag=%s, walk=%s", path, info.Size(), reqID, tag, walkID)
 	f, err := os.Open(path.String())
 	if err != nil {
 		return nil, nil, err

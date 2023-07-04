@@ -84,7 +84,6 @@ package casng
 //
 //	rg -. $CHROME_SRC/src/out/reclient/.reproxy_tmp/logs/reproxy.INFO -e 'casng.*duration:' | \
 //	  cut -d ' ' -f 6-8 | sed -e 's/: start=/,/' -e 's/, end=/,/' -e 's/,$//' > /tmp/durations.csv
-package casng
 
 import (
 	"context"
@@ -340,7 +339,7 @@ func newUploader(
 
 		logBeatDoneCh: make(chan struct{}),
 	}
-	log.V(1).Infof("[casng] uploader.new: cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v", queryCfg, uploadCfg, streamCfg, ioCfg)
+	log.V(1).Infof("[casng] uploader.new; cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v", queryCfg, uploadCfg, streamCfg, ioCfg)
 
 	u.processorWg.Add(1)
 	go func() {
@@ -434,7 +433,7 @@ func (u *uploader) logBeat() {
 		case <-ticker.C:
 		}
 
-		log.V(3).Infof("[casng] beat: upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
+		log.V(3).Infof("[casng] beat; upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
 			u.uploadPubSub.len(), u.queryPubSub.len(), u.walkThrottler.len(), u.uploadThrottler.len(), u.streamThrottle.len(), u.queryThrottler.len(), u.ioThrottler.len(), u.ioLargeThrottler.len())
 	}
 }

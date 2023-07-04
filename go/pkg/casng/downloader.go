@@ -125,20 +125,20 @@ func (d *BatchingDownloader) Read(ctx context.Context, digests ...digest.Digest)
 // limit must be positive. A value of 0 means no limit.
 // Returns the digest of the downloaded bytes and download stats.
 func (d *BatchingDownloader) ReadBytes(ctx context.Context, name string, offset int64, limit int64, writer io.Writer) (digest.Digest, Stats, error) {
-	contextmd.Infof(ctx, log.Level(1), "[casng] download.read_bytes: name=%s, offset=%d, limit=%d", name, offset, limit)
-	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.write_bytes.done: name=%s, offset=%d, limit=%d", name, offset, limit)
+	contextmd.Infof(ctx, log.Level(1), "[casng] download.read_bytes; name=%s, offset=%d, limit=%d", name, offset, limit)
+	defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.write_bytes.done; name=%s, offset=%d, limit=%d", name, offset, limit)
 
 	startTime := time.Now()
 	if !d.streamThrottle.acquire(ctx) {
 		return digest.Digest{}, Stats{}, ctx.Err()
 	}
 	defer d.streamThrottle.release()
-	log.V(3).Infof("[casng] download.read_bytes.throttle.duration: start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("[casng] download.read_bytes.throttle.duration; start=%d, end=%d, name=%s", startTime.UnixNano(), time.Now().UnixNano(), name)
 
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
-			log.Infof("[casng] download.read_bytes.duration: start=%d, end=%d, name=%s", startTime.UnixNano(), time.Now().UnixNano(), name)
+			log.Infof("[casng] download.read_bytes.duration; start=%d, end=%d, name=%s", startTime.UnixNano(), time.Now().UnixNano(), name)
 		}()
 	}
 
@@ -165,7 +165,7 @@ func (d *BatchingDownloader) ReadBytes(ctx context.Context, name string, offset 
 	var nRawBytes int64 // Track the actual number of written raw bytes.
 	var withDecompression bool
 	if IsCompressedReadResourceName(name) {
-		contextmd.Infof(ctx, log.Level(1), "[casng] download.read_bytes.decompressing: name=%s", name)
+		contextmd.Infof(ctx, log.Level(1), "[casng] download.read_bytes.decompressing; name=%s", name)
 		withDecompression = true
 		prDec, pwDec := io.Pipe()
 

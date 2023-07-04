@@ -33,7 +33,7 @@ func TestDownload_ReadBytes(t *testing.T) {
 			resName: casng.MakeReadResourceName("", "", 0),
 			bs: &fakeByteStreamClient{
 				read: func(ctx context.Context, in *bspb.ReadRequest, opts ...grpc.CallOption) (bspb.ByteStream_ReadClient, error) {
-					return &fakeByteStreamClient_ReadClient{
+					return &fakeByteStreamClientReadClient{
 						recv: func() (*bspb.ReadResponse, error) {
 							return &bspb.ReadResponse{Data: []byte("foo")}, io.EOF
 						},

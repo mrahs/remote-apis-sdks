@@ -76,6 +76,7 @@ func makeFs(t *testing.T, paths map[string][]byte) string {
 type fakeByteStreamClient struct {
 	bsgrpc.ByteStreamClient
 	write func(ctx context.Context, opts ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error)
+	read  func(ctx context.Context, in *bspb.ReadRequest, opts ...grpc.CallOption) (bsgrpc.ByteStream_ReadClient, error)
 }
 
 type fakeByteStreamWriteClient struct {
@@ -85,7 +86,7 @@ type fakeByteStreamWriteClient struct {
 }
 
 type fakeByteStreamClientReadClient struct {
-	bspb.ByteStreamReadClient
+	bspb.ByteStream_ReadClient
 	recv func() (*bspb.ReadResponse, error)
 }
 
@@ -96,7 +97,7 @@ func (s *fakeByteStreamClient) Write(ctx context.Context, opts ...grpc.CallOptio
 	return &fakeByteStreamWriteClient{}, nil
 }
 
-func (s *fakeByteStreamClient) Read(ctx context.Context, in *bspb.ReadRequest, opts ...grpc.CallOption) (bspb.ByteStreamReadClient, error) {
+func (s *fakeByteStreamClient) Read(ctx context.Context, in *bspb.ReadRequest, opts ...grpc.CallOption) (bspb.ByteStream_ReadClient, error) {
 	if s.read != nil {
 		return s.read(ctx, in, opts...)
 	}

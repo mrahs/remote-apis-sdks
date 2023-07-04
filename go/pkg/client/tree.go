@@ -379,8 +379,13 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 	dir := &repb.Directory{}
 	blobs = make(map[digest.Digest]*uploadinfo.Entry)
 
+	var path string
 	for name, child := range t.children {
-		dg, childBlobs, err := packageTree(child, stats)
+		if tree != nil {
+			path = prefix + "/" + name
+		}
+
+		dg, childBlobs, err := packageTree(child, stats, path, tree)
 		if err != nil {
 			return digest.Empty, nil, err
 		}

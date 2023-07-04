@@ -42,7 +42,7 @@ func TestUpload_Batching(t *testing.T) {
 			ioCfg: casng.IOConfig{BufferSize: 1},
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
-					return &fakeByteStream_WriteClient{
+					return &fakeByteStreamWriteClient{
 						send: func(wr *bspb.WriteRequest) error {
 							return io.EOF
 						},
@@ -90,7 +90,7 @@ func TestUpload_Batching(t *testing.T) {
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					var size int64
-					return &fakeByteStream_WriteClient{
+					return &fakeByteStreamWriteClient{
 						send: func(wr *bspb.WriteRequest) error {
 							size += int64(len(wr.Data))
 							return nil
@@ -143,7 +143,7 @@ func TestUpload_Batching(t *testing.T) {
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					var size int64
-					return &fakeByteStream_WriteClient{
+					return &fakeByteStreamWriteClient{
 						send: func(wr *bspb.WriteRequest) error {
 							size += int64(len(wr.Data))
 							return nil
@@ -198,7 +198,7 @@ func TestUpload_Batching(t *testing.T) {
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					var size int64
-					return &fakeByteStream_WriteClient{
+					return &fakeByteStreamWriteClient{
 						send: func(wr *bspb.WriteRequest) error {
 							size += int64(len(wr.Data))
 							return nil
@@ -265,7 +265,7 @@ func TestUpload_Batching(t *testing.T) {
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					var size int64
-					return &fakeByteStream_WriteClient{
+					return &fakeByteStreamWriteClient{
 						send: func(wr *bspb.WriteRequest) error {
 							size += int64(len(wr.Data))
 							return nil
@@ -336,7 +336,7 @@ func TestUpload_Batching(t *testing.T) {
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
 					var size int64
-					return &fakeByteStream_WriteClient{
+					return &fakeByteStreamWriteClient{
 						send: func(wr *bspb.WriteRequest) error {
 							<-time.After(10 * time.Millisecond) // Fake high latency.
 							size += int64(len(wr.Data))
@@ -398,7 +398,7 @@ func TestUpload_Batching(t *testing.T) {
 			},
 			bsc: &fakeByteStreamClient{
 				write: func(_ context.Context, _ ...grpc.CallOption) (bspb.ByteStream_WriteClient, error) {
-					return &fakeByteStream_WriteClient{
+					return &fakeByteStreamWriteClient{
 						send: func(wr *bspb.WriteRequest) error {
 							return nil
 						},
