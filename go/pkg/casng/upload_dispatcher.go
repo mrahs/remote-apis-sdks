@@ -110,7 +110,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 				if len(digestReqs[req.Digest]) > 1 {
 					continue
 				}
-				queryCh <- missingBlobRequest{digest: req.Digest, ctx: req.ctx}
+				queryCh <- missingBlobRequest{digest: req.Digest, ctx: req.ctx, id: req.id}
 				// Covers waiting on the query processor.
 				log.V(3).Infof("[casng] upload.dispatcher.pipe.send.duration; start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 

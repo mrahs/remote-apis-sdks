@@ -73,17 +73,20 @@ package casng
 //       this ensures the whole pipeline is drained properly.
 
 // A note about logging:
+//	Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
+//	Level 2 is used for internal functions that may be called per request.
+//	Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
+//  Level 4 is used for messages with large objects.
+//  Level 5 is used for messages that require custom processing (extra compute).
 //
-//		Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
-//		Level 2 is used for internal functions that may be called per request.
-//		Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
-//	 Level 4 is used for messages with large objects.
-//	 Level 5 is used for messages that require custom processing (extra compute).
+// Log messages are formatted to be grep-friendly. You can do things like:
+//   grep info.log -e 'casng'
+//   grep info.log -e 'upload.digester'
+//   grep info.log -e 'req=request_id'
+//   grep info.log -e 'tag=requester_id'
 //
 // To get a csv file of durations, enable verbosity level 3 and use the command:
-//
-//	rg -. $CHROME_SRC/src/out/reclient/.reproxy_tmp/logs/reproxy.INFO -e 'casng.*duration:' | \
-//	  cut -d ' ' -f 6-8 | sed -e 's/: start=/,/' -e 's/, end=/,/' -e 's/,$//' > /tmp/durations.csv
+//   grep info.log -e 'casng.*duration:' | cut -d ' ' -f 6-8 | sed -e 's/: start=/,/' -e 's/, end=/,/' -e 's/,$//' > /tmp/durations.csv
 
 import (
 	"context"
