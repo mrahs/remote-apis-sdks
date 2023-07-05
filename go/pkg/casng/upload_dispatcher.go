@@ -48,7 +48,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 		for req := range u.dispatcherReqCh {
 			startTime := time.Now()
 			if req.done { // The digester will not be sending any further blobs.
-				log.V(3).Infof("[casng] upload.dispatcher.req.done; req=%s, tag=%s", req.id, req.tag)
+				log.V(3).Infof("[casng] upload.dispatcher.req.done; tag=%s", req.tag)
 				counterCh <- tagCount{req.tag, 0}
 				// Covers waiting on the counter.
 				log.V(3).Infof("[casng] upload.dispatcher.req.duration; start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
@@ -63,7 +63,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 			}
 			log.V(3).Infof("[casng] upload.dispatcher.req; digest=%s, bytes=%d, req=%s, tag=%s", req.Digest, len(req.Bytes), req.id, req.tag)
 			if req.digestOnly {
-				u.dispatcherResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{}, tags: []string{req.tag}}
+				u.dispatcherResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{}, tags: []string{req.tag}, reqs: []string{req.id}}
 				continue
 			}
 			u.dispatcherPipeCh <- req
@@ -181,7 +181,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 		for r := range u.dispatcherResCh {
 			startTime := time.Now()
 			if log.V(3) {
-				log.Infof("[casng] upload.dispatcher.res; digest=%s, cache_hit=%d, cache_miss=%d, err=%v, req=%s, tag=%s", r.Digest, r.Stats.CacheHitCount, r.Stats.CacheMissCount, r.Err, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"))
+				log.Infof("[casng] upload.dispatcher.res; digest=%s, cache_hit=%d, cache_miss=%d, err=%v, done=%t, req=%s, tag=%s", r.Digest, r.Stats.CacheHitCount, r.Stats.CacheMissCount, r.Err, r.done, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"))
 			}
 			// If multiple requesters are interested in this response, ensure stats are not double-counted.
 			if len(r.tags) == 1 {

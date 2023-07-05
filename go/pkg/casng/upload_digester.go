@@ -204,7 +204,7 @@ func (u *uploader) digest(req UploadRequest) {
 			// Forward it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
 			switch node := node.(type) {
 			case *repb.FileNode:
-				u.dispatcherReqCh <- UploadRequest{Path: realPath, Digest: digest.NewFromProtoUnvalidated(node.Digest), tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
+				u.dispatcherReqCh <- UploadRequest{Path: realPath, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 			case *repb.DirectoryNode:
 				// The blob of the directory node is the bytes of a repb.Directory message.
 				// Generate and forward it. If it was uploaded before, it'll be reported as a cache hit.
@@ -214,7 +214,7 @@ func (u *uploader) digest(req UploadRequest) {
 					err = errors.Join(errDigest, err)
 					return walker.SkipPath, false
 				}
-				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
+				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
 			default:
@@ -267,7 +267,7 @@ func (u *uploader) digest(req UploadRequest) {
 					return false
 				}
 				u.dirChildren.append(parentKey, node)
-				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
+				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 				u.nodeCache.Store(key, node)
 				log.V(3).Infof("[casng] upload.digester.visit.post.dir; path=%s, real_path=%s, digset=%v, req=%s, tag=%s, walk=%s", path, realPath, node.Digest, req.id, req.tag, walkID)
 				return true
@@ -287,7 +287,7 @@ func (u *uploader) digest(req UploadRequest) {
 					log.V(3).Infof("[casng] upload.digester.visit.post.file.cached; path=%s, real_path=%s, digest=%v, req=%s, tag=%s, walk=%s", path, realPath, node.Digest, req.id, req.tag, walkID)
 					return true
 				}
-				u.dispatcherReqCh <- UploadRequest{Bytes: blb.b, reader: blb.r, Digest: digest.NewFromProtoUnvalidated(node.Digest), tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
+				u.dispatcherReqCh <- UploadRequest{Bytes: blb.b, reader: blb.r, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 				log.V(3).Infof("[casng] upload.digester.visit.post.file; path=%s, real_path=%s, digest=%v, req=%s, tag=%s, walk=%s", path, realPath, node.Digest, req.id, req.tag, walkID)
 				return true
 
@@ -351,7 +351,7 @@ func (u *uploader) digest(req UploadRequest) {
 
 	// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
 	// err includes any IO errors that happened during the walk.
-	u.dispatcherResCh <- UploadResponse{tags: []string{req.tag}, Stats: stats, Err: err}
+	u.dispatcherResCh <- UploadResponse{tags: []string{req.tag}, reqs: []string{req.id}, Stats: stats, Err: err}
 }
 
 // digestSymlink follows the target and/or constructs a symlink node.

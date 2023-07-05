@@ -238,6 +238,7 @@ func (s *Stats) Add(other Stats) {
 // ToCacheHit returns a copy of the stats that represents a cache hit of the original.
 // All "bytes moving" stats are zeroed-out and cache stats are updated based on other values.
 // Everything else remains the same.
+// A pointer receiver allows this method to work on nil values of this type.
 func (s *Stats) ToCacheHit() Stats {
 	if s == nil {
 		return Stats{}
