@@ -272,6 +272,7 @@ func NewStreamingUploader(
 }
 
 // TODO: support uploading repb.Tree.
+// TODO: support node properties as in https://github.com/bazelbuild/remote-apis-sdks/pull/475
 func newUploader(
 	ctx context.Context, cas regrpc.ContentAddressableStorageClient, byteStream bsgrpc.ByteStreamClient, instanceName string,
 	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
