@@ -351,7 +351,7 @@ func (u *uploader) digest(req UploadRequest) {
 
 	// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
 	// err includes any IO errors that happened during the walk.
-	u.dispatcherResCh <- UploadResponse{tags: []string{req.tag}, reqs: []string{req.id}, Stats: stats, Err: err}
+	u.dispatcherResCh <- UploadResponse{endOfWalk: true, tags: []string{req.tag}, reqs: []string{req.id}, Stats: stats, Err: err}
 }
 
 // digestSymlink follows the target and/or constructs a symlink node.

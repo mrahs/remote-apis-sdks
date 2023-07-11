@@ -387,6 +387,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 			err = errors.Join(r.Err, err)
 		}
 		stats.Add(r.Stats)
+		// For pure stat responses, i.e. r.Digest is zero, CacheMissCount will be equal to 0.
 		if r.Stats.CacheMissCount > 0 {
 			uploaded = append(uploaded, r.Digest)
 		}

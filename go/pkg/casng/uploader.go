@@ -86,7 +86,7 @@ package casng
 //   grep info.log -e 'tag=requester_id'
 //
 // To get a csv file of durations, enable verbosity level 3 and use the command:
-//   grep info.log -e 'casng.*duration:' | cut -d ' ' -f 6-8 | sed -e 's/: start=/,/' -e 's/, end=/,/' -e 's/,$//' > /tmp/durations.csv
+//   grep info.log -e 'casng.*duration;' | cut -d ' ' -f 6-8 | sed -e 's/; start=/,/' -e 's/, end=/,/' -e 's/,$//' > /tmp/durations.csv
 
 import (
 	"context"
@@ -428,17 +428,31 @@ func (u *uploader) close() {
 }
 
 func (u *uploader) logBeat() {
-	ticker := time.NewTicker(time.Second)
+	var interval time.Duration
+	if log.V(3) {
+		interval = time.Second
+	} else if log.V(2) {
+		interval = 30 * time.Second
+	} else if log.V(1) {
+		interval = time.Minute
+	} else {
+		return
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	c := 0
 	for {
 		select {
 		case <-u.logBeatDoneCh:
+			log.V(3).Infof("[casng] beat: done")
 			return
 		case <-ticker.C:
 		}
 
-		log.V(3).Infof("[casng] beat; upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
-			u.uploadPubSub.len(), u.queryPubSub.len(), u.walkThrottler.len(), u.uploadThrottler.len(), u.streamThrottle.len(), u.queryThrottler.len(), u.ioThrottler.len(), u.ioLargeThrottler.len())
+		c++
+		log.V(3).Infof("[casng] beat; #=%d, interval=%v, upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
+			c, interval, u.uploadPubSub.len(), u.queryPubSub.len(), u.walkThrottler.len(), u.uploadThrottler.len(), u.streamThrottle.len(), u.queryThrottler.len(), u.ioThrottler.len(), u.ioLargeThrottler.len())
 	}
 }
 

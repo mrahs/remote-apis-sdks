@@ -1,6 +1,7 @@
 package casng
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -42,21 +43,31 @@ func (ps *pubsub) sub() (string, <-chan any) {
 	return tag, subscriber
 }
 
-// unsub removes the subscription for tag, if any, and closes the corresponding channel.
+// unsub schedules the subscription to be removed as soon as in-flight pubs are done.
+// The subscriber must continue draining the channel until it's closed.
 func (ps *pubsub) unsub(tag string) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	subscriber, ok := ps.subs[tag]
-	if !ok {
-		return
-	}
-	delete(ps.subs, tag)
-	close(subscriber)
-	if len(ps.subs) == 0 {
-		close(ps.done)
-		ps.done = make(chan struct{})
-	}
-	log.V(3).Infof("[casng] pubsub.unsub; tag=%s", tag)
+	// If unsub is called from the same goroutine that is listening on the subscription
+	// channel, a deadlock might occur.
+	// pub would be holding a read lock while this call wants to hold a write lock that must
+	// wait for all reads to finish. However, that read will never finish because the corresponding goroutine
+	// is blocked on this call.
+	// Ideally, the user should call unsub after confirming all pub calls have returned. However, this allows
+	// releives the user from that burden with minimal overhead.
+	go func() {
+		ps.mu.Lock()
+		defer ps.mu.Unlock()
+		subscriber, ok := ps.subs[tag]
+		if !ok {
+			return
+		}
+		delete(ps.subs, tag)
+		close(subscriber)
+		if len(ps.subs) == 0 {
+			close(ps.done)
+			ps.done = make(chan struct{})
+		}
+		log.V(3).Infof("[casng] pubsub.unsub; tag=%s", tag)
+	}()
 }
 
 // pub is a blocking call that fans-out a response to all specified (by tag) subscribers concurrently.
@@ -120,11 +131,12 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
+	retryCount := 0
 	for {
 		for _, t := range tags {
 			subscriber, ok := ps.subs[t]
 			if !ok {
-				log.V(3).Infof("[casng] pubsub.pub.drop: tag=%s", t)
+				log.Warningf("[casng] pubsub.pub.drop: tag=%s", t)
 				continue
 			}
 			// Send now or reschedule if the subscriber is not ready.
@@ -142,6 +154,11 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 		if len(toRetry) == 0 {
 			break
 		}
+		retryCount++
+		if retryCount%100 == 0 && log.V(3) {
+			log.Infof("[casng] pubsub.pub.retry; retry=%d, tag=%s", retryCount, strings.Join(toRetry, "|"))
+		}
+
 		// Reuse the underlying arrays by swapping slices and resetting one of them.
 		tags, toRetry = toRetry, tags
 		toRetry = toRetry[:0]
@@ -153,8 +170,9 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 // The signal is a snapshot. The broker my get more subscribers after returning from this call.
 func (ps *pubsub) wait() {
 	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-	<-ps.done
+	done := ps.done
+	ps.mu.RUnlock()
+	<-done
 }
 
 // len returns the number of active subscribers.

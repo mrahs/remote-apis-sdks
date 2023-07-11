@@ -106,8 +106,10 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 				}
 
 				log.V(3).Infof("[casng] upload.dispatcher.pipe.blob; digest=%s, req=%s, tag=%s", req.Digest, req.id, req.tag)
-				digestReqs[req.Digest] = append(digestReqs[req.Digest], req)
-				if len(digestReqs[req.Digest]) > 1 {
+				reqs := digestReqs[req.Digest]
+				reqs = append(reqs, req)
+				digestReqs[req.Digest] = reqs
+				if len(reqs) > 1 {
 					continue
 				}
 				queryCh <- missingBlobRequest{digest: req.Digest, ctx: req.ctx, id: req.id}
@@ -156,6 +158,9 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 					continue
 				}
 
+				if log.V(3) {
+					log.Infof("[casng] upload.dispatcher.pipe.res.miss; digest=%s, req=%s, tag=%s", r.Digest, strings.Join(res.reqs, "|"), strings.Join(res.tags, "|"))
+				}
 				for _, req := range reqs {
 					if req.Digest.Size <= batchItemSizeLimit {
 						u.batcherCh <- req
@@ -181,7 +186,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 		for r := range u.dispatcherResCh {
 			startTime := time.Now()
 			if log.V(3) {
-				log.Infof("[casng] upload.dispatcher.res; digest=%s, cache_hit=%d, cache_miss=%d, err=%v, done=%t, req=%s, tag=%s", r.Digest, r.Stats.CacheHitCount, r.Stats.CacheMissCount, r.Err, r.done, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"))
+				log.Infof("[casng] upload.dispatcher.res; digest=%s, cache_hit=%d, end_of_walk=%t, err=%v, req=%s, tag=%s", r.Digest, r.Stats.CacheHitCount, r.endOfWalk, r.Err, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"))
 			}
 			// If multiple requesters are interested in this response, ensure stats are not double-counted.
 			if len(r.tags) == 1 {
@@ -192,9 +197,9 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 				u.uploadPubSub.mpub(r, rCached, r.tags...)
 			}
 
-			for _, t := range r.tags {
-				// Special case: Do not decrement if it's an end of walk response.
-				if r.Digest.Hash != "" {
+			// Special case: do not decrement if it's an end of walk response.
+			if !r.endOfWalk {
+				for _, t := range r.tags {
 					counterCh <- tagCount{t, -1}
 				}
 			}
@@ -229,7 +234,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 				tagDone[tc.t] = true
 			}
 			tagReqCount[tc.t] += tc.c
-			log.V(3).Infof("[casng] upload.dispatcher.counter.count; tag=%s, count=%d, pending_tags=%d", tc.t, tagReqCount[tc.t], len(tagReqCount))
+			log.V(3).Infof("[casng] upload.dispatcher.counter.count; tag=%s, inc=%d, count=%d, done=%t, pending_tags=%d", tc.t, tc.c, tagReqCount[tc.t], tagDone[tc.t], len(tagReqCount))
 			if tagReqCount[tc.t] <= 0 && tagDone[tc.t] {
 				log.V(2).Infof("[casng] upload.dispatcher.counter.done.to; tag=%s", tc.t)
 				delete(tagDone, tc.t)

@@ -98,8 +98,10 @@ type UploadResponse struct {
 	reqs []string
 	// tags is used internally to identify the clients that are interested in this response.
 	tags []string
-	// done is used internally to signal that this is the last response for the associated clients.
+	// done is used internally to signal that this is the last response for the associated tags.
 	done bool
+	// endofWalk is used internally to signal that this response includes stats only for the associated tags.
+	endOfWalk bool
 }
 
 // uploadRequestBundleItem is a tuple of an upload request and a list of clients interested in the response.
@@ -315,6 +317,7 @@ func (u *uploader) batcher() {
 			// If the blob doesn't fit in the current bundle, cycle it.
 			rSize := u.uploadRequestItemBaseSize + len(req.Bytes)
 			if bundleSize+rSize >= u.batchRPCCfg.BytesLimit {
+				log.V(3).Infof("[casng] upload.batcher.bundle; size=%d, item_size=%d", bundleSize, rSize)
 				handle()
 			}
 
@@ -329,9 +332,11 @@ func (u *uploader) batcher() {
 
 			// If the bundle is full, cycle it.
 			if len(bundle) >= u.batchRPCCfg.ItemsLimit {
+				log.V(3).Infof("[casng] upload.batcher.bundle; count=%d", len(bundle))
 				handle()
 			}
 		case <-bundleTicker.C:
+			log.V(3).Infof("[casng] upload.batcher.bundle; timeout=%v", u.batchRPCCfg.BundleTimeout)
 			handle()
 		}
 	}
@@ -399,6 +404,9 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			tags:   bundle[d].tags,
 			reqs:   bundle[d].reqs,
 		}
+		if log.V(3) {
+			log.Infof("[casng] upload.batcher.res.uploaded; digest=%s, req=%s, tag=%s", d, strings.Join(bundle[d].reqs, "|"), strings.Join(bundle[d].tags, "|"))
+		}
 		delete(bundle, d)
 	}
 
@@ -420,6 +428,9 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			Err:    errors.Join(ErrGRPC, dErr),
 			tags:   bundle[d].tags,
 			reqs:   bundle[d].reqs,
+		}
+		if log.V(3) {
+			log.Infof("[casng] upload.batcher.res.failed; digest=%s, req=%s, tag=%s", d, strings.Join(bundle[d].reqs, "|"), strings.Join(bundle[d].tags, "|"))
 		}
 		delete(bundle, d)
 	}
@@ -451,6 +462,9 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			Err:    err,
 			tags:   item.tags,
 			reqs:   item.reqs,
+		}
+		if log.V(3) {
+			log.Infof("[casng] upload.batcher.res.failed.call; digest=%s, req=%s, tag=%s", d, strings.Join(bundle[d].reqs, "|"), strings.Join(bundle[d].tags, "|"))
 		}
 	}
 	log.V(3).Infof("[casng] upload.batcher.pub.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
@@ -540,7 +554,7 @@ func (u *uploader) streamer() {
 			u.dispatcherResCh <- r
 			pending -= 1
 			if log.V(3) {
-				log.Infof("[casng] upload.streamer.res; dgiest=%s, req=%s, tag=%s, pending=%d", r.Digest, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"), pending)
+				log.Infof("[casng] upload.streamer.res; digest=%s, req=%s, tag=%s, pending=%d", r.Digest, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"), pending)
 			}
 			// Covers waiting on the dispatcher.
 			log.V(3).Infof("[casng] upload.streamer.pub.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
