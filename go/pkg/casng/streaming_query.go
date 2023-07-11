@@ -255,7 +255,7 @@ func (u *uploader) queryProcessor() {
 
 			// Check size threshold.
 			if bundleSize+dSize >= u.queryRPCCfg.BytesLimit {
-				log.V(3).Infof("[casng] query.processor.bundle; size=%d, item_size=%d", bundleSize, dSize)
+				log.V(3).Infof("[casng] query.processor.bundle.size; bytes=%d, excess=%d", bundleSize, dSize)
 				handle()
 			}
 
@@ -266,11 +266,13 @@ func (u *uploader) queryProcessor() {
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
-				log.V(3).Infof("[casng] query.processor.bundle; count=%d", len(bundle))
+				log.V(3).Infof("[casng] query.processor.bundle.full; count=%d", len(bundle))
 				handle()
 			}
 		case <-bundleTicker.C:
-			log.V(3).Infof("[casng] query.processor.bundle; timeout=%v", u.queryRPCCfg.BundleTimeout)
+			if len(bundle) > 0 {
+				log.V(3).Infof("[casng] query.processor.bundle.timeout; count=%d", len(bundle))
+			}
 			handle()
 		}
 	}

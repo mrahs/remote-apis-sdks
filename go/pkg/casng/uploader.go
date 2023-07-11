@@ -73,9 +73,9 @@ package casng
 //       this ensures the whole pipeline is drained properly.
 
 // A note about logging:
-//	Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
-//	Level 2 is used for internal functions that may be called per request.
-//	Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
+//  Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
+//  Level 2 is used for internal functions that may be called per request.
+//  Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
 //  Level 4 is used for messages with large objects.
 //  Level 5 is used for messages that require custom processing (extra compute).
 //
@@ -328,14 +328,14 @@ func newUploader(
 		dirChildren:      nodeSliceMap{store: make(map[string][]proto.Message)},
 
 		queryCh:          make(chan missingBlobRequest),
-		queryPubSub:      newPubSub(time.Second),
+		queryPubSub:      newPubSub(),
 		digesterCh:       make(chan UploadRequest),
 		dispatcherReqCh:  make(chan UploadRequest),
 		dispatcherPipeCh: make(chan UploadRequest),
 		dispatcherResCh:  make(chan UploadResponse),
 		batcherCh:        make(chan UploadRequest),
 		streamerCh:       make(chan UploadRequest),
-		uploadPubSub:     newPubSub(time.Second),
+		uploadPubSub:     newPubSub(),
 
 		queryRequestBaseSize:      proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),
 		uploadRequestBaseSize:     proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),
@@ -439,20 +439,21 @@ func (u *uploader) logBeat() {
 		return
 	}
 
+	log.Infof("[casng] beat.start; interval=%v", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	c := 0
+	i := 0
 	for {
 		select {
 		case <-u.logBeatDoneCh:
-			log.V(3).Infof("[casng] beat: done")
+			log.Infof("[casng] beat.stop; interval=%v, count=%d", interval, i)
 			return
 		case <-ticker.C:
 		}
 
-		c++
-		log.V(3).Infof("[casng] beat; #=%d, interval=%v, upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
-			c, interval, u.uploadPubSub.len(), u.queryPubSub.len(), u.walkThrottler.len(), u.uploadThrottler.len(), u.streamThrottle.len(), u.queryThrottler.len(), u.ioThrottler.len(), u.ioLargeThrottler.len())
+		i++
+		log.Infof("[casng] beat; #%d, upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
+			i, u.uploadPubSub.len(), u.queryPubSub.len(), u.walkThrottler.len(), u.uploadThrottler.len(), u.streamThrottle.len(), u.queryThrottler.len(), u.ioThrottler.len(), u.ioLargeThrottler.len())
 	}
 }
 

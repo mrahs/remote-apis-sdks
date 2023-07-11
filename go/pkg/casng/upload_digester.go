@@ -151,7 +151,7 @@ func (u *uploader) digest(req UploadRequest) {
 	deferredWg := make(map[string]*sync.WaitGroup)
 	walker.DepthFirst(req.Path, req.Exclude, walker.Callback{
 		Err: func(path impath.Absolute, realPath impath.Absolute, errVisit error) bool {
-			log.V(3).Infof("[casng] upload.digester.visit.err; path=%s, real_path=%s, err=%v, req=%s, tag=%s, walk=%s", path, realPath, errVisit, req.id, req.tag, walkID)
+			log.V(3).Infof("[casng] upload.digester.visit.err; path=%s, real_path=%s, err=%s, req=%s, tag=%s, walk=%s", path, realPath, errVisit, req.id, req.tag, walkID)
 			err = errors.Join(errVisit, err)
 			return false
 		},
@@ -159,7 +159,7 @@ func (u *uploader) digest(req UploadRequest) {
 			log.V(3).Infof("[casng] upload.digester.visit.pre; path=%s, real_path=%s, req=%s, tag=%s, walk=%s", path, realPath, req.id, req.tag, walkID)
 
 			select {
-			// If request aborted, abort.
+			// If the request was aborted, abort.
 			case <-req.ctx.Done():
 				log.V(3).Infof("upload.digester.req.cancel; tag=%s, walk=%s", req.tag, walkID)
 				return walker.SkipPath, false

@@ -317,7 +317,7 @@ func (u *uploader) batcher() {
 			// If the blob doesn't fit in the current bundle, cycle it.
 			rSize := u.uploadRequestItemBaseSize + len(req.Bytes)
 			if bundleSize+rSize >= u.batchRPCCfg.BytesLimit {
-				log.V(3).Infof("[casng] upload.batcher.bundle; size=%d, item_size=%d", bundleSize, rSize)
+				log.V(3).Infof("[casng] upload.batcher.bundle.size; bytes=%d, excess=%d", bundleSize, rSize)
 				handle()
 			}
 
@@ -332,11 +332,13 @@ func (u *uploader) batcher() {
 
 			// If the bundle is full, cycle it.
 			if len(bundle) >= u.batchRPCCfg.ItemsLimit {
-				log.V(3).Infof("[casng] upload.batcher.bundle; count=%d", len(bundle))
+				log.V(3).Infof("[casng] upload.batcher.bundle.full; count=%d", len(bundle))
 				handle()
 			}
 		case <-bundleTicker.C:
-			log.V(3).Infof("[casng] upload.batcher.bundle; timeout=%v", u.batchRPCCfg.BundleTimeout)
+			if len(bundle) > 0 {
+				log.V(3).Infof("[casng] upload.batcher.bundle.timeout; count=%d", len(bundle))
+			}
 			handle()
 		}
 	}
