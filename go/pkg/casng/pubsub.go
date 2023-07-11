@@ -51,8 +51,8 @@ func (ps *pubsub) unsub(tag string) {
 	// pub would be holding a read lock while this call wants to hold a write lock that must
 	// wait for all reads to finish. However, that read will never finish because the corresponding goroutine
 	// is blocked on this call.
-	// Ideally, the user should call unsub after confirming all pub calls have returned. However, this allows
-	// releives the user from that burden with minimal overhead.
+	// Ideally, the user should call unsub after confirming all pub calls have returned. However, this
+	// relieves the user from that burden with minimal overhead.
 	go func() {
 		ps.mu.Lock()
 		defer ps.mu.Unlock()
@@ -132,6 +132,13 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 	defer ticker.Stop()
 
 	retryCount := 0
+	if log.V(3) {
+		defer func(){
+			if retryCount > 0 {
+				log.Infof("[casng] pubsub.pub.retry; count=%d")
+			}
+		}()
+	}
 	for {
 		for _, t := range tags {
 			subscriber, ok := ps.subs[t]
