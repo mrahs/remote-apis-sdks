@@ -71,7 +71,7 @@ package casng
 //   the batcher and the streamer terminate.
 //   user waits for the termination signal: return from batching uploader or response channel closed from streaming uploader.
 //       this ensures the whole pipeline is drained properly.
-
+//
 // A note about logging:
 //  Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
 //  Level 2 is used for internal functions that may be called per request.
