@@ -104,6 +104,7 @@ import (
 	log "github.com/golang/glog"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pborman/uuid"
+
 	// Alias should not be changed because it's used as is for the google3 mirror.
 	bsgrpc "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/protobuf/proto"

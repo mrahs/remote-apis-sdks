@@ -165,7 +165,7 @@ func Descendant(base Absolute, target Absolute) (Relative, error) {
 }
 
 // fastDir assumes all paths are clean and avoids calling filepath.Clean.
-// Code is taken from filepath.Dir of go1.19.
+// Code is taken from https://github.com/golang/go/blob/6244b1946bc2101b01955468f1be502dbadd6807/src/path/filepath/path.go#L654C4
 func fastDir(path string) string {
 	vol := filepath.VolumeName(path)
 	i := len(path) - 1
@@ -183,7 +183,7 @@ func fastDir(path string) string {
 	return vol + dir
 }
 
-// clean returns a clean path from provided parts.
+// clean returns a clean path from base and elements.
 func clean(base string, elements []Relative) string {
 	paths := make([]string, 0, len(elements)+1)
 	if base != "" {
@@ -202,21 +202,21 @@ func clean(base string, elements []Relative) string {
 	return path
 }
 
-// dirty return true if path contains consecutive separators or a dot elements (e.g. . or ..).
+// dirty returns true if path contains consecutive separators or dot elements (e.g. . or ..).
 func dirty(path string) bool {
 	dotsElm := true
-	lastRune := '\000'
+	prevRune := '\000'
 	for _, r := range path {
 		switch {
 		case os.IsPathSeparator(uint8(r)):
-			if r == lastRune || dotsElm {
+			if r == prevRune || dotsElm {
 				return true
 			}
 			dotsElm = true
 		case r != '.':
 			dotsElm = false
 		}
-		lastRune = r
+		prevRune = r
 	}
 	return false
 }
