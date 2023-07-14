@@ -6,7 +6,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// nodeSliceMap is a mutex-guarded map that supports an synchronized append operation.
+// nodeSliceMap is a mutex-guarded map that supports a synchronized append operation.
 type nodeSliceMap struct {
 	store map[string][]proto.Message
 	mu    sync.RWMutex

@@ -472,11 +472,11 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 	log.V(3).Infof("[casng] upload.batcher.pub.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 }
 
-// uploadStreamer handles files above the small threshold.
+// uploadStreamer handles files that do not fit into a batching request.
 // Unlike the batched call, querying the CAS is not required because the API handles this automatically.
 // See https://github.com/bazelbuild/remote-apis/blob/0cd22f7b466ced15d7803e8845d08d3e8d2c51bc/build/bazel/remote/execution/v2/remote_execution.proto#L250-L254
-// For files above the large threshold, this method assumes the io and large io holds are already acquired and will release them accordingly.
-// For other files, only an io hold is acquired and released in this method.
+// For files above the large threshold, this call assumes the io and large io holds are already acquired and will release them accordingly.
+// For other files, only an io hold is acquired and released in this call.
 func (u *uploader) streamer() {
 	log.V(1).Info("[casng] upload.streamer.start")
 	defer log.V(1).Info("[casng] upload.streamer.stop")
