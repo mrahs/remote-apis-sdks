@@ -177,7 +177,10 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 			// In other words, the chunk size of the encoder's output is controlled by the reader.
 			nRawBytes, errEnc = enc.ReadFrom(r)
 			// Closing the encoder is necessary to flush remaining bytes.
-			errEnc = errors.Join(enc.Close(), errEnc)
+			errClose := enc.Close()
+			if errClose != nil {
+				errEnc = errors.Join(errClose, errEnc)
+			}
 			if errors.Is(errEnc, io.ErrClosedPipe) {
 				// pr was closed first, which means the actual error is on that end.
 				errEnc = nil
@@ -403,16 +406,22 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 
 	req := UploadRequest{Path: root, SymlinkOptions: slo, Exclude: exclude, ctx: ctx, digestOnly: true}
 	select {
+	// In both cases, the channel must be closed before proceeding beyong the select statement to ensure
+	// the proper closure of resCh.
 	case ch <- req:
+		close(ch)
 	case <-ctx.Done():
+		close(ch)
+		return digest.Digest{}, Stats{}, ctx.Err()
 	}
-	close(ch)
 
 	var stats Stats
 	var err error
 	for r := range resCh {
 		stats.Add(r.Stats)
-		err = errors.Join(r.Err, err)
+		if r.Err != nil {
+			err = errors.Join(r.Err, err)
+		}
 	}
 	rootNode := u.Node(req)
 	if rootNode == nil {
@@ -447,7 +456,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	paths := make([]string, 0, len(reqs)+1)
 	paths = append(paths, filterID)
 
-	// An ancestor directory takes precedence over all of its descendants to ensure unlited files are also included in traversal.
+	// An ancestor directory takes precedence over all of its descendants to ensure unlisted files are also included in traversal.
 	// Sorting the requests by path length ensures ancestors appear before descendants.
 	sort.Slice(reqs, func(i, j int) bool { return len(reqs[i].Path.String()) < len(reqs[j].Path.String()) })
 	// Fast lookup for potentially shared paths between requests.
@@ -523,7 +532,6 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			rpStr = strings.Replace(rpStr, workingDir.String(), remoteWorkingDir.String(), 1)
 		}
 		rp := execRoot.Append(impath.MustRel(rpStr))
-		// rp := remotePath[r.Path]
 		parent := rp
 		for {
 			rp = parent
@@ -608,6 +616,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	stats.Add(moreStats)
 	uploaded = append(uploaded, moreUploaded...)
 
+	// b/291294771: remove after deprecation.
 	if log.V(5) {
 		s, ok := ctx.Value("ng_tree").(*string)
 		if !ok {
