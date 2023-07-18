@@ -156,7 +156,7 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	}
 
 	// Register a new requester with the internal processor.
-	// This borker should not remove the subscription until the sender tells it to.
+	// This broker should not remove the subscription until the sender tells it to.
 	tag, resChan := u.uploadPubSub.sub()
 
 	// Forward the requests to the internal processor.

@@ -377,6 +377,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 
 		for _, r := range reqs {
 			select {
+			// BUG: should listen on ctx as well and mark remaining requests with ctx.Err()
 			case ch <- r:
 			case <-u.ctx.Done():
 				return

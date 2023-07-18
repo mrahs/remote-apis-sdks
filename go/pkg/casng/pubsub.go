@@ -129,8 +129,7 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 
 	var toRetry []string
 	var received []string
-	sendTimeout := 10 * time.Millisecond
-	ticker := time.NewTicker(sendTimeout)
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
 	retryCount := 0
