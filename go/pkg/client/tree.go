@@ -415,6 +415,9 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 			blobs[dg] = n.file.ue
 			stats.InputFiles++
 			stats.TotalInputBytes += dg.Size
+			if tree != nil {
+				tree[prefix+"/"+name] = dg
+			}
 			continue
 		}
 		if n.symlink != nil {

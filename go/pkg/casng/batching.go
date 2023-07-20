@@ -559,9 +559,9 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	dirReqs := make([]UploadRequest, 0, len(dirChildren))
 	stack := make([]impath.Absolute, 0, len(dirChildren))
 	stack = append(stack, execRoot)
-	var logPathDigest map[string]string
+	var logPathDigest map[string]*repb.Digest
 	if log.V(5) {
-		logPathDigest = make(map[string]string, len(dirChildren))
+		logPathDigest = make(map[string]*repb.Digest, len(dirChildren))
 	}
 	for len(stack) > 0 {
 		// Peek.
@@ -587,7 +587,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			childrenNodes = append(childrenNodes, n)
 			if log.V(5) {
 				nd := n.(namedDigest)
-				logPathDigest[dir.Append(impath.MustRel(nd.GetName())).String()] = nd.GetDigest().String()
+				logPathDigest[dir.Append(impath.MustRel(nd.GetName())).String()] = nd.GetDigest()
 			}
 		}
 
@@ -598,7 +598,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		}
 		dirReqs = append(dirReqs, UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest)})
 		if log.V(5) {
-			logPathDigest[dir.String()] = node.GetDigest().String()
+			logPathDigest[dir.String()] = node.GetDigest()
 		}
 		if dir.String() == execRoot.String() {
 			rootDigest = digest.NewFromProtoUnvalidated(node.Digest)
