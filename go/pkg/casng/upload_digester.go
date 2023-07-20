@@ -171,8 +171,8 @@ func (u *uploader) digest(req UploadRequest) {
 			}
 
 			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
-			// In both cases, deferring is the right call. Once the requset is processed, all requestters will revisit the path to get the digestion result.
-			// If the path was not cached before, claim it by makring it as in-flight.
+			// In both cases, deferring is the right call. Once the request is processed, all requestters will revisit the path to get the digestion result.
+			// If the path was not cached before, claim it by marking it as in-flight.
 			key := path.String() + req.Exclude.String()
 			wg := &sync.WaitGroup{}
 			wg.Add(1)
