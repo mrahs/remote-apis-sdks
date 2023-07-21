@@ -124,7 +124,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 					return
 				}
 				startTime := time.Now()
-				log.V(3).Infof("[casng] upload.dispatcher.pipe.res; digest=%s, missing=%t, err=%s", r.Digest, r.Missing, r.Err)
+				log.V(3).Infof("[casng] upload.dispatcher.pipe.res; digest=%s, missing=%t, err=%v", r.Digest, r.Missing, r.Err)
 				reqs := digestReqs[r.Digest]
 				delete(digestReqs, r.Digest)
 				res := UploadResponse{Digest: r.Digest, Err: r.Err}
@@ -187,7 +187,7 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 		for r := range u.dispatcherResCh {
 			startTime := time.Now()
 			if log.V(3) {
-				log.Infof("[casng] upload.dispatcher.res; digest=%s, cache_hit=%d, end_of_walk=%t, err=%s, req=%s, tag=%s", r.Digest, r.Stats.CacheHitCount, r.endOfWalk, r.Err, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"))
+				log.Infof("[casng] upload.dispatcher.res; digest=%s, cache_hit=%d, end_of_walk=%t, err=%v, req=%s, tag=%s", r.Digest, r.Stats.CacheHitCount, r.endOfWalk, r.Err, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"))
 			}
 			// If multiple requesters are interested in this response, ensure stats are not double-counted.
 			if len(r.tags) == 1 {

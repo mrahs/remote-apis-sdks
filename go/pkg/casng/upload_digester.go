@@ -87,6 +87,7 @@ func (u *uploader) digester() {
 			if req.Digest.Hash == "" {
 				req.Digest = digest.NewFromBlob(req.Bytes)
 			}
+			key := req.Path.String() + req.Exclude.String()
 			// If path is set, construct and cache the corresponding node.
 			if req.Path.String() != impath.Root {
 				name := req.Path.Base().String()
@@ -97,12 +98,11 @@ func (u *uploader) digester() {
 				} else {
 					node = &repb.FileNode{Digest: digest, Name: name, IsExecutable: isExec(req.BytesFileMode)}
 				}
-				key := req.Path.String() + req.Exclude.String()
 				u.nodeCache.Store(key, node)
 				// This node cannot be added to the u.dirChildren cache because the cache is owned by the walker callback.
 				// Parent nodes may have already been generated and cached in u.nodeCache; updating the u.dirChildren cache will not regenerate them.
 			}
-			log.V(3).Infof("[casng] upload.digester.req; bytes=%d, path=%s, req=%s, tag=%s", len(req.Bytes), req.Path, req.id, req.tag)
+			log.V(3).Infof("[casng] upload.digester.req; bytes=%d, path=%s, key=%s, req=%s, tag=%s", len(req.Bytes), req.Path, key, req.id, req.tag)
 		}
 
 		if req.Digest.Hash != "" {
@@ -151,7 +151,7 @@ func (u *uploader) digest(req UploadRequest) {
 	deferredWg := make(map[string]*sync.WaitGroup)
 	walker.DepthFirst(req.Path, req.Exclude, walker.Callback{
 		Err: func(path impath.Absolute, realPath impath.Absolute, errVisit error) bool {
-			log.V(3).Infof("[casng] upload.digester.visit.err; path=%s, real_path=%s, err=%s, req=%s, tag=%s, walk=%s", path, realPath, errVisit, req.id, req.tag, walkID)
+			log.V(3).Infof("[casng] upload.digester.visit.err; path=%s, real_path=%s, err=%v, req=%s, tag=%s, walk=%s", path, realPath, errVisit, req.id, req.tag, walkID)
 			err = errors.Join(errVisit, err)
 			return false
 		},
@@ -199,7 +199,7 @@ func (u *uploader) digest(req UploadRequest) {
 			}
 
 			node := m.(proto.Message) // Guaranteed assertion because the cache is an internal field.
-			log.V(3).Infof("[casng] upload.digester.visit.cached; path=%s, real_path=%s, req=%s, tag=%s, walk=%s", path, realPath, req.id, req.tag, walkID)
+			log.V(3).Infof("[casng] upload.digester.visit.cached; path=%s, real_path=%s, key=%s, req=%s, tag=%s, walk=%s", path, realPath, key, req.id, req.tag, walkID)
 
 			// Forward it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
 			switch node := node.(type) {

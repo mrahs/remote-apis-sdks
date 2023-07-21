@@ -471,7 +471,8 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		}
 
 		// Clear the digest to ensure proper hierarchy caching in the digester.
-		r.Digest = digest.Digest{}
+		r.Digest.Hash = ""
+		r.Digest.Size = 0
 
 		if pathSeen[r.Path] {
 			continue
@@ -496,7 +497,6 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		reqs[i] = r
 		i++
 	}
-	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree; got=%d, uploading=%d", len(reqs), i)
 
 	// Reslice to take included (shifted) requests only.
 	reqs = reqs[:i]
@@ -506,6 +506,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	for _, r := range reqs {
 		r.Exclude.ID = filterIDFunc // r is a copy, but r.Exclude is a reference.
 	}
+	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree; filter_id=%s, got=%d, uploading=%d", filterID, len(reqs), i)
 
 	// 2nd, Upload the requests first to digest the files and cache the nodes.
 	uploaded, stats, err = u.Upload(ctx, reqs...)
@@ -523,7 +524,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		// Each request in reqs must correspond to a cached node.
 		node := u.Node(r)
 		if node == nil {
-			err = fmt.Errorf("cannot construct the merkle tree with a missing node for path %q", r.Path)
+			err = fmt.Errorf("[casng] upload.tree; cannot construct the merkle tree with a missing node for path %q", r.Path)
 			return
 		}
 
@@ -609,7 +610,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	}
 
 	// Upload the blobs of the shared ancestors.
-	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree; dirs=%d", len(dirReqs))
+	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree; dirs=%d, filter_id=%s", len(dirReqs), filterID)
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
 	if moreErr != nil {
 		err = moreErr
@@ -638,6 +639,9 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		}
 		sort.Strings(treePaths)
 		sb := strings.Builder{}
+		sb.WriteString("  filter_id=")
+		sb.WriteString(filterID)
+		sb.WriteString("\n")
 		sb.WriteString("  paths:\n  ")
 		sb.WriteString(strings.Join(paths, "\n  "))
 		sb.WriteString("\n  dir_paths:\n  ")
