@@ -203,7 +203,7 @@ func (u *uploader) batcher() {
 	bundleSize := u.uploadRequestBaseSize
 	ctx := u.ctx // context with unified metadata.
 
-	// handle is a closure that shares read/write access for the variables it captures with its parent.
+	// handle is a closure that shares read/write access to the bundle variables with its parent.
 	// This allows resetting the bundle and associated variables in one call rather than having to repeat the reset
 	// code after every call to this function.
 	handle := func() {
