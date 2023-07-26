@@ -48,6 +48,11 @@ const (
 	HomeDirMacro = "${HOME}"
 )
 
+var (
+	// ErrEmptySegement indicates an attempt to construct a resource name with an empty segment.
+	ErrEmptySegment = errors.New("empty segment in resoure name")
+)
+
 // AuthType indicates the type of authentication being used.
 type AuthType int
 
@@ -115,14 +120,14 @@ func (ce *InitError) Error() string {
 type Client struct {
 	// InstanceName is the instance name for the targeted remote execution instance; e.g. for Google
 	// RBE: "projects/<foo>/instances/default_instance".
-	InstanceName  string
-	actionCache   regrpc.ActionCacheClient
-	byteStream    bsgrpc.ByteStreamClient
-	cas           regrpc.ContentAddressableStorageClient
-	useCasNg      bool
-	ngCasUploader *casng.BatchingUploader
-	execution     regrpc.ExecutionClient
-	operations    opgrpc.OperationsClient
+	// It should NOT be used to construct resource names, but rather only for reusing the instance name as is.
+	// Use the ResourceName method to create correctly formatted resource names.
+	InstanceName string
+	actionCache  regrpc.ActionCacheClient
+	byteStream   bsgrpc.ByteStreamClient
+	cas          regrpc.ContentAddressableStorageClient
+	execution    regrpc.ExecutionClient
+	operations   opgrpc.OperationsClient
 	// Retrier is the Retrier that is used for RPCs made by this client.
 	//
 	// These fields are logically "protected" and are intended for use by extensions of Client.
@@ -847,6 +852,23 @@ var DefaultRPCTimeouts = map[string]time.Duration{
 	// timeout at above 0; most users should use the Action Timeout instead.
 	"Execute":       0,
 	"WaitExecution": 0,
+}
+
+// ResourceName constructs a correctly formatted resource name as defined in the spec.
+// No keyword validation is performed since the semantics of the path are defined by the server.
+// See: https://github.com/bazelbuild/remote-apis/blob/cb8058798964f0adf6dbab2f4c2176ae2d653447/build/bazel/remote/execution/v2/remote_execution.proto#L223
+func (c *Client) ResourceName(segments ...string) (string, error) {
+	segs := make([]string, 0, len(segments)+1)
+	if c.InstanceName != "" {
+		segs = append(segs, c.InstanceName)
+	}
+	for _, s := range segments {
+		if s == "" {
+			return "", ErrEmptySegment
+		}
+		segs = append(segs, s)
+	}
+	return strings.Join(segs, "/"), nil
 }
 
 // RPCOpts returns the default RPC options that should be used for calls made with this client.
