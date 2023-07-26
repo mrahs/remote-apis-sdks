@@ -62,12 +62,12 @@ func (u *uploader) dispatcher(queryCh chan<- missingBlobRequest, queryResCh <-ch
 				continue
 			}
 			log.V(3).Infof("[casng] upload.dispatcher.req; digest=%s, bytes=%d, req=%s, tag=%s", req.Digest, len(req.Bytes), req.id, req.tag)
+			// Count before sending the request to avoid an edge case where the response makes it to the counter before the increment here.
+			counterCh <- tagCount{req.tag, 1}
 			if req.digestOnly {
 				u.dispatcherResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{}, tags: []string{req.tag}, reqs: []string{req.id}}
 				continue
 			}
-			// Count before sending the request to avoid an edge case where the response makes it to the counter before the increment here.
-			counterCh <- tagCount{req.tag, 1}
 			u.dispatcherPipeCh <- req
 			// Covers waiting on the counter and the dispatcher.
 			log.V(3).Infof("[casng] upload.dispatcher.req.duration; start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)

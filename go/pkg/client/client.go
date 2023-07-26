@@ -48,10 +48,8 @@ const (
 	HomeDirMacro = "${HOME}"
 )
 
-var (
-	// ErrEmptySegement indicates an attempt to construct a resource name with an empty segment.
-	ErrEmptySegment = errors.New("empty segment in resoure name")
-)
+// ErrEmptySegement indicates an attempt to construct a resource name with an empty segment.
+var ErrEmptySegment = errors.New("empty segment in resoure name")
 
 // AuthType indicates the type of authentication being used.
 type AuthType int
@@ -122,12 +120,14 @@ type Client struct {
 	// RBE: "projects/<foo>/instances/default_instance".
 	// It should NOT be used to construct resource names, but rather only for reusing the instance name as is.
 	// Use the ResourceName method to create correctly formatted resource names.
-	InstanceName string
-	actionCache  regrpc.ActionCacheClient
-	byteStream   bsgrpc.ByteStreamClient
-	cas          regrpc.ContentAddressableStorageClient
-	execution    regrpc.ExecutionClient
-	operations   opgrpc.OperationsClient
+	InstanceName  string
+	actionCache   regrpc.ActionCacheClient
+	byteStream    bsgrpc.ByteStreamClient
+	cas           regrpc.ContentAddressableStorageClient
+	useCasNg      bool
+	ngCasUploader *casng.BatchingUploader
+	execution     regrpc.ExecutionClient
+	operations    opgrpc.OperationsClient
 	// Retrier is the Retrier that is used for RPCs made by this client.
 	//
 	// These fields are logically "protected" and are intended for use by extensions of Client.
