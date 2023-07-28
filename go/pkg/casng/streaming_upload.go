@@ -492,8 +492,8 @@ func (u *uploader) streamer(ctx context.Context) {
 			if !ok {
 				return
 			}
-			isLargeFile := req.reader != nil
-			log.V(3).Infof("[casng] upload.streamer.req; digest=%s, large=%t, req=%s, tag=%s, pending=%d", req.Digest, isLargeFile, req.id, req.tag, pending)
+			shouldReleaseIOTokens := req.reader != nil
+			log.V(3).Infof("[casng] upload.streamer.req; digest=%s, large=%t, req=%s, tag=%s, pending=%d", req.Digest, shouldReleaseIOTokens, req.id, req.tag, pending)
 
 			digestReqs[req.Digest] = append(digestReqs[req.Digest], req.id)
 			tags := digestTags[req.Digest]
@@ -502,7 +502,7 @@ func (u *uploader) streamer(ctx context.Context) {
 			if len(tags) > 1 {
 				// Already in-flight. Release duplicate resources if it's a large file.
 				log.V(3).Infof("[casng] upload.streamer.unified; digest=%s, req=%s, tag=%s, bundle=%d", req.Digest, req.id, req.tag, len(tags))
-				if isLargeFile {
+				if shouldReleaseIOTokens {
 					u.releaseIOTokens()
 				}
 				continue
@@ -516,11 +516,11 @@ func (u *uploader) streamer(ctx context.Context) {
 				name = MakeWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
 			}
 
-			pending += 1
+			pending++
 			// Block the streamer if the gRPC call is being throttled.
 			startTime := time.Now()
 			if !u.streamThrottle.acquire(ctx) {
-				if isLargeFile {
+				if shouldReleaseIOTokens {
 					u.releaseIOTokens()
 				}
 				// Ensure the response is dispatched before aborting.
@@ -548,7 +548,7 @@ func (u *uploader) streamer(ctx context.Context) {
 			r.reqs = digestReqs[r.Digest]
 			delete(digestReqs, r.Digest)
 			u.dispatcherResCh <- r
-			pending -= 1
+			pending--
 			if log.V(3) {
 				log.Infof("[casng] upload.streamer.res; digest=%s, req=%s, tag=%s, pending=%d", r.Digest, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"), pending)
 			}

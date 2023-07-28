@@ -274,8 +274,8 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				return true
 
 			case info.Mode().IsRegular():
-				stats.DigestCount += 1
-				stats.InputFileCount += 1
+				stats.DigestCount++
+				stats.InputFileCount++
 				node, blb, errDigest := u.digestFile(ctx, realPath, info, req.digestOnly, req.id, req.tag, walkID)
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
