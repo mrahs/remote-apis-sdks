@@ -503,8 +503,9 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// paths is already sorted because reqs was sorted.
 	filterID = digest.NewFromBlob([]byte(strings.Join(paths, ""))).String()
 	filterIDFunc := func() string { return filterID }
-	for _, r := range reqs {
-		r.Exclude.ID = filterIDFunc // r is a copy, but r.Exclude is a reference.
+	for i := range reqs {
+		r := &reqs[i]
+		r.Exclude.ID = filterIDFunc
 	}
 	contextmd.Infof(ctx, log.Level(1), "[casng] upload.tree; filter_id=%s, got=%d, uploading=%d", filterID, len(reqs), i)
 
