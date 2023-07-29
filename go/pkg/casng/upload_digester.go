@@ -1,5 +1,23 @@
 package casng
 
+// The digester performs a file system walk in depth-first-search style by visiting a directory
+// after visiting all of its descendents. This allows digesting the directory content
+// before digesting the directory itself to produce a merkle tree.
+//
+// The digester can do concurrent walks that might share directories, in which case the access
+// is coordinated by allowing one walk to claim a file or directory, preventing other concurrent
+// walks from accessing it at the same time. While claimed, all other walks differ visiting
+// the calimed path and continue traversing other paths. If no other paths are to be traversed, the walker
+// simply blocks waiting for the owning walker to complete digestion and release the path for other to claim.
+//
+// Each digested path is cached in a shared node cache. The node cache is keyed by file path and walker filter ID.
+// This key ensures that two different walkers with different filters do not share any entries in the cache.
+// This allows each walker to have a different view for the same directory and still get a correct merkle tree.
+// For example, a walker might visit files f1 and f2 inside directory d, while another walker only visits f3.
+// In this example, which walker gets to access d after the other won't get a cache hit from the node cache.
+// The compute cost for this cache miss is limited to generating a meta struct that describes d and digesting it.
+// It doesn't involve accessing the file system beyond stating the directory.
+
 import (
 	"context"
 	"fmt"
