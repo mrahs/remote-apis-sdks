@@ -378,7 +378,7 @@ func (ec *Context) ngUploadInputs() error {
 	acDg := digest.NewFromBlob(acBlb)
 	log.V(1).Infof("[casng] ng.req: action; digest=%s, cmd_id=%s, exec_id=%s", acDg, cmdID, executionID)
 	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx,
-		// casng.UploadRequest{Bytes: acBlb, Digest: acDg},
+		casng.UploadRequest{Bytes: acBlb, Digest: acDg},
 		casng.UploadRequest{Bytes: cmdBlb, Digest: cmdDg},
 	)
 
