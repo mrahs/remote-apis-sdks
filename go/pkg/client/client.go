@@ -48,7 +48,7 @@ const (
 	HomeDirMacro = "${HOME}"
 )
 
-// ErrEmptySegement indicates an attempt to construct a resource name with an empty segment.
+// ErrEmptySegment indicates an attempt to construct a resource name with an empty segment.
 var ErrEmptySegment = errors.New("empty segment in resoure name")
 
 // AuthType indicates the type of authentication being used.
