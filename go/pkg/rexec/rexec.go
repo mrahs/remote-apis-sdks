@@ -279,7 +279,7 @@ func (ec *Context) ngUploadInputs() error {
 			return fmt.Errorf("[casng] ng.req: empty virtual path; cmd_id=%s, exec_id=%s", cmdID, executionID)
 		}
 		// If execRoot is a virtual path, ignore it.
-		if p.Path == "." || p.Path == "" {
+		if p.Path == "." {
 			continue
 		}
 		rel, err := impath.Rel(p.Path)
@@ -395,7 +395,6 @@ func (ec *Context) ngUploadInputs() error {
 }
 
 func symlinkOpts(treeOpts *rc.TreeSymlinkOpts, cmdOpts command.SymlinkBehaviorType) symlinkopts.Options {
-	var slo symlinkopts.Options
 	if treeOpts == nil {
 		treeOpts = rc.DefaultTreeSymlinkOpts()
 	}
@@ -409,17 +408,16 @@ func symlinkOpts(treeOpts *rc.TreeSymlinkOpts, cmdOpts command.SymlinkBehaviorTy
 
 	switch {
 	case slPreserve && treeOpts.FollowsTarget && treeOpts.MaterializeOutsideExecRoot:
-		slo = symlinkopts.ResolveExternalOnlyWithTarget()
+		return symlinkopts.ResolveExternalOnlyWithTarget()
 	case slPreserve && treeOpts.FollowsTarget:
-		slo = symlinkopts.PreserveWithTarget()
+		return symlinkopts.PreserveWithTarget()
 	case slPreserve && treeOpts.MaterializeOutsideExecRoot:
-		slo = symlinkopts.ResolveExternalOnly()
+		return symlinkopts.ResolveExternalOnly()
 	case slPreserve:
-		slo = symlinkopts.PreserveNoDangling()
+		return symlinkopts.PreserveNoDangling()
 	default:
-		slo = symlinkopts.ResolveAlways()
+		return symlinkopts.ResolveAlways()
 	}
-	return slo
 }
 
 func cmdDirs(cmd *command.Command) (execRoot impath.Absolute, workingDir impath.Relative, remoteWorkingDir impath.Relative, err error) {
