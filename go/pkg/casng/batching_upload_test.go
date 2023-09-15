@@ -9,6 +9,7 @@ import (
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
@@ -16,11 +17,14 @@ import (
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
 	"github.com/google/go-cmp/cmp"
+
 	// Redundant imports are required for the google3 mirror. Aliases should not be changed.
 	bsgrpc "google.golang.org/genproto/googleapis/bytestream"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	rpcstpb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestUpload_Batching(t *testing.T) {
@@ -34,6 +38,7 @@ func TestUpload_Batching(t *testing.T) {
 		cc           *fakeCAS
 		wantStats    casng.Stats
 		wantUploaded []digest.Digest
+		wantErr      error
 	}{
 		{
 			name: "cache_hit",
@@ -443,6 +448,59 @@ func TestUpload_Batching(t *testing.T) {
 				{Hash: "ffd7226e23f331727703bfd6ce4ebc0f503127f73eaa1ad62469749c82374ec5", Size: 160}, // the directory
 			},
 		},
+		{
+			name: "req_error",
+			fs: map[string][]byte{
+				"foo/bar1.c": []byte("int bar;"),
+				"foo/bar2.c": []byte("int bar;"),
+			},
+			root:  "foo",
+			ioCfg: casng.IOConfig{CompressionSizeThreshold: 1024},
+			batchRPCCfg: &casng.GRPCConfig{
+				ConcurrentCallsLimit: 1,
+				BytesLimit:           1000,
+				ItemsLimit:           3,                      // Matches the number of blobs in this test.
+				BundleTimeout:        100 * time.Millisecond, // Large to ensure the bundle gets dispatched by ItemsLimit.
+				Timeout:              time.Second,
+				RetryPredicate:       retry.TransientOnly,
+			},
+			bsc: &fakeByteStreamClient{
+				write: func(_ context.Context, _ ...grpc.CallOption) (bsgrpc.ByteStream_WriteClient, error) {
+					return &fakeByteStreamWriteClient{
+						send: func(wr *bspb.WriteRequest) error {
+							return nil
+						},
+						closeAndRecv: func() (*bspb.WriteResponse, error) {
+							return &bspb.WriteResponse{}, nil
+						},
+					}, nil
+				},
+			},
+			cc: &fakeCAS{
+				findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+					return &repb.FindMissingBlobsResponse{MissingBlobDigests: in.BlobDigests}, nil
+				},
+				batchUpdateBlobs: func(_ context.Context, in *repb.BatchUpdateBlobsRequest, _ ...grpc.CallOption) (*repb.BatchUpdateBlobsResponse, error) {
+					return nil, status.Error(codes.InvalidArgument, "test")
+				},
+			},
+			wantStats: casng.Stats{
+				BytesRequested:     176,
+				TotalBytesMoved:    168,
+				LogicalBytesCached: 8,
+				CacheMissCount:     2,
+				CacheHitCount:      1,
+				BatchedCount:       2,
+				InputFileCount:     2,
+				InputDirCount:      1,
+				DigestCount:        3,
+			},
+			wantUploaded: []digest.Digest{
+				{Hash: "9877358cfe402635019ce7bf591e9fd86d27953b0077e1f173b7875f0043d87a", Size: 8},   // the file
+				{Hash: "ffd7226e23f331727703bfd6ce4ebc0f503127f73eaa1ad62469749c82374ec5", Size: 160}, // the directory
+			},
+			wantErr: casng.ErrGRPC,
+		},
 	}
 
 	rpcCfg := casng.GRPCConfig{
@@ -483,7 +541,7 @@ func TestUpload_Batching(t *testing.T) {
 			}
 			root := impath.MustAbs(tmp, test.root)
 			uploaded, stats, err := u.Upload(ctx, casng.UploadRequest{Path: root, SymlinkOptions: symlinkopts.PreserveAllowDangling()})
-			if err != nil {
+			if !errors.Is(err, test.wantErr) {
 				t.Errorf("unexpected error: %v", err)
 			}
 			if diff := cmp.Diff(test.wantStats, stats); diff != "" {

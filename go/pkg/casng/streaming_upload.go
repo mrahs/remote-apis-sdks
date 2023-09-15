@@ -361,6 +361,9 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		res, errCall := u.cas.BatchUpdateBlobs(ctx, req)
 		reqErr := errCall // return this error if nothing is retryable.
 		req.Requests = nil
+		if res == nil {
+			return reqErr
+		}
 		for _, r := range res.Responses {
 			if errItem := status.FromProto(r.Status).Err(); errItem != nil {
 				if retry.TransientOnly(errItem) {
