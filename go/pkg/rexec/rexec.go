@@ -248,7 +248,7 @@ func (ec *Context) computeInputs() error {
 }
 
 func (ec *Context) ngUploadInputs() error {
-	cmdID, executionID := ec.cmd.Identifiers.ExecutionID, ec.cmd.Identifiers.CommandID
+	cmdID, executionID := ec.cmd.Identifiers.CommandID, ec.cmd.Identifiers.ExecutionID
 
 	ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
 	defer func() { ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now() }()
