@@ -558,6 +558,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	}
 
 	// This block generates directory nodes for shared ancestors starting from leaf nodes (DFS-style).
+	// BUG: do not convert symlinks to directories if they should be preserved. See http://go/remote-apis-sdks/pull/511
 	dirReqs := make([]UploadRequest, 0, len(dirChildren))
 	stack := make([]impath.Absolute, 0, len(dirChildren))
 	stack = append(stack, execRoot)
