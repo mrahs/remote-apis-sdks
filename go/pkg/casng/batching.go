@@ -558,7 +558,6 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	}
 
 	// This block generates directory nodes for shared ancestors starting from leaf nodes (DFS-style).
-	// BUG: do not convert symlinks to directories if they should be preserved. See http://go/remote-apis-sdks/pull/511
 	dirReqs := make([]UploadRequest, 0, len(dirChildren))
 	stack := make([]impath.Absolute, 0, len(dirChildren))
 	stack = append(stack, execRoot)
@@ -566,6 +565,9 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	if log.V(5) {
 		logPathDigest = make(map[string]*repb.Digest, len(dirChildren))
 	}
+	// BUG: do not convert symlinks to directories if they should be preserved. See https://github.com/bazelbuild/remote-apis-sdks/pull/511 and https://github.com/bazelbuild/remote-apis-sdks/pull/514
+	// If dir is a symlink that should preserved: resolve it, move children to the target, convert dir to symlink.
+	// Also, ensure virtual inputs are handled as well.
 	for len(stack) > 0 {
 		// Peek.
 		dir := stack[len(stack)-1]
