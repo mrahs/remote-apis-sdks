@@ -187,6 +187,67 @@ func getExecRootRelPaths(path, execRoot, workingDir, remoteWorkingDir string) (r
 // Any errors would be from accessing files.
 // Example: execRoot=/a relPath=b/c/d/e.go, b->bb, evaledPath=/a/bb/c/d/e.go, symlinks=[a/b]
 func evalParentSymlinks(execRoot, relPath string, materializeOutsideExecRoot bool, fmdCache filemetadata.Cache) (string, []string, error) {
+	var (
+		symlinks []string
+		r        = len(execRoot) // start index of relative path
+		i, j     int             // moving window for absPath
+		ii, jj   int             // moving windw for realAbsPath
+		absPath  = strings.Join([]string{execRoot, relPath}, string(filepath.Separator))
+		// realAbsPath captures the absolute path to the evaluated target so far.
+		// It is effectively what relative symlinks are relative to. If materialization
+		// is enabled, the materialized path may represent a different tree which makes it
+		// unusable with relative symlinks.
+		realAbsPath = absPath
+	)
+	j, jj = r, r
+	for {
+		i = j
+		ii = jj
+		j = strings.IndexRune(absPath[i+1:], filepath.Separator) + i + 1
+		jj = strings.IndexRune(realAbsPath[ii+1:], filepath.Separator) + ii + 1
+		if j == i || ii == jj {
+			return absPath[r+1:], symlinks, nil
+		}
+
+		pAbs := absPath[:j]               // for cached stat
+		pRel := absPath[r+1 : j]          // for referencing captured symlinks
+		pRelReal := realAbsPath[r+1 : jj] // for resolving relative symlinks
+		log.V(5).Infof("eval.next: execRoot=%s, pRel=%s, pRelReal=%s", execRoot, pRel, pRelReal)
+		fmd := fmdCache.Get(pAbs)
+		if fmd.Symlink == nil {
+			continue
+		}
+
+		target := fmd.Symlink.Target
+		if filepath.IsAbs(target) {
+			ii = -1
+		}
+		realAbsPath = strings.Join([]string{realAbsPath[:ii+1], target, realAbsPath[jj:]}, "")
+		jj += len(target) - (jj - ii - 1)
+
+		_, targetRelToSymlinkDir, err := getTargetRelPath(execRoot, pRelReal, target)
+		log.V(5).Infof("eval.symlink: target=%s, targetRelToSymlinkDir=%s", target, targetRelToSymlinkDir)
+		if err != nil {
+			if materializeOutsideExecRoot {
+				continue
+			}
+			return "", nil, err
+		}
+		absPath = strings.Join([]string{absPath[:i+1], targetRelToSymlinkDir, absPath[j:]}, "")
+		j += len(targetRelToSymlinkDir) - (j - i - 1)
+		log.V(5).Infof("eval.update: absPath=%s, realAbsPath=%s", absPath, realAbsPath)
+		symlinks = append(symlinks, pRel)
+	}
+}
+
+// evalParentSymlinks replaces each parent element in relPath with its target if it's a symlink.
+//
+// Returns the evaluated path with a list of parent symlinks if any. All are relative to execRoot, but not necessarily descendents of it.
+// Returned paths may not be filepath.Clean.
+// The basename of relPath is not resolved. It remains a symlink if it is one.
+// Any errors would be from accessing files.
+// Example: execRoot=/a relPath=b/c/d/e.go, b->bb, evaledPath=/a/bb/c/d/e.go, symlinks=[a/b]
+func evalParentSymlinksOld(execRoot, relPath string, materializeOutsideExecRoot bool, fmdCache filemetadata.Cache) (string, []string, error) {
 	var symlinks []string
 	evaledPathBuilder := strings.Builder{}
 	// targetPathBuilder captures the absolute path to the evaluated target so far.
