@@ -247,6 +247,24 @@ func TestEvalParentSymlinks(t *testing.T) {
 			wantPath:     mkPath("wd/a/b/c.go"),
 			wantSymlinks: nil,
 		},
+		{
+			name: "no_symlink",
+			fs: []string{
+				"wd/a/b.go",
+			},
+			path:         mkPath("wd/a/b.go"),
+			wantPath:     mkPath("wd/a/b.go"),
+			wantSymlinks: nil,
+		},
+		{
+			name: "cwd",
+			fs: []string{
+				".",
+			},
+			path:         mkPath("."),
+			wantPath:     mkPath("."),
+			wantSymlinks: nil,
+		},
 	}
 
 	for _, tc := range testCases {

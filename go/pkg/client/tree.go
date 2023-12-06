@@ -119,6 +119,8 @@ func shouldIgnoreErr(err error) bool {
 	return false
 }
 
+// getRelPath returns a filepath.Clean result if path is a descendent of (not just relative to) base.
+// base and path will be passed through filepath.Clean downstream.
 func getRelPath(base, path string) (string, error) {
 	rel, err := filepath.Rel(base, path)
 	if err != nil {
@@ -136,9 +138,9 @@ func getRelPath(base, path string) (string, error) {
 // targetPath must either be absolute or relative to the directory of symlinkRelPath.
 // If targetPath is not a descendant of execRoot, an error is returned.
 func getTargetRelPath(execRoot, symlinkRelPath string, targetPath string) (relExecRoot string, relSymlinkDir string, err error) {
-	symlinkAbsDir := filepath.Join(execRoot, filepath.Dir(symlinkRelPath))
+	symlinkAbsDir := joinPaths(execRoot, filepath.Dir(symlinkRelPath))
 	if !filepath.IsAbs(targetPath) {
-		targetPath = filepath.Join(symlinkAbsDir, targetPath)
+		targetPath = joinPaths(symlinkAbsDir, targetPath)
 	}
 
 	relExecRoot, err = getRelPath(execRoot, targetPath)
@@ -150,8 +152,8 @@ func getTargetRelPath(execRoot, symlinkRelPath string, targetPath string) (relEx
 	return relExecRoot, relSymlinkDir, err
 }
 
-// getRemotePath generates a remote path for a given local path
-// by replacing workingDir component with remoteWorkingDir
+// getRemotePath generates a remote path for a given local path by replacing workingDir component with remoteWorkingDir.
+// The returned path is Clean.
 func getRemotePath(path, workingDir, remoteWorkingDir string) (string, error) {
 	workingDirRelPath, err := filepath.Rel(workingDir, path)
 	if err != nil {
@@ -161,22 +163,28 @@ func getRemotePath(path, workingDir, remoteWorkingDir string) (string, error) {
 	return remotePath, nil
 }
 
-// getExecRootRelPaths returns local and remote exec-root-relative paths for a given local absolute path
+// joinPaths does simple path concatenation. The result is not passed through filepath.Clean, which
+// means it is not canonical and may not be suitable for a hash key.
+func joinPaths(paths ...string) string {
+	return strings.Join(paths, string(filepath.Separator))
+}
+
+// getExecRootRelPaths returns local (abs and rel) and remote exec-root-relative paths for a given local path.
 // path may be relative or absolute. In both cases it's joined to and relativised to the execRoot.
 // This has unintuitive implications. For example, execRoot=/root and path=/foo, returns relPath=foo.
-func getExecRootRelPaths(path, execRoot, workingDir, remoteWorkingDir string) (relPath string, remoteRelPath string, err error) {
-	absPath := filepath.Join(execRoot, path)
+func getExecRootRelPaths(path, execRoot, workingDir, remoteWorkingDir string) (absPath string, relPath string, remoteRelPath string, err error) {
+	absPath = filepath.Join(execRoot, path)
 	if relPath, err = getRelPath(execRoot, absPath); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if remoteWorkingDir == "" || remoteWorkingDir == workingDir {
-		return relPath, relPath, nil
+		return absPath, relPath, relPath, nil
 	}
 	if remoteRelPath, err = getRemotePath(relPath, workingDir, remoteWorkingDir); err != nil {
-		return relPath, "", err
+		return absPath, relPath, "", err
 	}
 	log.V(3).Infof("getExecRootRelPaths(%q, %q, %q, %q)=(%q, %q)", path, execRoot, workingDir, remoteWorkingDir, relPath, remoteRelPath)
-	return relPath, remoteRelPath, nil
+	return absPath, relPath, remoteRelPath, nil
 }
 
 // evalParentSymlinks replaces each parent element in relPath with its target if it's a symlink.
@@ -192,13 +200,19 @@ func evalParentSymlinks(execRoot, relPath string, materializeOutsideExecRoot boo
 		r        = len(execRoot) // start index of relative path
 		i, j     int             // moving window for absPath
 		ii, jj   int             // moving windw for realAbsPath
-		absPath  = strings.Join([]string{execRoot, relPath}, string(filepath.Separator))
+		absPath  = joinPaths(execRoot, relPath)
 		// realAbsPath captures the absolute path to the evaluated target so far.
 		// It is effectively what relative symlinks are relative to. If materialization
-		// is enabled, the materialized path may represent a different tree which makes it
+		// is enabled, the materialized path (absPath) may represent a different tree which makes it
 		// unusable with relative symlinks.
 		realAbsPath = absPath
 	)
+	// If the actual path turns out to be the root, there is nothing to do.
+	// Note: relPath may be ".", "", "./wd/.." or any arbitrary path that normalizes to "", which
+	// cause the loop body to panic.
+	if r == len(absPath) {
+		return relPath, nil, nil
+	}
 	j, jj = r, r
 	for {
 		i = j
@@ -240,67 +254,6 @@ func evalParentSymlinks(execRoot, relPath string, materializeOutsideExecRoot boo
 	}
 }
 
-// evalParentSymlinks replaces each parent element in relPath with its target if it's a symlink.
-//
-// Returns the evaluated path with a list of parent symlinks if any. All are relative to execRoot, but not necessarily descendents of it.
-// Returned paths may not be filepath.Clean.
-// The basename of relPath is not resolved. It remains a symlink if it is one.
-// Any errors would be from accessing files.
-// Example: execRoot=/a relPath=b/c/d/e.go, b->bb, evaledPath=/a/bb/c/d/e.go, symlinks=[a/b]
-func evalParentSymlinksOld(execRoot, relPath string, materializeOutsideExecRoot bool, fmdCache filemetadata.Cache) (string, []string, error) {
-	var symlinks []string
-	evaledPathBuilder := strings.Builder{}
-	// targetPathBuilder captures the absolute path to the evaluated target so far.
-	// It is effectively what relative symlinks are relative to. If materialization
-	// is enabled, the materialized path may represent a different tree which makes it
-	// unusable with relative symlinks.
-	targetPathBuilder := strings.Builder{}
-	targetPathBuilder.WriteString(execRoot)
-	targetPathBuilder.WriteRune(filepath.Separator)
-
-	ps := strings.Split(relPath, string(filepath.Separator))
-	lastIndex := len(ps) - 1
-	for i, p := range ps {
-		if i != 0 {
-			evaledPathBuilder.WriteRune(filepath.Separator)
-			targetPathBuilder.WriteRune(filepath.Separator)
-		}
-		if i == lastIndex {
-			// Do not resolve basename.
-			evaledPathBuilder.WriteString(p)
-			break
-		}
-
-		relP := evaledPathBuilder.String() + p
-		absP := filepath.Join(execRoot, relP)
-		fmd := fmdCache.Get(absP)
-		if fmd.Symlink == nil {
-			// Not a symlink.
-			evaledPathBuilder.WriteString(p)
-			targetPathBuilder.WriteString(p)
-			continue
-		}
-
-		if filepath.IsAbs(fmd.Symlink.Target) {
-			targetPathBuilder.Reset()
-		}
-		targetPathBuilder.WriteString(fmd.Symlink.Target)
-		// log.V(5).Infof("eval: relPath=%s, relP=%s, absP=%s, targetPath=%s", relPath, relP, absP, targetPathBuilder.String())
-
-		_, targetRelSymlinkDir, err := getTargetRelPath(execRoot, relP, targetPathBuilder.String())
-		if err != nil {
-			if materializeOutsideExecRoot {
-				evaledPathBuilder.WriteString(p)
-				continue
-			}
-			return "", nil, err
-		}
-		evaledPathBuilder.WriteString(targetRelSymlinkDir)
-		symlinks = append(symlinks, relP)
-	}
-	return evaledPathBuilder.String(), symlinks, nil
-}
-
 // loadIntermediateSymlinks inserts symlink nodes into fs.
 // If the symlink source path already exists in fs (e.g. a for a-->../a_file), it is not
 // overwritten, which means the first entry wins.
@@ -310,7 +263,7 @@ func evalParentSymlinksOld(execRoot, relPath string, materializeOutsideExecRoot 
 // However, the case should always be that the target is identical.
 func loadIntermediateSymlinks(symlinks []string, execRoot, workingDir, remoteWorkingDir string, cache filemetadata.Cache, fs map[string]*fileSysNode) error {
 	for _, relPath := range symlinks {
-		relPath, remoteRelPath, err := getExecRootRelPaths(relPath, execRoot, workingDir, remoteWorkingDir)
+		absPath, relPath, remoteRelPath, err := getExecRootRelPaths(relPath, execRoot, workingDir, remoteWorkingDir)
 		if err != nil {
 			return err
 		}
@@ -320,7 +273,6 @@ func loadIntermediateSymlinks(symlinks []string, execRoot, workingDir, remoteWor
 			log.V(3).Infof("loadIntermediateSymlinks.Skipped: symlink=%s", relPath)
 			continue
 		}
-		absPath := filepath.Join(execRoot, relPath)
 		meta := cache.Get(absPath)
 		if meta.Symlink == nil {
 			return fmt.Errorf("%q is not a symlink", absPath)
@@ -362,8 +314,7 @@ func loadFiles(execRoot, localWorkingDir, remoteWorkingDir string, excl []*comma
 				return err
 			}
 		}
-		absPath := filepath.Join(execRoot, relPath)
-		normPath, remoteNormPath, err := getExecRootRelPaths(relPath, execRoot, localWorkingDir, remoteWorkingDir)
+		absPath, normPath, remoteNormPath, err := getExecRootRelPaths(relPath, execRoot, localWorkingDir, remoteWorkingDir)
 		if err != nil {
 			return err
 		}
@@ -445,7 +396,7 @@ func loadFiles(execRoot, localWorkingDir, remoteWorkingDir string, excl []*comma
 				continue
 			}
 			for _, f := range files {
-				filesToProcess = append(filesToProcess, filepath.Join(normPath, f))
+				filesToProcess = append(filesToProcess, joinPaths(normPath, f))
 			}
 		} else {
 			if shouldIgnore(absPath, command.FileInputType, excl) {
@@ -490,7 +441,7 @@ func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, re
 				return digest.Empty, nil, nil, err
 			}
 		}
-		normPath, remoteNormPath, err := getExecRootRelPaths(path, execRoot, workingDir, remoteWorkingDir)
+		_, normPath, remoteNormPath, err := getExecRootRelPaths(path, execRoot, workingDir, remoteWorkingDir)
 		if err != nil {
 			return digest.Empty, nil, nil, err
 		}
