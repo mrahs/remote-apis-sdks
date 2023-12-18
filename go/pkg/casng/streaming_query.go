@@ -86,7 +86,7 @@ type missingBlobRequest struct {
 // This method must not be called after cancelling the uploader's context.
 func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	pipeIn := make(chan missingBlobRequest)
-	out := u.missingBlobsPipe(pipeIn)
+	out := u.missingBlobsPipe(ctx, pipeIn)
 	u.clientSenderWg.Add(1)
 	go func() {
 		defer u.clientSenderWg.Done()
@@ -99,7 +99,7 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 }
 
 // missingBlobsPipe is a shared implementation between batching and streaming interfaces.
-func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan MissingBlobsResponse {
+func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRequest) <-chan MissingBlobsResponse {
 	ch := make(chan MissingBlobsResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
@@ -115,7 +115,9 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 		return ch
 	}
 
-	tag, resCh := u.queryPubSub.sub()
+	ctx, traceID := ctxWithTrace(ctx)
+
+	tag, resCh := u.queryPubSub.sub(ctx)
 	pendingCh := make(chan int)
 
 	// Sender. It terminates when in is closed, at which point it sends 0 as a termination signal to the counter.
@@ -123,8 +125,8 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 	go func() {
 		defer u.querySenderWg.Done()
 
-		log.V(1).Info("[casng] query.streamer.sender.start")
-		defer log.V(1).Info("[casng] query.streamer.sender.stop")
+		log.V(1).Info("sender.start; m=query.streamer, tid=%s", traceID)
+		defer log.V(1).Info("sender.stop; m=query.streamer, tid=%s", traceID)
 
 		for r := range in {
 			r.tag = tag
@@ -140,8 +142,8 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 		defer u.receiverWg.Done()
 		defer close(ch)
 
-		log.V(1).Info("[casng] query.streamer.receiver.start")
-		defer log.V(1).Info("[casng] query.streamer.receiver.stop")
+		log.V(1).Info("receiver.start; m=query.streamer, tid=%s", traceID)
+		defer log.V(1).Info("receiver.stop; m=query.streamer, tid=%s", traceID)
 
 		// Continue to drain until the broker closes the channel.
 		for {
@@ -159,10 +161,10 @@ func (u *uploader) missingBlobsPipe(in <-chan missingBlobRequest) <-chan Missing
 	u.workerWg.Add(1)
 	go func() {
 		defer u.workerWg.Done()
-		defer u.queryPubSub.unsub(tag)
+		defer u.queryPubSub.unsub(ctx, tag)
 
-		log.V(1).Info("[casng] query.streamer.counter.start")
-		defer log.V(1).Info("[casng] query.streamer.counter.stop")
+		log.V(1).Info("counter.start; m=query.streamer, tid=%s", traceID)
+		defer log.V(1).Info("counter.stop; m=query.streamer, tid=%s", traceID)
 
 		pending := 0
 		done := false
@@ -187,8 +189,8 @@ type digestStrings map[digest.Digest][]string
 
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
 func (u *uploader) queryProcessor(ctx context.Context) {
-	log.V(1).Info("[casng] query.processor.start")
-	defer log.V(1).Info("[casng] query.processor.stop")
+	log.V(1).Info("start; m=query.processor")
+	defer log.V(1).Info("stop; m=query.processor")
 
 	bundle := make(digestStrings)
 	reqs := make(digestStrings)
@@ -209,10 +211,10 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 					Err:    ctx.Err(),
 				}, bundle[d]...)
 			}
-			log.V(3).Infof("[casng] query.cancel")
+			log.V(3).Infof("cancel; m=query.processor")
 			return
 		}
-		log.V(3).Infof("[casng] query.throttle.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+		log.V(3).Infof("duration.throttle.sem; m=query.processor, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b, r digestStrings) {
@@ -237,7 +239,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			}
 			startTime := time.Now()
 
-			log.V(3).Infof("[casng] query.processor.req; digest=%s, req=%s, tag=%s, bundle=%d", req.digest, req.id, req.tag, len(bundle))
+			log.V(3).Infof("req; m=query.processor, digest=%s, req=%s, tag=%s, bundle=%d", req.digest, req.id, req.tag, len(bundle))
 			dSize := proto.Size(req.digest.ToProto())
 
 			// Check oversized items.
@@ -247,13 +249,13 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 					Err:    ErrOversizedItem,
 				}, req.tag)
 				// Covers waiting on subscribers.
-				log.V(3).Infof("[casng] query.pub.duration; start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+				log.V(3).Infof("duration.pub; m=query.processor, start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 				continue
 			}
 
 			// Check size threshold.
 			if bundleSize+dSize >= u.queryRPCCfg.BytesLimit {
-				log.V(3).Infof("[casng] query.processor.bundle.size; bytes=%d, excess=%d", bundleSize, dSize)
+				log.V(3).Infof("bundle.size; m=query.processor, bytes=%d, excess=%d", bundleSize, dSize)
 				handle()
 			}
 
@@ -264,12 +266,12 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
-				log.V(3).Infof("[casng] query.processor.bundle.full; count=%d", len(bundle))
+				log.V(3).Infof("bundle.full; m=query.processor, count=%d", len(bundle))
 				handle()
 			}
 		case <-bundleTicker.C:
 			if len(bundle) > 0 {
-				log.V(3).Infof("[casng] query.processor.bundle.timeout; count=%d", len(bundle))
+				log.V(3).Infof("bundle.timeout; m=query.processor, count=%d", len(bundle))
 			}
 			handle()
 		}
@@ -298,7 +300,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, digestTags, digestReqs 
 		res, err = u.cas.FindMissingBlobs(ctx, req)
 		return err
 	})
-	log.V(3).Infof("[casng] query.grpc.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("duration; m=query.grpc, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 
 	var missing []*repb.Digest
 	if res != nil {
@@ -328,5 +330,5 @@ func (u *uploader) callMissingBlobs(ctx context.Context, digestTags, digestReqs 
 			Missing: false,
 		}, digestTags[d]...)
 	}
-	log.V(3).Infof("[casng] query.pub.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("duration.pub; m=query.grpc, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 }

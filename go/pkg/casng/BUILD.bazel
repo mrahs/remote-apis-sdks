@@ -10,6 +10,7 @@ go_library(
         "streaming_query.go",
         "streaming_upload.go",
         "throttler.go",
+        "trace_id.go",
         "upload_digester.go",
         "upload_dispatcher.go",
         "uploader.go",

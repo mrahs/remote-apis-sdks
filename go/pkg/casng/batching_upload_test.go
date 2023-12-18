@@ -684,7 +684,7 @@ func TestUpload_ReplaceWorkingDir(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			p, err := casng.ReplaceWorkingDir(test.path, test.root, test.wd, test.rwd)
+			p, err := casng.ReplaceWorkingDir(context.Background(), test.path, test.root, test.wd, test.rwd)
 			if err != nil && !test.wantErr {
 				t.Errorf("unexpected error: %v", err)
 			}

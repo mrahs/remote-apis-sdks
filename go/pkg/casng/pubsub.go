@@ -1,6 +1,7 @@
 package casng
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,7 @@ type pubsub struct {
 // To properly terminate the subscription, the subscriber must wait until all expected responses are received
 // on the returned channel before unsubscribing.
 // Once unsubscribed, any tagged messages for this subscription are dropped.
-func (ps *pubsub) sub() (string, <-chan any) {
+func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
@@ -38,15 +39,15 @@ func (ps *pubsub) sub() (string, <-chan any) {
 	subscriber := make(chan any)
 	ps.subs[tag] = subscriber
 
-	log.V(2).Infof("[casng] pubsub.sub; tag=%s", tag)
+	log.V(2).Infof("sub; m=pubsub, tag=%s", tag)
 	return tag, subscriber
 }
 
 // unsub schedules the subscription to be removed as soon as in-flight pubs are done.
 // The subscriber must continue draining the channel until it's closed.
 // It is an error to publish more messages for tag after this call.
-func (ps *pubsub) unsub(tag string) {
-	log.V(2).Infof("[casng] pubsub.unsub.sched; tag=%s", tag)
+func (ps *pubsub) unsub(ctx context.Context, tag string) {
+	log.V(2).Infof("unsub.scheduled; m=pubsub, tag=%s", tag)
 	// If unsub is called from the same goroutine that is listening on the subscription
 	// channel, a deadlock might occur.
 	// pub would be holding a read lock while this call wants to hold a write lock that must
@@ -67,7 +68,7 @@ func (ps *pubsub) unsub(tag string) {
 			close(ps.done)
 			ps.done = make(chan struct{})
 		}
-		log.V(2).Infof("[casng] pubsub.unsub.done; tag=%s", tag)
+		log.V(2).Infof("unsub.done; m=pubsub, tag=%s", tag)
 	}()
 }
 
@@ -109,23 +110,23 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
-			log.Infof("[casng] pubsub.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+			log.Infof("duration; m=pubsub, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 		}()
 	}
 	if len(tags) == 0 {
-		log.Warning("[casng] pubsub.pub: called without tags, dropping message")
-		log.V(4).Infof("[casng] pubsub.pub: called without tags for msg=%v", m)
+		log.Warningf("called without tags, dropping message; m=pubsub")
+		log.V(4).Infof("called without tags for msg=%v; m=pubsub", m)
 		return nil
 	}
 	if n <= 0 {
-		log.Warningf("[casng] pubsub.pub: nothing published because n=%d", n)
+		log.Warningf("nothing published because n=%d; m=pubsub", n)
 		return nil
 	}
 
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	log.V(4).Infof("[casng] pubsub.pub.msg; type=%[1]T, value=%[1]v", m)
+	log.V(4).Infof("msg; m=pubsub, type=%[1]T, value=%[1]v", m)
 
 	var toRetry []string
 	var received []string
@@ -137,13 +138,13 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 		for _, t := range tags {
 			subscriber, ok := ps.subs[t]
 			if !ok {
-				log.Warningf("[casng] pubsub.pub.drop: tag=%s", t)
+				log.Warningf("drop; m=pubsub, tag=%s", t)
 				continue
 			}
 			// Send now or reschedule if the subscriber is not ready.
 			select {
 			case subscriber <- m:
-				log.V(3).Infof("[casng] pubsub.pub.sent: tag=%s", t)
+				log.V(3).Infof("sent; m=pubsub, tag=%s", t)
 				received = append(received, t)
 				if len(received) >= n {
 					return received
@@ -156,7 +157,7 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 			break
 		}
 		retryCount++
-		log.V(3).Infof("[casng] pubsub.pub.retry; retry=%d, tag=%s", retryCount, strings.Join(toRetry, "|"))
+		log.V(3).Infof("retry; m=pubsub, retry=%d, tag=%s, tid=%s", retryCount, strings.Join(toRetry, "|"))
 
 		// Reuse the underlying arrays by swapping slices and resetting one of them.
 		tags, toRetry = toRetry, tags

@@ -151,15 +151,17 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 		return ch
 	}
 
+	ctx, traceID := ctxWithTrace(ctx)
+
 	// Register a new requester with the internal processor.
 	// This broker should not remove the subscription until the sender tells it to.
-	tag, resChan := u.uploadPubSub.sub()
+	tag, resChan := u.uploadPubSub.sub(ctx)
 
 	// Forward the requests to the internal processor.
 	u.uploadSenderWg.Add(1)
 	go func() {
-		contextmd.Infof(ctx, log.Level(1), "[casng] upload.stream_pipe.sender.start; tag=%s", tag)
-		defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.stream_pipe.sender.stop; tag=%s", tag)
+		contextmd.Infof(ctx, log.Level(1), "sender.start; m=upload.stream_pipe, tag=%s, tid=%s", tag, traceID)
+		defer contextmd.Infof(ctx, log.Level(1), "sender.stop; m=upload.stream_pipe, tag=%s, tid=%s", tag, traceID)
 		defer u.uploadSenderWg.Done()
 		for r := range in {
 			r.tag = tag
@@ -175,14 +177,14 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	// Once the sender above sends a done-tagged request, the processor will send a done-tagged response.
 	u.receiverWg.Add(1)
 	go func() {
-		contextmd.Infof(ctx, log.Level(1), "[casng] upload.stream_pipe.receiver.start; tag=%s", tag)
-		defer contextmd.Infof(ctx, log.Level(1), "[casng] upload.stream_pipe.receiver.stop; tag=%s", tag)
+		contextmd.Infof(ctx, log.Level(1), "receiver.start; m=upload.stream_pipe, tag=%s, tid=%s", tag, traceID)
+		defer contextmd.Infof(ctx, log.Level(1), "receiver.stop; m=upload.stream_pipe, tag=%s, tid=%s", tag, traceID)
 		defer u.receiverWg.Done()
 		defer close(ch)
 		for rawR := range resChan {
 			r := rawR.(UploadResponse)
 			if r.done {
-				u.uploadPubSub.unsub(tag)
+				u.uploadPubSub.unsub(ctx, tag)
 				continue
 			}
 			ch <- r
@@ -194,8 +196,8 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 
 // uploadBatcher handles files that can fit into a batching request.
 func (u *uploader) batcher(ctx context.Context) {
-	log.V(1).Info("[casng] upload.batcher.start")
-	defer log.V(1).Info("[casng] uploader.batcher.stop")
+	log.V(1).Info("start; m=upload.batcher")
+	defer log.V(1).Info("stop; uploader.batcher")
 
 	bundle := make(uploadRequestBundle)
 	bundleSize := u.uploadRequestBaseSize
@@ -223,7 +225,7 @@ func (u *uploader) batcher(ctx context.Context) {
 			}
 			return
 		}
-		log.V(3).Infof("[casng] upload.batcher.throttle.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+		log.V(3).Infof("duration.throttle.sem; m=upload.batcher, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b uploadRequestBundle) {
@@ -247,7 +249,7 @@ func (u *uploader) batcher(ctx context.Context) {
 			if !ok {
 				return
 			}
-			log.V(3).Infof("[casng] upload.batcher.req; digest=%s, req=%s, tag=%s", req.Digest, req.id, req.tag)
+			log.V(3).Infof("req; m=upload.batcher, digest=%s, req=%s, tag=%s", req.Digest, req.id, req.tag)
 
 			// Unify.
 			item, ok := bundle[req.Digest]
@@ -256,14 +258,14 @@ func (u *uploader) batcher(ctx context.Context) {
 				item.tags = append(item.tags, req.tag)
 				item.reqs = append(item.reqs, req.id)
 				bundle[req.Digest] = item
-				log.V(3).Infof("[casng] upload.batcher.unified; digest=%s, bundle=%d, req=%s, tag=%s", req.Digest, len(item.tags), req.id, req.tag)
+				log.V(3).Infof("unified; m=upload.batcher, digest=%s, bundle=%d, req=%s, tag=%s", req.Digest, len(item.tags), req.id, req.tag)
 				continue
 			}
 
 			// It's possible for files to be considered medium and large, but still fit into a batch request.
 			// Load the bytes without blocking the batcher by deferring the blob.
 			if len(req.Bytes) == 0 {
-				log.V(3).Infof("[casng] upload.batcher.file; digest=%s, path=%s, req=%s, tag=%s", req.Digest, req.Path, req.id, req.tag)
+				log.V(3).Infof("file; m=upload.batcher, digest=%s, path=%s, req=%s, tag=%s", req.Digest, req.Path, req.id, req.tag)
 				u.workerWg.Add(1)
 				go func(req UploadRequest) (err error) {
 					defer u.workerWg.Done()
@@ -286,7 +288,7 @@ func (u *uploader) batcher(ctx context.Context) {
 						if !u.ioThrottler.acquire(req.ctx) {
 							return req.ctx.Err()
 						}
-						log.V(3).Infof("[casng] upload.batcher.io_throttle.duration; start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+						log.V(3).Infof("duration.throttle.io; m=upload.batcher, start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 						defer u.ioThrottler.release()
 						f, err := os.Open(req.Path.String())
 						if err != nil {
@@ -315,7 +317,7 @@ func (u *uploader) batcher(ctx context.Context) {
 			// If the blob doesn't fit in the current bundle, cycle it.
 			rSize := u.uploadRequestItemBaseSize + len(req.Bytes)
 			if bundleSize+rSize >= u.batchRPCCfg.BytesLimit {
-				log.V(3).Infof("[casng] upload.batcher.bundle.size; bytes=%d, excess=%d", bundleSize, rSize)
+				log.V(3).Infof("bundle.size; m=upload.batcher, bytes=%d, excess=%d", bundleSize, rSize)
 				handle()
 			}
 
@@ -330,12 +332,12 @@ func (u *uploader) batcher(ctx context.Context) {
 
 			// If the bundle is full, cycle it.
 			if len(bundle) >= u.batchRPCCfg.ItemsLimit {
-				log.V(3).Infof("[casng] upload.batcher.bundle.full; count=%d", len(bundle))
+				log.V(3).Infof("bundle.full; m=upload.batcher, count=%d", len(bundle))
 				handle()
 			}
 		case <-bundleTicker.C:
 			if len(bundle) > 0 {
-				log.V(3).Infof("[casng] upload.batcher.bundle.timeout; count=%d", len(bundle))
+				log.V(3).Infof("bundle.timeout; m=upload.batcher, count=%d", len(bundle))
 			}
 			handle()
 		}
@@ -380,12 +382,12 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
 		}
 		if l := len(req.Requests); l > 0 {
-			log.V(3).Infof("[casng] upload.batcher.call.retry; len=%d", l)
+			log.V(3).Infof("call.retry; m=upload.batcher, len=%d", l)
 		}
 		return reqErr
 	})
-	log.V(3).Infof("[casng] upload.batcher.grpc.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
-	log.V(3).Infof("[casng] upload.batcher.call.result; uploaded=%d, failed=%d, req_failed=%d", len(uploaded), len(failed), len(bundle)-len(uploaded)-len(failed))
+	log.V(3).Infof("duration.grpc; m=upload.batcher, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("call.result; m=upload.batcher, uploaded=%d, failed=%d, req_failed=%d", len(uploaded), len(failed), len(bundle)-len(uploaded)-len(failed))
 
 	// Report uploaded.
 	for _, d := range uploaded {
@@ -408,7 +410,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			reqs:   bundle[d].reqs,
 		}
 		if log.V(3) {
-			log.Infof("[casng] upload.batcher.res.uploaded; digest=%s, req=%s, tag=%s", d, strings.Join(bundle[d].reqs, "|"), strings.Join(bundle[d].tags, "|"))
+			log.Infof("res.uploaded; m=upload.batcher, digest=%s, req=%s, tag=%s", d, strings.Join(bundle[d].reqs, "|"), strings.Join(bundle[d].tags, "|"))
 		}
 		delete(bundle, d)
 	}
@@ -433,18 +435,18 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			reqs:   bundle[d].reqs,
 		}
 		if log.V(3) {
-			log.Infof("[casng] upload.batcher.res.failed; digest=%s, req=%s, tag=%s", d, strings.Join(bundle[d].reqs, "|"), strings.Join(bundle[d].tags, "|"))
+			log.Infof("res.failed; m=upload.batcher, digest=%s, req=%s, tag=%s", d, strings.Join(bundle[d].reqs, "|"), strings.Join(bundle[d].tags, "|"))
 		}
 		delete(bundle, d)
 	}
 
 	if len(bundle) == 0 {
-		log.V(3).Infof("[casng] upload.batcher.pub.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+		log.V(3).Infof("duration.pub; m=upload.batcher, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 		return
 	}
 
 	if err == nil {
-		err = fmt.Errorf("[casng] server did not return a response for %d requests", len(bundle))
+		err = fmt.Errorf("server did not return a response for %d requests; m=upload.batcher", len(bundle))
 	}
 	err = errors.Join(ErrGRPC, err)
 
@@ -467,10 +469,10 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			reqs:   item.reqs,
 		}
 		if log.V(3) {
-			log.Infof("[casng] upload.batcher.res.failed.call; digest=%s, req=%s, tag=%s", d, strings.Join(bundle[d].reqs, "|"), strings.Join(bundle[d].tags, "|"))
+			log.Infof("res.failed.call; m=upload.batcher, digest=%s, req=%s, tag=%s", d, strings.Join(bundle[d].reqs, "|"), strings.Join(bundle[d].tags, "|"))
 		}
 	}
-	log.V(3).Infof("[casng] upload.batcher.pub.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("duration.pub; m=upload.batcher, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 }
 
 // streamer handles files that do not fit into a batching request.
@@ -479,8 +481,8 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 // For files above the large threshold, this call assumes the io and large io holds are already acquired and will release them accordingly.
 // For other files, only an io hold is acquired and released in this call.
 func (u *uploader) streamer(ctx context.Context) {
-	log.V(1).Info("[casng] upload.streamer.start")
-	defer log.V(1).Info("[casng] upload.streamer.stop")
+	log.V(1).Info("start; m=upload.streamer")
+	defer log.V(1).Info("stop; m=upload.streamer")
 
 	// Unify duplicate requests.
 	digestTags := make(map[digest.Digest][]string)
@@ -496,7 +498,7 @@ func (u *uploader) streamer(ctx context.Context) {
 				return
 			}
 			shouldReleaseIOTokens := req.reader != nil
-			log.V(3).Infof("[casng] upload.streamer.req; digest=%s, large=%t, req=%s, tag=%s, pending=%d", req.Digest, shouldReleaseIOTokens, req.id, req.tag, pending)
+			log.V(3).Infof("req; m=upload.streamer, digest=%s, large=%t, req=%s, tag=%s, pending=%d", req.Digest, shouldReleaseIOTokens, req.id, req.tag, pending)
 
 			digestReqs[req.Digest] = append(digestReqs[req.Digest], req.id)
 			tags := digestTags[req.Digest]
@@ -504,7 +506,7 @@ func (u *uploader) streamer(ctx context.Context) {
 			digestTags[req.Digest] = tags
 			if len(tags) > 1 {
 				// Already in-flight. Release duplicate resources if it's a large file.
-				log.V(3).Infof("[casng] upload.streamer.unified; digest=%s, req=%s, tag=%s, bundle=%d", req.Digest, req.id, req.tag, len(tags))
+				log.V(3).Infof("unified; m=upload.streamer, digest=%s, req=%s, tag=%s, bundle=%d", req.Digest, req.id, req.tag, len(tags))
 				if shouldReleaseIOTokens {
 					u.releaseIOTokens()
 				}
@@ -513,7 +515,7 @@ func (u *uploader) streamer(ctx context.Context) {
 
 			var name string
 			if req.Digest.Size >= u.ioCfg.CompressionSizeThreshold {
-				log.V(3).Infof("[casng] upload.streamer.compress; digest=%s, req=%s, tag=%s", req.Digest, req.id, req.tag)
+				log.V(3).Infof("compress; m=upload.streamer, digest=%s, req=%s, tag=%s", req.Digest, req.id, req.tag)
 				name = MakeCompressedWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
 			} else {
 				name = MakeWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
@@ -534,11 +536,11 @@ func (u *uploader) streamer(ctx context.Context) {
 				}(req)
 				continue
 			}
-			log.V(3).Infof("[casng] upload.streamer.throttle.duration; start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
+			log.V(3).Infof("duration.throttle.sem; m=upload.streamer, start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.tag)
 			u.workerWg.Add(1)
 			go func(req UploadRequest) {
 				defer u.workerWg.Done()
-				s, err := u.callStream(req.ctx, name, req)
+				s, err := u.callStream(name, req)
 				// Release before sending on the channel to avoid blocking without actually using the gRPC resources.
 				u.streamThrottle.release()
 				streamResCh <- UploadResponse{Digest: req.Digest, Stats: s, Err: err}
@@ -552,15 +554,15 @@ func (u *uploader) streamer(ctx context.Context) {
 			u.dispatcherResCh <- r
 			pending--
 			if log.V(3) {
-				log.Infof("[casng] upload.streamer.res; digest=%s, req=%s, tag=%s, pending=%d", r.Digest, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"), pending)
+				log.Infof("res; m=upload.streamer, digest=%s, req=%s, tag=%s, pending=%d", r.Digest, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"), pending)
 			}
 			// Covers waiting on the dispatcher.
-			log.V(3).Infof("[casng] upload.streamer.pub.duration; start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+			log.V(3).Infof("duration.pub; m=upload.streamer, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
 		}
 	}
 }
 
-func (u *uploader) callStream(ctx context.Context, name string, req UploadRequest) (stats Stats, err error) {
+func (u *uploader) callStream(name string, req UploadRequest) (stats Stats, err error) {
 	var reader io.Reader
 
 	// In the off chance that the blob is mis-constructed (more than one content field is set), start
@@ -584,10 +586,10 @@ func (u *uploader) callStream(ctx context.Context, name string, req UploadReques
 	// Medium file.
 	default:
 		startTime := time.Now()
-		if !u.ioThrottler.acquire(ctx) {
-			return
+		if !u.ioThrottler.acquire(req.ctx) {
+			return Stats{BytesRequested: req.Digest.Size}, context.Canceled
 		}
-		log.V(3).Infof("[casng] upload.streamer.io_throttle.duration; start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+		log.V(3).Infof("duration.throttle.io; m=upload.streamer, start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 		defer u.ioThrottler.release()
 
 		f, errOpen := os.Open(req.Path.String())
@@ -602,5 +604,5 @@ func (u *uploader) callStream(ctx context.Context, name string, req UploadReques
 		reader = f
 	}
 
-	return u.writeBytes(ctx, name, reader, req.Digest.Size, 0, true)
+	return u.writeBytes(req.ctx, name, reader, req.Digest.Size, 0, true)
 }
