@@ -478,9 +478,7 @@ func exclusionsFilter(es []*command.InputExclusion) (walker.Filter, error) {
 		}
 		return false
 	}
-	filter.ID = func() string {
-		return id
-	}
+	filter.ID = id
 	return filter, nil
 }
 

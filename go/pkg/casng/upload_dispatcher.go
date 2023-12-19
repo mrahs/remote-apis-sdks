@@ -52,7 +52,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				log.V(3).Infof("req.done; m=upload.dispatcher, tag=%s", req.tag)
 				counterCh <- tagCount{req.tag, 0}
 				// Covers waiting on the counter.
-				log.V(3).Infof("duration.req; m=upload.dispatcher, start=%d, end=%d, rid=%s, tag=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+				log.V(3).Infof("duration.req; m=upload.dispatcher, start=%d, end=%d, rid=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 				if req.tag == "" { // In fact, the digester (and all requesters) have terminated.
 					return
 				}
@@ -62,7 +62,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				log.Errorf("ignoring a request without a digest; m=upload.dispatcher, rid=%s, tag=%s", req.id, req.tag)
 				continue
 			}
-			log.V(3).Infof("req; m=upload.dispatcher, digest=%s, bytes=%d, rid=%s, tag=%s, tid=%s", req.Digest, len(req.Bytes), req.id, req.tag)
+			log.V(3).Infof("req; m=upload.dispatcher, digest=%s, bytes=%d, rid=%s, tag=%s", req.Digest, len(req.Bytes), req.id, req.tag)
 			// Count before sending the request to avoid an edge case where the response makes it to the counter before the increment here.
 			counterCh <- tagCount{req.tag, 1}
 			if req.digestOnly {
@@ -71,7 +71,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			}
 			u.dispatcherPipeCh <- req
 			// Covers waiting on the counter and the dispatcher.
-			log.V(3).Infof("duration.req; m=upload.dispatcher, start=%d, end=%d, rid=%s, tag=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+			log.V(3).Infof("duration.req; m=upload.dispatcher, start=%d, end=%d, rid=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 		}
 	}()
 

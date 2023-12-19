@@ -121,17 +121,18 @@ func (u *uploader) digester(ctx context.Context) {
 				// This node cannot be added to the u.dirChildren cache because the cache is owned by the walker callback.
 				// Parent nodes may have already been generated and cached in u.nodeCache; updating the u.dirChildren cache will not regenerate them.
 			}
-			log.V(3).Infof("req; m=upload.digester, bytes=%d, path=%s, fid=%s, rid=%s, tag=%s", len(req.Bytes), req.Path, req.Exclude, req.id, req.tag)
+			log.V(3).Infof("req.bytes; m=upload.digester, bytes=%d, path=%s, fid=%s, rid=%s, tag=%s", len(req.Bytes), req.Path, req.Exclude, req.id, req.tag)
 		}
 
 		if req.Digest.Hash != "" {
 			u.dispatcherReqCh <- req
 			// Covers waiting on the node cache and waiting on the dispatcher.
-			log.V(3).Infof("duration.req; upload.digester, start=%d, end=%d, rid=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+			log.V(3).Infof("duration.req; m=upload.digester, start=%d, end=%d, rid=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+			log.V(3).Infof("req.digested; m=upload.digester, path=%s, fid=%s, rid=%s, tag=%s", req.Path, req.Exclude, req.id, req.tag)
 			continue
 		}
 
-		log.V(3).Infof("req; m=upload.digester, path=%s, fid=%s, slo=%s, rid=%s, tag=%s", req.Path, req.Exclude, req.SymlinkOptions, req.id, req.tag)
+		log.V(3).Infof("req.path; m=upload.digester, path=%s, fid=%s, slo=%s, rid=%s, tag=%s", req.Path, req.Exclude, req.SymlinkOptions, req.id, req.tag)
 		// Wait if too many walks are in-flight.
 		startTimeThrottle := time.Now()
 		if !u.walkThrottler.acquire(req.ctx) {
@@ -150,7 +151,7 @@ func (u *uploader) digester(ctx context.Context) {
 			defer u.walkerWg.Done()
 			defer wg.Done()
 			defer u.walkThrottler.release()
-			u.digest(ctx, r) // uploader ctx, not reqCtx
+			u.digest(ctx, r) // uploader ctx, not req.ctx
 		}(req)
 	}
 }
@@ -295,7 +296,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			case info.Mode().IsRegular():
 				stats.DigestCount++
 				stats.InputFileCount++
-				// pass the uploader's ctx, not reqCtx.
+				// pass the uploader's ctx, not req.ctx.
 				node, blb, errDigest := u.digestFile(ctx, realPath, info, req.digestOnly, req.id, req.tag, walkID)
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)

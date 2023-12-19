@@ -84,8 +84,8 @@ package casng
 //
 // Log messages are formatted to be grep-friendly. You can do things like:
 //   grep info.log -e 'upload.digester'
-//   grep info.log -e 'tid=trace_id'
-//   grep info.log -e 'tag=route_id'
+//   grep info.log -e 'tid=trace_id' | sort
+//   grep info.log -e 'tag=route_id' | sort | less
 //   grep info.log -e 'rid=request_id'
 //
 // To get a csv file of durations, enable verbosity level 3 and use the command:
