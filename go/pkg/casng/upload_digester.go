@@ -193,7 +193,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
 			// In both cases, deferring is the right call. Once the request is processed, all requestters will revisit the path to get the digestion result.
 			// If the path was not cached before, claim it by marking it as in-flight.
-			key := path.String() + req.Exclude.String()
+			key := nodeCacheKey(path, req.Exclude)
 			wg := &sync.WaitGroup{}
 			wg.Add(1)
 			m, ok := u.nodeCache.LoadOrStore(key, wg)
@@ -258,8 +258,8 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			default:
 			}
 
-			key := path.String() + req.Exclude.String()
-			parentKey := path.Dir().String() + req.Exclude.String()
+			key := nodeCacheKey(path, req.Exclude)
+			parentKey := nodeCacheKey(path.Dir(), req.Exclude)
 
 			// In post-access, the cache should have this walker's own wait group.
 			// Capture it here before it's overwritten with the actual result.
@@ -332,8 +332,8 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			default:
 			}
 
-			key := path.String() + req.Exclude.String()
-			parentKey := path.Dir().String() + req.Exclude.String()
+			key := nodeCacheKey(path, req.Exclude)
+			parentKey := nodeCacheKey(path.Dir(), req.Exclude)
 
 			// In symlink post-access, the cache should have this walker's own wait group.
 			// Capture it here before it's overwritten with the actual result.

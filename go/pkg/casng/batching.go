@@ -459,9 +459,9 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// Updating the filterID for the set to a deterministic one ensures it gets its unique keys that are still shared between identical sets.
 	// The deterministic ID is the digest of the sorted list of paths concatenated with the ID of the original filter.
 	filter := reqs[0].Exclude
-	filterID := filter.String()
-	paths := make([]string, 0, len(reqs)+1)
-	paths = append(paths, filterID)
+	filterID := filter.ID
+	// paths := make([]string, 0, len(reqs)+1)
+	// paths = append(paths, filterID)
 
 	// An ancestor directory takes precedence over all of its descendants to ensure unlisted files are also included in traversal.
 	// Sorting the requests by path length ensures ancestors appear before descendants.
@@ -471,14 +471,10 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	localPrefix := execRoot.Append(workingDir)
 	i := 0
 	for _, r := range reqs {
-		if r.Exclude.String() != filterID {
-			err = fmt.Errorf("cannot create a tree from requests with different exclusion filters: %q and %q; m=upload.tree, tid=%s", filterID, r.Exclude.String(), traceID)
+		if r.Exclude.ID != filterID {
+			err = fmt.Errorf("cannot create a tree from requests with different exclusion filters: %q and %q; m=upload.tree, tid=%s", filterID, r.Exclude.ID, traceID)
 			return
 		}
-
-		// Clear the digest to ensure proper hierarchy caching in the digester.
-		r.Digest.Hash = ""
-		r.Digest.Size = 0
 
 		if pathSeen[r.Path] {
 			continue
@@ -497,7 +493,12 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		if skip {
 			continue
 		}
-		paths = append(paths, r.Path.String())
+		// paths = append(paths, r.Path.String())
+
+		r.Exclude.ID = filterID
+		// Clear the digest to ensure proper hierarchy caching in the digester.
+		r.Digest.Hash = ""
+		r.Digest.Size = 0
 
 		// Shift left to accumulate included requests at the beginning of the array to avoid allocating another one.
 		reqs[i] = r
@@ -507,12 +508,12 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// Reslice to take included (shifted) requests only.
 	reqs = reqs[:i]
 	// paths is already sorted because reqs was sorted.
-	filterID = digest.NewFromBlob([]byte(strings.Join(paths, ""))).String()
-	filterIDFunc := func() string { return filterID }
-	for i := range reqs {
-		r := &reqs[i]
-		r.Exclude.ID = filterIDFunc
-	}
+	// TODO: the ID should not include every path from the request.
+	// filterID = digest.NewFromBlob([]byte(strings.Join(paths, ""))).String()
+	// for i := range reqs {
+	// 	r := &reqs[i]
+	// 	r.Exclude.ID = filterIDFunc
+	// }
 	contextmd.Infof(ctx, log.Level(1), "filter; m=upload.tree, fid=%s, reqs=%d, filtered_reqs=%d, tid=%s", filterID, len(reqs), i, traceID)
 
 	// 2nd, Upload the requests first to digest the files and cache the nodes.

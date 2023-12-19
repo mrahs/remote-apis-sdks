@@ -101,6 +101,9 @@ import (
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
+
 	// Redundant imports are required for the google3 mirror. Aliases should not be changed.
 	regrpc "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -227,7 +230,7 @@ type uploader struct {
 //
 // Returns nil if no node corresponds to req.
 func (u *uploader) Node(req UploadRequest) proto.Message {
-	key := req.Path.String() + req.Exclude.String()
+	key := nodeCacheKey(req.Path, req.Exclude)
 	n, ok := u.nodeCache.Load(key)
 	if !ok {
 		return nil
@@ -473,4 +476,8 @@ func (u *uploader) releaseIOTokens() {
 
 func isExec(mode fs.FileMode) bool {
 	return mode&0100 != 0
+}
+
+func nodeCacheKey(path impath.Absolute, filter walker.Filter) string {
+	return path.String() + filter.String()
 }
