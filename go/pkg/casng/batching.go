@@ -531,7 +531,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		// Each request in reqs must correspond to a cached node.
 		node := u.Node(r)
 		if node == nil {
-			err = fmt.Errorf("cannot construct the merkle tree with a missing node for path %q; m=upload.tree, tid=%s", r.Path, traceID)
+			err = fmt.Errorf("cannot construct the merkle tree with a missing node for path %q; m=upload.tree, fid=%s, tid=%s", r.Path, filterID, traceID)
 			return
 		}
 

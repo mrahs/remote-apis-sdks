@@ -72,21 +72,24 @@ package casng
 //   user waits for the termination signal: return from batching uploader or response channel closed from streaming uploader.
 //       this ensures the whole pipeline is drained properly.
 //
-// A note about logging:
+// Logging:
 //  Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
 //  Level 2 is used for internal functions that may be called per request.
 //  Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
 //  Level 4 is used for messages with large objects.
 //  Level 5 is used for messages that require custom processing (extra compute).
+//  tid identifies a top-level (user) request.
+//  tag identifies internal messages for routing purposes. Multiple tags (routes) may be associated with a single tid.
+//  rid identifies internal requests for logging purposes. Multiple rids may be associated with a single tag (route).
 //
 // Log messages are formatted to be grep-friendly. You can do things like:
-//   grep info.log -e 'casng'
 //   grep info.log -e 'upload.digester'
-//   grep info.log -e 'req=request_id'
-//   grep info.log -e 'tag=requester_id'
+//   grep info.log -e 'tid=trace_id'
+//   grep info.log -e 'tag=route_id'
+//   grep info.log -e 'rid=request_id'
 //
 // To get a csv file of durations, enable verbosity level 3 and use the command:
-//   grep info.log -e 'casng.*duration;' | cut -d ' ' -f 6-8 | sed -e 's/; start=/,/' -e 's/, end=/,/' -e 's/,$//' > /tmp/durations.csv
+//   grep info.log -e '^duration' | cut -d ' ' -f 6-8 | sed -e 's/; start=/,/' -e 's/, end=/,/' -e 's/,$//' > /tmp/durations.csv
 
 import (
 	"context"

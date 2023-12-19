@@ -239,7 +239,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			}
 			startTime := time.Now()
 
-			log.V(3).Infof("req; m=query.processor, digest=%s, req=%s, tag=%s, bundle=%d", req.digest, req.id, req.tag, len(bundle))
+			log.V(3).Infof("req; m=query.processor, digest=%s, rid=%s, tag=%s, bundle=%d", req.digest, req.id, req.tag, len(bundle))
 			dSize := proto.Size(req.digest.ToProto())
 
 			// Check oversized items.
@@ -249,7 +249,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 					Err:    ErrOversizedItem,
 				}, req.tag)
 				// Covers waiting on subscribers.
-				log.V(3).Infof("duration.pub; m=query.processor, start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+				log.V(3).Infof("duration.pub; m=query.processor, start=%d, end=%d, rid=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 				continue
 			}
 

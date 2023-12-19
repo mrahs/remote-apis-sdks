@@ -52,17 +52,17 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				log.V(3).Infof("req.done; m=upload.dispatcher, tag=%s", req.tag)
 				counterCh <- tagCount{req.tag, 0}
 				// Covers waiting on the counter.
-				log.V(3).Infof("duration.req; m=upload.dispatcher, start=%d, end=%d, req=%s, tag=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+				log.V(3).Infof("duration.req; m=upload.dispatcher, start=%d, end=%d, rid=%s, tag=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 				if req.tag == "" { // In fact, the digester (and all requesters) have terminated.
 					return
 				}
 				continue
 			}
 			if req.Digest.Hash == "" {
-				log.Errorf("ignoring a request without a digest; m=upload.dispatcher, req=%s, tag=%s", req.id, req.tag)
+				log.Errorf("ignoring a request without a digest; m=upload.dispatcher, rid=%s, tag=%s", req.id, req.tag)
 				continue
 			}
-			log.V(3).Infof("req; m=upload.dispatcher, digest=%s, bytes=%d, req=%s, tag=%s, tid=%s", req.Digest, len(req.Bytes), req.id, req.tag)
+			log.V(3).Infof("req; m=upload.dispatcher, digest=%s, bytes=%d, rid=%s, tag=%s, tid=%s", req.Digest, len(req.Bytes), req.id, req.tag)
 			// Count before sending the request to avoid an edge case where the response makes it to the counter before the increment here.
 			counterCh <- tagCount{req.tag, 1}
 			if req.digestOnly {
@@ -71,7 +71,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			}
 			u.dispatcherPipeCh <- req
 			// Covers waiting on the counter and the dispatcher.
-			log.V(3).Infof("duration.req; m=upload.dispatcher, start=%d, end=%d, req=%s, tag=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+			log.V(3).Infof("duration.req; m=upload.dispatcher, start=%d, end=%d, rid=%s, tag=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 		}
 	}()
 
@@ -96,7 +96,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				startTime := time.Now()
 				// In the off chance that a request is received after a done signal, ignore it to avoid sending on a closed channel.
 				if done {
-					log.Errorf("ignoring a request after a done signal; m=upload.dispatcher, req=%s, tag=%s", req.id, req.tag)
+					log.Errorf("ignoring a request after a done signal; m=upload.dispatcher, rid=%s, tag=%s", req.id, req.tag)
 					continue
 				}
 				// If the dispatcher has terminated, tell the streamer we're done and continue draining the response channel.
@@ -107,7 +107,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 					continue
 				}
 
-				log.V(3).Infof("pipe.req; m=upload.dispatcher, digest=%s, req=%s, tag=%s", req.Digest, req.id, req.tag)
+				log.V(3).Infof("pipe.req; m=upload.dispatcher, digest=%s, rid=%s, tag=%s", req.Digest, req.id, req.tag)
 				reqs := digestReqs[req.Digest]
 				reqs = append(reqs, req)
 				digestReqs[req.Digest] = reqs
@@ -116,7 +116,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				}
 				queryCh <- missingBlobRequest{digest: req.Digest, ctx: req.ctx, id: req.id}
 				// Covers waiting on the query processor.
-				log.V(3).Infof("duration.pipe.send, m=upload.dispatcher, start=%d, end=%d, req=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+				log.V(3).Infof("duration.pipe.send, m=upload.dispatcher, start=%d, end=%d, rid=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
 
 			// This channel is closed by the query pipe when queryCh is closed, which happens when the sender
 			// sends a done signal. This ensures all responses are forwarded to the dispatcher.
@@ -149,7 +149,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 						}
 					}
 					if log.V(3) {
-						log.Infof("pipe.res.hit; m=upload.dispatcher, digest=%s, req=%s, tag=%s", r.Digest, strings.Join(res.reqs, "|"), strings.Join(res.tags, "|"))
+						log.Infof("pipe.res.hit; m=upload.dispatcher, digest=%s, rid=%s, tag=%s", r.Digest, strings.Join(res.reqs, "|"), strings.Join(res.tags, "|"))
 					}
 					u.dispatcherResCh <- res
 					// Covers waiting on the dispatcher.
@@ -160,7 +160,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				}
 
 				if log.V(3) {
-					log.Infof("pipe.res.miss; m=upload.dispatcher, digest=%s, req=%s, tag=%s", r.Digest, strings.Join(res.reqs, "|"), strings.Join(res.tags, "|"))
+					log.Infof("pipe.res.miss; m=upload.dispatcher, digest=%s, rid=%s, tag=%s", r.Digest, strings.Join(res.reqs, "|"), strings.Join(res.tags, "|"))
 				}
 				for _, req := range reqs {
 					if req.Digest.Size <= batchItemSizeLimit {
@@ -187,7 +187,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		for r := range u.dispatcherResCh {
 			startTime := time.Now()
 			if log.V(3) {
-				log.Infof("res; m=upload.dispatcher, digest=%s, cache_hit=%d, end_of_walk=%t, err=%v, req=%s, tag=%s", r.Digest, r.Stats.CacheHitCount, r.endOfWalk, r.Err, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"))
+				log.Infof("res; m=upload.dispatcher, digest=%s, cache_hit=%d, end_of_walk=%t, err=%v, rid=%s, tag=%s", r.Digest, r.Stats.CacheHitCount, r.endOfWalk, r.Err, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"))
 			}
 			// If multiple requesters are interested in this response, ensure stats are not double-counted.
 			if len(r.tags) == 1 {
