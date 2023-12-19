@@ -167,6 +167,7 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 			r.tag = tag
 			r.ctx = ctx
 			r.id = uuid.New()
+			log.V(3).Infof("req; m=upload.stream_pipe, path=%s, bytes=%d, rid=%s, tag=%s, tid=%s", r.Path, len(r.Bytes), r.id, r.tag, traceID)
 			u.digesterCh <- r
 		}
 		// Let the processor know that no further requests are expected.

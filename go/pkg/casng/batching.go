@@ -372,6 +372,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	ch := make(chan UploadRequest)
 	resCh := u.streamPipe(ctx, ch)
 
+	c := 0
 	u.clientSenderWg.Add(1)
 	go func() {
 		defer close(ch) // let the streamer terminate.
@@ -383,7 +384,9 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		for _, r := range reqs {
 			select {
 			case ch <- r:
+				c++
 			case <-ctx.Done():
+				log.Errorf("context cancelled; m=upload, tid=%s, err=%v", traceID, ctx.Err())
 				return
 			}
 		}
@@ -401,6 +404,9 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		}
 	}
 
+	if c < len(reqs) {
+		err = errors.Join(fmt.Errorf("incomplete request; m=upload, sent=%d, reqs=%d, tid=%s", c, len(reqs), traceID), ctx.Err(), err)
+	}
 	return uploaded, stats, err
 }
 
