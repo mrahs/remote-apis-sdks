@@ -159,8 +159,9 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 		retryCount++
 		log.V(3).Infof("retry; m=pubsub, retry=%d, tag=%s", retryCount, strings.Join(toRetry, "|"))
 
-		// Reuse the underlying arrays by swapping slices and resetting one of them.
-		tags, toRetry = toRetry, tags
+		// Avoid mutating tags because it's expected to remain the same set upstream.
+		// Reslicing toRetry allows shifting retries to the left without without reallocating a new array.
+		tags = toRetry
 		toRetry = toRetry[:0]
 	}
 	return received
