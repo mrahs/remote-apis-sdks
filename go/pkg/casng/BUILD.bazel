@@ -38,7 +38,7 @@ go_library(
 )
 
 go_test(
-    name = "cas_test",
+    name = "casng_test",
     srcs = [
         "batching_query_test.go",
         "batching_upload_test.go",

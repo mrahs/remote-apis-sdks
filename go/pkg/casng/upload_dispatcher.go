@@ -247,7 +247,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				u.uploadPubSub.pub(UploadResponse{done: true}, tc.t)
 			}
 			// Covers waiting on subscribers.
-			log.V(3).Infof("duration.counter.pub; m=upload.dispatcher, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+			log.V(3).Infof("duration.counter.pub; m=upload.dispatcher, start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), tc.t)
 			if len(tagReqCount) == 0 && allDone {
 				return
 			}

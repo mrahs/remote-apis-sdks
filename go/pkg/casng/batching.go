@@ -476,6 +476,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	pathSeen := make(map[impath.Absolute]bool, len(reqs))
 	localPrefix := execRoot.Append(workingDir)
 	i := 0
+	startTime := time.Now()
 	for _, r := range reqs {
 		if r.Exclude.ID != filterID {
 			err = fmt.Errorf("cannot create a tree from requests with different exclusion filters: %q and %q; m=upload.tree, tid=%s", filterID, r.Exclude.ID, traceID)
@@ -510,6 +511,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		reqs[i] = r
 		i++
 	}
+	log.V(3).Infof("duration.filter_id; m=upload.tree, start=%d, end=%d, fid=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), filterID, traceID)
 
 	// Reslice to take included (shifted) requests only.
 	reqs = reqs[:i]
@@ -523,7 +525,9 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	contextmd.Infof(ctx, log.Level(1), "filter; m=upload.tree, fid=%s, reqs=%d, filtered_reqs=%d, tid=%s", filterID, len(reqs), i, traceID)
 
 	// 2nd, Upload the requests first to digest the files and cache the nodes.
+	startTime = time.Now()
 	uploaded, stats, err = u.Upload(ctx, reqs...)
+	log.V(3).Infof("duration.upload.reqs; m=upload.tree, start=%d, end=%d, fid=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), filterID, traceID)
 	if err != nil {
 		return
 	}
@@ -534,6 +538,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// Each key is an absolute path to a node in the tree and its value is a list of absolute paths that any of them can be a key as well.
 	// Example: /a: [/a/b /a/c], /a/b: [/a/b/foo.go], /a/c: [/a/c/bar.go]
 	dirChildren := make(map[impath.Absolute]map[impath.Absolute]proto.Message, len(pathSeen))
+	startTime = time.Now()
 	for _, r := range reqs {
 		// Each request in reqs must correspond to a cached node.
 		node := u.Node(r)
@@ -570,6 +575,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			}
 		}
 	}
+	log.V(3).Infof("duration.tree.partial; m=upload.tree, start=%d, end=%d, fid=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), filterID, traceID)
 
 	// This block generates directory nodes for shared ancestors starting from leaf nodes (DFS-style).
 	dirReqs := make([]UploadRequest, 0, len(dirChildren))
@@ -582,6 +588,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// BUG: do not convert symlinks to directories if they should be preserved. See https://github.com/bazelbuild/remote-apis-sdks/pull/511 and https://github.com/bazelbuild/remote-apis-sdks/pull/514
 	// If dir is a symlink that should preserved: resolve it, move children to the target, convert dir to symlink.
 	// Also, ensure virtual inputs are handled as well.
+	startTime = time.Now()
 	for len(stack) > 0 {
 		// Peek.
 		dir := stack[len(stack)-1]
@@ -626,10 +633,13 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		// Attach the node to its parent if it's not the exec root.
 		dirChildren[dir.Dir()][dir] = node
 	}
+	log.V(3).Infof("duration.tree.full; m=upload.tree, start=%d, end=%d, fid=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), filterID, traceID)
 
 	// Upload the blobs of the shared ancestors.
 	contextmd.Infof(ctx, log.Level(1), "; m=upload.tree, dirs=%d, fid=%s, tid=%s", len(dirReqs), filterID, traceID)
+	startTime = time.Now()
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
+	log.V(3).Infof("duration.upload.dirs; m=upload.tree, start=%d, end=%d, fid=%s, tid=%s", startTime.UnixNano(), time.Now().UnixNano(), filterID, traceID)
 	if moreErr != nil {
 		err = moreErr
 	}
