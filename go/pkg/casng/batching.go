@@ -145,7 +145,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
-			log.V(3).Infof("duration; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "name", name, "size", size, "chunk_size", u.ioCfg.BufferSize))
+			log.V(3).Infof("duration.write; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "name", name, "size", size, "chunk_size", u.ioCfg.BufferSize))
 		}()
 	}
 
@@ -579,7 +579,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			}
 		}
 	}
-	log.V(3).Infof("duration.tree.partial; %s", fmtCtx(ctx, startTime.UnixNano(), "end", time.Now().UnixNano(), "fid", filterID))
+	log.V(3).Infof("duration.tree.partial; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "fid", filterID))
 
 	// This block generates directory nodes for shared ancestors starting from leaf nodes (DFS-style).
 	dirReqs := make([]UploadRequest, 0, len(dirChildren))

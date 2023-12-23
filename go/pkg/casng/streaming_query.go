@@ -208,7 +208,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 		if !u.queryThrottler.acquire(ctx) {
 			// Ensure responses are dispatched before aborting.
 			for d := range bundle {
-				u.queryPubSub.pub(MissingBlobsResponse{
+				u.queryPubSub.pub(ctx, MissingBlobsResponse{
 					Digest: d,
 					Err:    ctx.Err(),
 				}, bundle[d]...)
@@ -247,7 +247,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 
 			// Check oversized items.
 			if u.queryRequestBaseSize+dSize > u.queryRPCCfg.BytesLimit {
-				u.queryPubSub.pub(MissingBlobsResponse{
+				u.queryPubSub.pub(ctx, MissingBlobsResponse{
 					Digest: req.digest,
 					Err:    ErrOversizedItem,
 				}, req.tag)
@@ -274,7 +274,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			}
 		case <-bundleTicker.C:
 			if len(bundle) > 0 {
-				log.V(3).Infof("bundle.timeout; m=query.processor, count=%d", len(bundle))
+				log.V(3).Infof("bundle.timeout; %s", fmtCtx(ctx, "count", len(bundle)))
 			}
 			handle()
 		}
@@ -303,7 +303,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, digestTags, digestReqs 
 		res, err = u.cas.FindMissingBlobs(ctx, req)
 		return err
 	})
-	log.V(3).Infof("duration; m=query.grpc, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("duration.grpc; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 
 	var missing []*repb.Digest
 	if res != nil {
@@ -318,7 +318,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, digestTags, digestReqs 
 	// Report missing.
 	for _, dpb := range missing {
 		d := digest.NewFromProtoUnvalidated(dpb)
-		u.queryPubSub.pub(MissingBlobsResponse{
+		u.queryPubSub.pub(ctx, MissingBlobsResponse{
 			Digest:  d,
 			Missing: err == nil,
 			Err:     err,
@@ -328,10 +328,10 @@ func (u *uploader) callMissingBlobs(ctx context.Context, digestTags, digestReqs 
 
 	// Report non-missing.
 	for d := range digestTags {
-		u.queryPubSub.pub(MissingBlobsResponse{
+		u.queryPubSub.pub(ctx, MissingBlobsResponse{
 			Digest:  d,
 			Missing: false,
 		}, digestTags[d]...)
 	}
-	log.V(3).Infof("duration.pub; m=query.grpc, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("duration.pub; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 }

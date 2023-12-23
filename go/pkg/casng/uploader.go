@@ -1,7 +1,7 @@
 // Package casng provides a CAS client implementation with the following incomplete list of features:
 //   - Streaming interface to upload files during the digestion process rather than after.
 //   - Unified uploads and downloads.
-//   - Simplifed public API.
+//   - Simplified public API.
 package casng
 
 // This file includes the implementation for uploading blobs to the CAS.
@@ -62,10 +62,10 @@ package casng
 //   the digester channel is closed, and a termination signal is sent to the dispatcher.
 //   the dispatcher terminates its sender and propagates the signal to its piper.
 //   the dispatcher's piper propagtes the signal to the intermediate query streamer.
-//   the intermediate query streamer terimnates and propagates the signal to the query processor and dispatcher's piper.
+//   the intermediate query streamer terminates and propagates the signal to the query processor and dispatcher's piper.
 //   the query processor terminates.
 //   the dispatcher's piper terminates.
-//   the dispatcher's counter termiantes (after observing all the remaining blobs) and propagates the signal to the receiver.
+//   the dispatcher's counter terminates (after observing all the remaining blobs) and propagates the signal to the receiver.
 //   the dispatcher's receiver terminates.
 //   the dispatcher terminates and propagates the signal to the batcher and the streamer.
 //   the batcher and the streamer terminate.
@@ -268,6 +268,7 @@ func NewStreamingUploader(
 	ctx context.Context, cas regrpc.ContentAddressableStorageClient, byteStream bsgrpc.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
 ) (*StreamingUploader, error) {
+	ctx = ctxWithValues(ctx, ctxKeyModule, "uploader")
 	uploader, err := newUploader(ctx, cas, byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
@@ -346,7 +347,7 @@ func newUploader(
 
 		logBeatDoneCh: make(chan struct{}),
 	}
-	log.V(1).Infof("new; m=uploader; cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v", queryCfg, uploadCfg, streamCfg, ioCfg)
+	log.V(1).Infof("new; cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v, %s", queryCfg, uploadCfg, streamCfg, ioCfg, fmtCtx(ctx))
 
 	u.processorWg.Add(1)
 	go func() {
@@ -382,7 +383,7 @@ func newUploader(
 	}()
 
 	go u.close(ctx)
-	go u.logBeat()
+	go u.logBeat(ctx)
 	return u, nil
 }
 
@@ -399,43 +400,43 @@ func (u *uploader) close(ctx context.Context) {
 
 	// 1st, batching API senders should stop producing requests.
 	// These senders are terminated by the user.
-	log.V(1).Infof("waiting for client senders; m=uploader")
+	log.V(1).Infof("waiting for client senders; %s", fmtCtx(ctx))
 	u.clientSenderWg.Wait()
 
 	// 2nd, streaming API upload senders should stop producing queries and requests.
 	// These senders are terminated by the user.
-	log.V(1).Infof("waiting for upload senders; m=uploader")
+	log.V(1).Infof("waiting for upload senders; %s", fmtCtx(ctx))
 	u.uploadSenderWg.Wait()
 	close(u.digesterCh) // The digester will propagate the termination signal.
 
 	// 3rd, streaming API query senders should stop producing queries.
 	// This propagates from the uploader's pipe, hence, the uploader must stop first.
-	log.V(1).Infof("waiting for query senders; m=uploader")
+	log.V(1).Infof("waiting for query senders; %s", fmtCtx(ctx))
 	u.querySenderWg.Wait()
 	close(u.queryCh) // Terminate the query processor.
 
 	// 4th, internal routres should flush all remaining requests.
-	log.V(1).Infof("waiting for processors; m=uploader")
+	log.V(1).Infof("waiting for processors; %s", fmtCtx(ctx))
 	u.processorWg.Wait()
 
 	// 5th, internal brokers should flush all remaining messages.
-	log.V(1).Infof("waiting for brokers; m=uploader")
+	log.V(1).Infof("waiting for brokers; %s", fmtCtx(ctx))
 	u.queryPubSub.wait()
 	u.uploadPubSub.wait()
 
 	// 6th, receivers should have drained their channels by now.
-	log.V(1).Infof("waiting for receivers; m=uploader")
+	log.V(1).Infof("waiting for receivers; %s", fmtCtx(ctx))
 	u.receiverWg.Wait()
 
 	// 7th, workers should have terminated by now.
-	log.V(1).Infof("waiting for workers; m=uploader")
+	log.V(1).Infof("waiting for workers; %s", fmtCtx(ctx))
 	u.workerWg.Wait()
 
 	close(u.logBeatDoneCh)
-	log.V(3).Infof("duration.close; m=uploader, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+	log.V(3).Infof("duration.close; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 }
 
-func (u *uploader) logBeat() {
+func (u *uploader) logBeat(ctx context.Context) {
 	var interval time.Duration
 	if log.V(3) {
 		interval = time.Second
@@ -447,21 +448,30 @@ func (u *uploader) logBeat() {
 		return
 	}
 
-	log.Infof("beat.start; m=uploader, interval=%v", interval)
+	log.Infof("beat.start; %s", fmtCtx(ctx, "interval", interval))
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	i := 0
 	for {
 		select {
 		case <-u.logBeatDoneCh:
-			log.Infof("beat.stop; m=uploader, interval=%v, count=%d", interval, i)
+			log.Infof("beat.stop; %s", fmtCtx(ctx, "interval", interval, "count", i))
 			return
 		case <-ticker.C:
 		}
 
 		i++
-		log.Infof("beat; m=uploader, #%d, upload_subs=%d, query_subs=%d, walkers=%d, batching=%d, streaming=%d, querying=%d, open_files=%d, large_open_files=%d",
-			i, u.uploadPubSub.len(), u.queryPubSub.len(), u.walkThrottler.len(), u.uploadThrottler.len(), u.streamThrottle.len(), u.queryThrottler.len(), u.ioThrottler.len(), u.ioLargeThrottler.len())
+		log.Infof("beat; %s", fmtCtx(ctx,
+			"#", i,
+			"upload_subs", u.uploadPubSub.len(),
+			"query_subs", u.queryPubSub.len(),
+			"walkers", u.walkThrottler.len(),
+			"batching", u.uploadThrottler.len(),
+			"streaming", u.streamThrottle.len(),
+			"querying", u.queryThrottler.len(),
+			"open_files", u.ioThrottler.len(),
+			"large_open_files", u.ioLargeThrottler.len(),
+		))
 	}
 }
 

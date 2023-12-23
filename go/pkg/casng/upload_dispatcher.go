@@ -20,8 +20,9 @@ type tagCount struct {
 // dispatcher receives digested blobs and forwards them to the uploader or back to the requester in case of a cache hit or error.
 // The dispatcher handles counting in-flight requests per requester and notifying requesters when all of their requests are completed.
 func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
-	log.V(1).Info("start; m=upload.dispatcher")
-	defer log.V(1).Info("stop; m=upload.dispatcher")
+	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.dispatcher")
+	log.V(1).Info("start; %s", fmtCtx(ctx))
+	defer log.V(1).Info("stop; %s", fmtCtx(ctx))
 
 	defer func() {
 		// Let the batcher and the streamer know we're done dispatching blobs.
@@ -43,26 +44,27 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			// Let the piper know that the sender will not be sending any more blobs.
 			u.dispatcherPipeCh <- UploadRequest{done: true}
 		}()
-		log.V(1).Info("sender.start; m=upload.dispatcher")
-		defer log.V(1).Info("sender.stop; m=upload.dispatcher")
+		log.V(1).Info("sender.start; %s", fmtCtx(ctx))
+		defer log.V(1).Info("sender.stop; %s", fmtCtx(ctx))
 
 		for req := range u.dispatcherReqCh {
 			startTime := time.Now()
+			fctx := ctxWithValues(ctx, ctxKeyRtID, req.tag, ctxKeySqID, req.id)
 			if req.done { // The digester will not be sending any further blobs.
-				log.V(3).Infof("req.done; m=upload.dispatcher, tag=%s", req.tag)
+				log.V(3).Infof("req.done; %s", fmtCtx(fctx))
 				counterCh <- tagCount{req.tag, 0}
 				// Covers waiting on the counter.
-				log.V(3).Infof("duration.req; m=upload.dispatcher, start=%d, end=%d, rid=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+				log.V(3).Infof("duration.req; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 				if req.tag == "" { // In fact, the digester (and all requesters) have terminated.
 					return
 				}
 				continue
 			}
 			if req.Digest.Hash == "" {
-				log.Errorf("ignoring a request without a digest; m=upload.dispatcher, rid=%s, tag=%s", req.id, req.tag)
+				log.Errorf("ignoring a request without a digest; %s", fmtCtx(fctx))
 				continue
 			}
-			log.V(3).Infof("req; m=upload.dispatcher, digest=%s, bytes=%d, rid=%s, tag=%s", req.Digest, len(req.Bytes), req.id, req.tag)
+			log.V(3).Infof("req; %s", fmtCtx(fctx, "digest", req.Digest, "bytes", len(req.Bytes)))
 			// Count before sending the request to avoid an edge case where the response makes it to the counter before the increment here.
 			counterCh <- tagCount{req.tag, 1}
 			if req.digestOnly {
@@ -71,7 +73,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			}
 			u.dispatcherPipeCh <- req
 			// Covers waiting on the counter and the dispatcher.
-			log.V(3).Infof("duration.req; m=upload.dispatcher, start=%d, end=%d, rid=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+			log.V(3).Infof("duration.req; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 		}
 	}()
 
@@ -80,8 +82,8 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 	// Cache misses are dispatched to the batcher or the streamer.
 	wg.Add(1)
 	go func() {
-		log.V(1).Info("pipe.start; m=upload.dispatcher")
-		defer log.V(1).Info("pipe.stop; m=upload.dispatcher")
+		log.V(1).Info("pipe.start; %s", fmtCtx(ctx))
+		defer log.V(1).Info("pipe.stop; %s", fmtCtx(ctx))
 
 		done := false
 		batchItemSizeLimit := int64(u.batchRPCCfg.BytesLimit - u.uploadRequestBaseSize - u.uploadRequestItemBaseSize)
@@ -94,20 +96,21 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			// The dispatcher sends blobs on this channel, but never closes it.
 			case req := <-u.dispatcherPipeCh:
 				startTime := time.Now()
+				fctx := ctxWithValues(ctx, ctxKeyRtID, req.tag, ctxKeySqID, req.id)
 				// In the off chance that a request is received after a done signal, ignore it to avoid sending on a closed channel.
 				if done {
-					log.Errorf("ignoring a request after a done signal; m=upload.dispatcher, rid=%s, tag=%s", req.id, req.tag)
+					log.Errorf("ignoring a request after a done signal; %s", fmtCtx(fctx))
 					continue
 				}
 				// If the dispatcher has terminated, tell the streamer we're done and continue draining the response channel.
 				if req.done {
-					log.V(2).Info("pipe.done; m=upload.dispatcher")
+					log.V(2).Info("pipe.done; %s", fmtCtx(fctx))
 					done = true
 					close(queryCh)
 					continue
 				}
 
-				log.V(3).Infof("pipe.req; m=upload.dispatcher, digest=%s, rid=%s, tag=%s", req.Digest, req.id, req.tag)
+				log.V(3).Infof("pipe.req; %s", fmtCtx(fctx, "digest", req.Digest))
 				reqs := digestReqs[req.Digest]
 				reqs = append(reqs, req)
 				digestReqs[req.Digest] = reqs
@@ -116,7 +119,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				}
 				queryCh <- missingBlobRequest{digest: req.Digest, ctx: req.ctx, id: req.id}
 				// Covers waiting on the query processor.
-				log.V(3).Infof("duration.pipe.send, m=upload.dispatcher, start=%d, end=%d, rid=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+				log.V(3).Infof("duration.pipe.send; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 
 			// This channel is closed by the query pipe when queryCh is closed, which happens when the sender
 			// sends a done signal. This ensures all responses are forwarded to the dispatcher.
@@ -125,7 +128,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 					return
 				}
 				startTime := time.Now()
-				log.V(3).Infof("pipe.res; m=upload.dispatcher, digest=%s, missing=%t, err=%v", r.Digest, r.Missing, r.Err)
+				log.V(3).Infof("pipe.res; %s", fmtCtx(ctx, "digest", r.Digest, "missing", r.Missing, "err", r.Err))
 				reqs := digestReqs[r.Digest]
 				delete(digestReqs, r.Digest)
 				res := UploadResponse{Digest: r.Digest, Err: r.Err}
@@ -136,6 +139,11 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 						LogicalBytesCached: r.Digest.Size,
 						CacheHitCount:      1,
 					}
+				}
+
+				fctx := ctx
+				if log.V(3) {
+					fctx = ctxWithValues(ctx, ctxKeyRtID, strings.Join(res.tags, "|"), ctxKeySqID, strings.Join(res.reqs, "|"))
 				}
 
 				if r.Err != nil || !r.Missing {
@@ -149,18 +157,18 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 						}
 					}
 					if log.V(3) {
-						log.Infof("pipe.res.hit; m=upload.dispatcher, digest=%s, rid=%s, tag=%s", r.Digest, strings.Join(res.reqs, "|"), strings.Join(res.tags, "|"))
+						log.Infof("pipe.res.hit; %s", fmtCtx(fctx, "digest", r.Digest))
 					}
 					u.dispatcherResCh <- res
 					// Covers waiting on the dispatcher.
 					if log.V(3) {
-						log.Infof("duration.pipe.pub; m=upload.dispatcher, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+						log.Infof("duration.pipe.pub; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 					}
 					continue
 				}
 
 				if log.V(3) {
-					log.Infof("pipe.res.miss; m=upload.dispatcher, digest=%s, rid=%s, tag=%s", r.Digest, strings.Join(res.reqs, "|"), strings.Join(res.tags, "|"))
+					log.Infof("pipe.res.miss; %w", fmtCtx(fctx, "digest", r.Digest))
 				}
 				for _, req := range reqs {
 					if req.Digest.Size <= batchItemSizeLimit {
@@ -170,7 +178,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 					u.streamerCh <- req
 				}
 				// Covers waiting on the batcher and streamer.
-				log.V(3).Infof("duration.pipe.upload; m=upload.dispatcher, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+				log.V(3).Infof("duration.pipe.upload; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 			}
 		}
 	}()
@@ -180,22 +188,23 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.V(1).Info("receiver.start; m=upload.dispatcher")
-		defer log.V(1).Info("receiver.stop; m=upload.dispatcher")
+		log.V(1).Info("receiver.start; %s", fmtCtx(ctx))
+		defer log.V(1).Info("receiver.stop; %s", fmtCtx(ctx))
 
 		// Messages delivered here are either went through the sender above (dispatched for upload), bypassed (digestion error), or piped back from the querier.
 		for r := range u.dispatcherResCh {
 			startTime := time.Now()
+			fctx := ctxWithValues(ctx, ctxKeyRtID, strings.Join(r.tags, "|"), ctxKeySqID, strings.Join(r.reqs, "|"))
 			if log.V(3) {
-				log.Infof("res; m=upload.dispatcher, digest=%s, cache_hit=%d, end_of_walk=%t, err=%v, rid=%s, tag=%s", r.Digest, r.Stats.CacheHitCount, r.endOfWalk, r.Err, strings.Join(r.reqs, "|"), strings.Join(r.tags, "|"))
+				log.Infof("res; %s", fmtCtx(fctx, "digest", r.Digest, "cache_hit", r.Stats.CacheHitCount, "end_of_walk", r.endOfWalk, "err", r.Err))
 			}
 			// If multiple requesters are interested in this response, ensure stats are not double-counted.
 			if len(r.tags) == 1 {
-				u.uploadPubSub.pub(r, r.tags[0])
+				u.uploadPubSub.pub(ctx, r, r.tags[0])
 			} else {
 				rCached := r
 				rCached.Stats = r.Stats.ToCacheHit()
-				u.uploadPubSub.mpub(r, rCached, r.tags...)
+				u.uploadPubSub.mpub(ctx, r, rCached, r.tags...)
 			}
 
 			// Special case: do not decrement if it's an end of walk response.
@@ -205,7 +214,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				}
 			}
 			// Covers waiting on the counter and subscribers.
-			log.V(3).Infof("duration.pub; m=upload.dispatcher, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+			log.V(3).Infof("duration.pub; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 		}
 	}()
 
@@ -214,8 +223,8 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.V(1).Info("counter.start; m=upload.dispatcher")
-		defer log.V(1).Info("counter.stop; m=upload.dispatcher")
+		log.V(1).Info("counter.start; %s", fmtCtx(ctx))
+		defer log.V(1).Info("counter.stop; %s", fmtCtx(ctx))
 		defer close(u.dispatcherResCh) // Let the receiver know we're done.
 
 		tagReqCount := make(map[string]int)
@@ -223,8 +232,9 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		allDone := false
 		for tc := range counterCh {
 			startTime := time.Now()
+			fctx := ctxWithValues(ctx, ctxKeyRtID, tc.t)
 			if tc.c == 0 { // There will be no more blobs from this requester.
-				log.V(3).Infof("counter.done.from; m=upload.dispatcher, tag=%s", tc.t)
+				log.V(3).Infof("counter.done.from; %s", fmtCtx(fctx))
 				if tc.t == "" { // In fact, no more blobs for any requester.
 					if len(tagReqCount) == 0 {
 						return
@@ -236,18 +246,18 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			}
 			tagReqCount[tc.t] += tc.c
 			if tagReqCount[tc.t] < 0 {
-				log.Errorf("counter.negative; m=upload.dispatcher, tag=%s, inc=%d, count=%d, done=%t", tc.t, tc.c, tagReqCount[tc.t], tagDone[tc.t])
+				log.Errorf("counter.negative; %s", fmtCtx(fctx, "inc", tc.c, "count", tagReqCount[tc.t], "done", tagDone[tc.t]))
 			}
-			log.V(3).Infof("counter.count; m=upload.dispatcher, tag=%s, inc=%d, count=%d, done=%t, pending_tags=%d", tc.t, tc.c, tagReqCount[tc.t], tagDone[tc.t], len(tagReqCount))
+			log.V(3).Infof("counter.count; %s", fmtCtx(fctx, "inc", tc.c, "count", tagReqCount[tc.t], "done", tagDone[tc.t], "pending_tags", len(tagReqCount)))
 			if tagReqCount[tc.t] <= 0 && tagDone[tc.t] {
-				log.V(2).Infof("counter.done.to; m=upload.dispatcher, tag=%s", tc.t)
+				log.V(2).Infof("counter.done.to; %s", fmtCtx(fctx))
 				delete(tagDone, tc.t)
 				delete(tagReqCount, tc.t)
 				// Signal to the requester that all of its requests are done.
-				u.uploadPubSub.pub(UploadResponse{done: true}, tc.t)
+				u.uploadPubSub.pub(ctx, UploadResponse{done: true}, tc.t)
 			}
 			// Covers waiting on subscribers.
-			log.V(3).Infof("duration.counter.pub; m=upload.dispatcher, start=%d, end=%d, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), tc.t)
+			log.V(3).Infof("duration.counter.pub; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), tc.t))
 			if len(tagReqCount) == 0 && allDone {
 				return
 			}

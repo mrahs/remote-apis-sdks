@@ -14,7 +14,7 @@ import (
 type pubsub struct {
 	subs map[string]chan any
 	mu   sync.RWMutex
-	// A signalling channel that gets a message everytime the broker hits 0 subscriptions.
+	// A signalling channel that gets a message every time the broker hits 0 subscriptions.
 	// Unlike sync.WaitGroup, this allows the broker to accept more subs while a client is waiting for signal.
 	done chan struct{}
 }
@@ -39,7 +39,7 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 	subscriber := make(chan any)
 	ps.subs[tag] = subscriber
 
-	log.V(2).Infof("sub; m=pubsub, tag=%s", tag)
+	log.V(2).Infof("sub; %s", fmtCtx(ctxWithValues(ctx, ctxKeyModule, "pubusb", ctxKeyRtID, tag)))
 	return tag, subscriber
 }
 
@@ -47,7 +47,8 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 // The subscriber must continue draining the channel until it's closed.
 // It is an error to publish more messages for tag after this call.
 func (ps *pubsub) unsub(ctx context.Context, tag string) {
-	log.V(2).Infof("unsub.scheduled; m=pubsub, tag=%s", tag)
+	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub", ctxKeyRtID, tag)
+	log.V(2).Infof("unsub.scheduled; %s", fmtCtx(ctx))
 	// If unsub is called from the same goroutine that is listening on the subscription
 	// channel, a deadlock might occur.
 	// pub would be holding a read lock while this call wants to hold a write lock that must
@@ -68,7 +69,7 @@ func (ps *pubsub) unsub(ctx context.Context, tag string) {
 			close(ps.done)
 			ps.done = make(chan struct{})
 		}
-		log.V(2).Infof("unsub.done; m=pubsub, tag=%s", tag)
+		log.V(2).Infof("unsub.done; %s", fmtCtx(ctx))
 	}()
 }
 
@@ -84,21 +85,23 @@ func (ps *pubsub) unsub(ctx context.Context, tag string) {
 // Blocking 10ms for every subscriber amortizes much better than blocking 10ms for every
 // iteration on the subscribers, even though both have the same worst-case cost.
 // For example, if out of 10 subscribers 5 were busy for 1ms, the attempt will cost ~5ms instead of 10ms.
-func (ps *pubsub) pub(m any, tags ...string) {
-	_ = ps.pubN(m, len(tags), tags...)
+func (ps *pubsub) pub(ctx context.Context, m any, tags ...string) {
+	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub")
+	_ = ps.pubN(ctx, m, len(tags), tags...)
 }
 
 // mpub (multi-publish) delivers the "once" message to a single subscriber then delivers the "rest" message to the rest of the subscribers.
 // It's useful for cases where the message holds shared information that should not be duplicated among subscribers, such as stats.
-func (ps *pubsub) mpub(once any, rest any, tags ...string) {
-	t := ps.pubOnce(once, tags...)
-	_ = ps.pubN(rest, len(tags)-1, excludeTag(tags, t)...)
+func (ps *pubsub) mpub(ctx context.Context, once any, rest any, tags ...string) {
+	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub")
+	t := ps.pubOnce(ctx, once, tags...)
+	_ = ps.pubN(ctx, rest, len(tags)-1, excludeTag(tags, t)...)
 }
 
 // pubOnce is like pub, but delivers the message to a single subscriber.
 // The tag of the subscriber that got the message is returned.
-func (ps *pubsub) pubOnce(m any, tags ...string) string {
-	received := ps.pubN(m, 1, tags...)
+func (ps *pubsub) pubOnce(ctx context.Context, m any, tags ...string) string {
+	received := ps.pubN(ctx, m, 1, tags...)
 	if len(received) == 0 {
 		return ""
 	}
@@ -106,27 +109,27 @@ func (ps *pubsub) pubOnce(m any, tags ...string) string {
 }
 
 // pubN is like pub, but delivers the message to no more than n subscribers. The tags of the subscribers that got the message are returned.
-func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
+func (ps *pubsub) pubN(ctx context.Context, m any, n int, tags ...string) []string {
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
-			log.Infof("duration; m=pubsub, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+			log.Infof("duration.pub; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 		}()
 	}
 	if len(tags) == 0 {
-		log.Warningf("called without tags, dropping message; m=pubsub")
-		log.V(4).Infof("called without tags for msg=%v; m=pubsub", m)
+		log.Warningf("called without tags, dropping message; %s", fmtCtx(ctx))
+		log.V(4).Infof("called without tags for msg=%v; %s", m, fmtCtx(ctx))
 		return nil
 	}
 	if n <= 0 {
-		log.Warningf("nothing published because n=%d; m=pubsub", n)
+		log.Warningf("nothing published because n=%d; %s", n, fmtCtx(ctx))
 		return nil
 	}
 
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	log.V(4).Infof("msg; m=pubsub, type=%[1]T, value=%[1]v", m)
+	log.V(4).Infof("msg; type=%[1]T, value=%[1]v, %s", m, fmtCtx(ctx))
 
 	var toRetry []string
 	var received []string
@@ -137,14 +140,15 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 	for {
 		for _, t := range tags {
 			subscriber, ok := ps.subs[t]
+			fctx := ctxWithValues(ctx, ctxKeyRtID, t)
 			if !ok {
-				log.Warningf("drop; m=pubsub, tag=%s", t)
+				log.Warningf("drop; %s", fmtCtx(fctx))
 				continue
 			}
 			// Send now or reschedule if the subscriber is not ready.
 			select {
 			case subscriber <- m:
-				log.V(3).Infof("sent; m=pubsub, tag=%s", t)
+				log.V(3).Infof("sent; %s", fmtCtx(fctx))
 				received = append(received, t)
 				if len(received) >= n {
 					return received
@@ -157,7 +161,7 @@ func (ps *pubsub) pubN(m any, n int, tags ...string) []string {
 			break
 		}
 		retryCount++
-		log.V(3).Infof("retry; m=pubsub, retry=%d, tag=%s", retryCount, strings.Join(toRetry, "|"))
+		log.V(3).Infof("retry; %s", fmtCtx(ctxWithValues(ctx, ctxKeyRtID, strings.Join(toRetry, "|")), "retry", retryCount))
 
 		// Avoid mutating tags because it's expected to remain the same set upstream.
 		// Reslicing toRetry allows shifting retries to the left without without reallocating a new array.
