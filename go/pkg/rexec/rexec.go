@@ -262,8 +262,8 @@ func (ec *Context) ngUploadInputs() error {
 	if err != nil {
 		return err
 	}
-	log.V(2).Infof("[casng] ng.req; exec_root=%s, working_dir=%s, remote_working_dir=%s, symlink_opts=%s, inputs=%d, virtual_inputs=%d, cmd_id=%s, exec_id=%s", execRoot, workingDir, remoteWorkingDir, slo, len(ec.cmd.InputSpec.Inputs), len(ec.cmd.InputSpec.VirtualInputs), cmdID, executionID)
-	log.V(4).Infof("[casng] ng.req; exec_root=%s, working_dir=%s, remote_working_dir=%s, symlink_opts=%s, inputs=%+v, virtual_inputs=%+v, cmd_id=%s, exec_id=%s", execRoot, workingDir, remoteWorkingDir, slo, ec.cmd.InputSpec.Inputs, ec.cmd.InputSpec.VirtualInputs, cmdID, executionID)
+	log.V(2).Infof("req; m=ng.upload, exec_root=%s, working_dir=%s, remote_working_dir=%s, symlink_opts=%s, inputs=%d, virtual_inputs=%d, cmd_id=%s, exec_id=%s", execRoot, workingDir, remoteWorkingDir, slo, len(ec.cmd.InputSpec.Inputs), len(ec.cmd.InputSpec.VirtualInputs), cmdID, executionID)
+	log.V(4).Infof("req; m=ng.upload, exec_root=%s, working_dir=%s, remote_working_dir=%s, symlink_opts=%s, inputs=%+v, virtual_inputs=%+v, cmd_id=%s, exec_id=%s", execRoot, workingDir, remoteWorkingDir, slo, ec.cmd.InputSpec.Inputs, ec.cmd.InputSpec.VirtualInputs, cmdID, executionID)
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+len(ec.cmd.InputSpec.VirtualInputs))
 	pathSeen := make(map[impath.Absolute]bool)
 	for _, p := range ec.cmd.InputSpec.Inputs {
@@ -272,9 +272,6 @@ func (ec *Context) ngUploadInputs() error {
 			return err
 		}
 		absPath := execRoot.Append(rel)
-		// if seenPath[absPath] {
-		// return fmt.Errorf("[casng] %s %s> cannot have shared paths among inputs: %q", cmdID, executionID, absPath)
-		// }
 		pathSeen[absPath] = true
 		// Mark ancestors as seen to ensure any potential virtual parent is excluded.
 		parent := absPath.Dir()
@@ -291,7 +288,7 @@ func (ec *Context) ngUploadInputs() error {
 	})
 	for _, p := range ec.cmd.InputSpec.VirtualInputs {
 		if p.Path == "" {
-			return fmt.Errorf("[casng] ng.req: empty virtual path; cmd_id=%s, exec_id=%s", cmdID, executionID)
+			return fmt.Errorf("empty virtual path; m=ng.upload, cmd_id=%s, exec_id=%s", cmdID, executionID)
 		}
 		// If execRoot is a virtual path, ignore it.
 		if p.Path == "." {
@@ -324,19 +321,20 @@ func (ec *Context) ngUploadInputs() error {
 		}
 		reqs = append(reqs, r)
 	}
-	log.V(1).Infof("[casng] ng.req: uploading inputs; count=%d, cmd_id=%s, exec_id=%s", len(reqs), cmdID, executionID)
-	ctx := ec.ctx
+	log.V(1).Infof("uploading inputs; m=ng.upload, count=%d, cmd_id=%s, exec_id=%s", len(reqs), cmdID, executionID)
+	ctx := context.WithValue(ec.ctx, casng.CtxKeyInvID, executionID)
+	ctx = context.WithValue(ctx, casng.CtxKeyCmdID, cmdID)
 	var ngTree, clTree *string
 	if log.V(5) {
 		ngTree = new(string)
 		clTree = new(string)
-		ctx = context.WithValue(ctx, "ng_tree", ngTree)
-		ctx = context.WithValue(ctx, "cl_tree", clTree)
+		ctx = context.WithValue(ctx, casng.CtxKeyNGTree, ngTree)
+		ctx = context.WithValue(ctx, casng.CtxKeyClientTree, clTree)
 	}
 	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ctx, execRoot, workingDir, remoteWorkingDir, reqs...)
 	if err != nil {
 		if log.V(5) {
-			log.Infof("[casng] ng.req: upload error; cmd_id=%s, exec_id=%s\n%q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
+			log.Infof("upload error; m=ng.upload, cmd_id=%s, exec_id=%s\n%q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
 		}
 		return err
 	}
@@ -348,10 +346,10 @@ func (ec *Context) ngUploadInputs() error {
 		specStr := formatInputSpec(ec.cmd.InputSpec, "    ")
 		msg := fmt.Sprintf("ng=%s\n  cl=%s\n  spec\n%s\n  client_slo=%+v\n  ng_slo=%s\n  ng_tree\n%s\n  cl_tree\n%s", rootDg, rootDg2, specStr, ec.client.GrpcClient.TreeSymlinkOpts, slo, *ngTree, *clTree)
 		if rootDg.Hash != rootDg2.Hash {
-			log.Infof("[casng] ng.req: root digest mismatch; cmd_id=%s, exec_id=%s\n  %s", cmdID, executionID, msg)
+			log.Infof("root digest mismatch; m=ng.upload, cmd_id=%s, exec_id=%s\n  %s", cmdID, executionID, msg)
 			return fmt.Errorf("root digest mismatch: ng=%s, cl=%s", rootDg, rootDg2)
 		}
-		log.Infof("[casng] ng.req: root digest match; cmd_id=%s, exec_id=%s\n  %s", cmdID, executionID, msg)
+		log.Infof("root digest match; m=ng.upload, cmd_id=%s, exec_id=%s\n  %s", cmdID, executionID, msg)
 	}
 	ec.Metadata.InputFiles = int(stats.InputFileCount)
 	ec.Metadata.InputDirectories = int(stats.InputDirCount)
@@ -364,12 +362,12 @@ func (ec *Context) ngUploadInputs() error {
 	if err != nil {
 		return err
 	}
-	log.V(1).Infof("[casng] ng.req: command; digest=%s, cmd_id=%s, exec_id=%s", ec.cmdUe.Digest, cmdID, executionID)
+	log.V(1).Infof("command; m=ng.upload, digest=%s, cmd_id=%s, exec_id=%s", ec.cmdUe.Digest, cmdID, executionID)
 	err = ec.computeActionDg(rootDg, cmdPlatform)
 	if err != nil {
 		return err
 	}
-	log.V(1).Infof("[casng] ng.req: action; digest=%s, cmd_id=%s, exec_id=%s", ec.acUe.Digest, cmdID, executionID)
+	log.V(1).Infof("action; m=ng.upload, digest=%s, cmd_id=%s, exec_id=%s", ec.acUe.Digest, cmdID, executionID)
 	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx,
 		casng.UploadRequest{Bytes: ec.acUe.Contents, Digest: ec.acUe.Digest},
 		casng.UploadRequest{Bytes: ec.cmdUe.Contents, Digest: ec.cmdUe.Digest},

@@ -78,9 +78,6 @@ package casng
 //  Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
 //  Level 4 is used for messages with large objects.
 //  Level 5 is used for messages that require custom processing (extra compute).
-//  tid identifies a top-level (user) request.
-//  tag identifies internal messages for routing purposes. Multiple tags (routes) may be associated with a single tid.
-//  rid identifies internal requests for logging purposes. Multiple rids may be associated with a single tag (route).
 //
 // Log messages are formatted to be grep-friendly. You can do things like:
 //   grep info.log -e 'upload.digester'

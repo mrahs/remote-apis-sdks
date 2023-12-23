@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	cpb "github.com/bazelbuild/remote-apis-sdks/go/api/command"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/casng"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/command"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
@@ -462,7 +463,7 @@ func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, re
 	}
 	root, blobs, err = packageTree(ft, stats, "", tree)
 	if log.V(5) {
-		if s, ok := ctx.Value("cl_tree").(*string); ok {
+		if s, ok := ctx.Value(casng.CtxKeyClientTree).(*string); ok {
 			treePaths := make([]string, 0, len(tree))
 			for p := range tree {
 				treePaths = append(treePaths, p)

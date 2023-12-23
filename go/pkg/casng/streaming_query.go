@@ -100,6 +100,7 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 
 // missingBlobsPipe is a shared implementation between batching and streaming interfaces.
 func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRequest) <-chan MissingBlobsResponse {
+	ctx = ctxWithValues(ctx, ctxKeyModule, "query.streamer")
 	ch := make(chan MissingBlobsResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
@@ -115,7 +116,7 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 		return ch
 	}
 
-	ctx, traceID := ctxWithTrace(ctx)
+	ctx = ctxWithRqID(ctx)
 
 	tag, resCh := u.queryPubSub.sub(ctx)
 	pendingCh := make(chan int)
@@ -125,8 +126,8 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 	go func() {
 		defer u.querySenderWg.Done()
 
-		log.V(1).Info("sender.start; m=query.streamer, tid=%s", traceID)
-		defer log.V(1).Info("sender.stop; m=query.streamer, tid=%s", traceID)
+		log.V(1).Info("sender.start; %s", fmtCtx(ctx))
+		defer log.V(1).Info("sender.stop; %s", fmtCtx(ctx))
 
 		for r := range in {
 			r.tag = tag
@@ -142,8 +143,8 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 		defer u.receiverWg.Done()
 		defer close(ch)
 
-		log.V(1).Info("receiver.start; m=query.streamer, tid=%s", traceID)
-		defer log.V(1).Info("receiver.stop; m=query.streamer, tid=%s", traceID)
+		log.V(1).Info("receiver.start; %s", fmtCtx(ctx))
+		defer log.V(1).Info("receiver.stop; %s", fmtCtx(ctx))
 
 		// Continue to drain until the broker closes the channel.
 		for {
@@ -163,8 +164,8 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 		defer u.workerWg.Done()
 		defer u.queryPubSub.unsub(ctx, tag)
 
-		log.V(1).Info("counter.start; m=query.streamer, tid=%s", traceID)
-		defer log.V(1).Info("counter.stop; m=query.streamer, tid=%s", traceID)
+		log.V(1).Info("counter.start; %s", fmtCtx(ctx))
+		defer log.V(1).Info("counter.stop; %s", fmtCtx(ctx))
 
 		pending := 0
 		done := false
@@ -189,8 +190,9 @@ type digestStrings map[digest.Digest][]string
 
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
 func (u *uploader) queryProcessor(ctx context.Context) {
-	log.V(1).Info("start; m=query.processor")
-	defer log.V(1).Info("stop; m=query.processor")
+	ctx = ctxWithValues(ctx, ctxKeyModule, "query.processor")
+	log.V(1).Info("start; %s", fmtCtx(ctx))
+	defer log.V(1).Info("stop; %s", fmtCtx(ctx))
 
 	bundle := make(digestStrings)
 	reqs := make(digestStrings)
@@ -211,10 +213,10 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 					Err:    ctx.Err(),
 				}, bundle[d]...)
 			}
-			log.V(3).Infof("cancel; m=query.processor")
+			log.V(3).Infof("cancel; %s", fmtCtx(ctx))
 			return
 		}
-		log.V(3).Infof("duration.throttle.sem; m=query.processor, start=%d, end=%d", startTime.UnixNano(), time.Now().UnixNano())
+		log.V(3).Infof("duration.throttle.sem; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b, r digestStrings) {
@@ -239,7 +241,8 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			}
 			startTime := time.Now()
 
-			log.V(3).Infof("req; m=query.processor, digest=%s, rid=%s, tag=%s, bundle=%d", req.digest, req.id, req.tag, len(bundle))
+			ctx = ctxWithValues(ctx, ctxKeyRtID, req.tag, ctxKeySqID, req.id)
+			log.V(3).Infof("req; %s", fmtCtx(ctx, "digest", req.digest, "bundle", len(bundle)))
 			dSize := proto.Size(req.digest.ToProto())
 
 			// Check oversized items.
@@ -249,13 +252,13 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 					Err:    ErrOversizedItem,
 				}, req.tag)
 				// Covers waiting on subscribers.
-				log.V(3).Infof("duration.pub; m=query.processor, start=%d, end=%d, rid=%s, tag=%s", startTime.UnixNano(), time.Now().UnixNano(), req.id, req.tag)
+				log.V(3).Infof("duration.pub; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 				continue
 			}
 
 			// Check size threshold.
 			if bundleSize+dSize >= u.queryRPCCfg.BytesLimit {
-				log.V(3).Infof("bundle.size; m=query.processor, bytes=%d, excess=%d", bundleSize, dSize)
+				log.V(3).Infof("bundle.size; %s", fmtCtx(ctx, "bytes", bundleSize, "excess", dSize))
 				handle()
 			}
 
@@ -266,7 +269,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
-				log.V(3).Infof("bundle.full; m=query.processor, count=%d", len(bundle))
+				log.V(3).Infof("bundle.full; %s", fmtCtx(ctx, "count", len(bundle)))
 				handle()
 			}
 		case <-bundleTicker.C:

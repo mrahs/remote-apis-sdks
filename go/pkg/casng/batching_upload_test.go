@@ -580,7 +580,7 @@ func TestUpload_BatchingTree(t *testing.T) {
 	}
 	tmp := makeFs(t, map[string][]byte{"wd/a/b/c/foo.go": []byte("foo"), "wd/a/b/bar.go": []byte("bar"), "wd/e/f/baz.go": []byte("baz")})
 	ngTree := new(string)
-	ctx = context.WithValue(ctx, "ng_tree", ngTree)
+	ctx = context.WithValue(ctx, casng.CtxKeyNGTree, ngTree)
 	rootDigest, _, _, err := u.UploadTree(ctx, impath.MustAbs(tmp), impath.MustRel("wd"), impath.MustRel("rwd"),
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/c/foo.go")},
 		casng.UploadRequest{Path: impath.MustAbs(tmp, "wd/a/b/bar.go")},
