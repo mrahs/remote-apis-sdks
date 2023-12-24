@@ -91,6 +91,9 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		// Each blob may have a different tag and context so all must be dispathced.
 		digestReqs := make(map[digest.Digest][]UploadRequest)
 
+		// BUG: this loop forms a circular path
+		// The path is: digester -> dispatcherReqCh -> dispatcherPipeCh -> queryCh -> pubsub -> queryResCh -> dispatcherResCh
+		// The loop may block sending on queryCh, but at the same time pubsub may be blocked sending on queryResCh.
 		for {
 			select {
 			// The dispatcher sends blobs on this channel, but never closes it.
@@ -117,7 +120,13 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				if len(reqs) > 1 {
 					continue
 				}
-				queryCh <- missingBlobRequest{digest: req.Digest, ctx: req.ctx, id: req.id}
+				// TODO: experimental fix for the deadlock. Not yet sure about the upper bound of the number of
+				// spawned goroutines here.
+				u.workerWg.Add(1)
+				go func(ctx context.Context, reqID string, d digest.Digest){
+					defer u.workerWg.Done()
+					queryCh <- missingBlobRequest{digest: d, ctx: ctx, id: reqID}
+				}(req.ctx, req.id, req.Digest)
 				// Covers waiting on the query processor.
 				log.V(3).Infof("duration.pipe.send; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 
