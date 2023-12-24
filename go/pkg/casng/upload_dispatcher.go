@@ -54,7 +54,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				log.V(3).Infof("req.done; %s", fmtCtx(fctx))
 				counterCh <- tagCount{req.tag, 0}
 				// Covers waiting on the counter.
-				log.V(3).Infof("duration.req; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+				log.V(3).Infof("duration.counter; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 				if req.tag == "" { // In fact, the digester (and all requesters) have terminated.
 					return
 				}
@@ -73,7 +73,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			}
 			u.dispatcherPipeCh <- req
 			// Covers waiting on the counter and the dispatcher.
-			log.V(3).Infof("duration.req; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+			log.V(3).Infof("duration.pipe; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 		}
 	}()
 
@@ -162,7 +162,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 					u.dispatcherResCh <- res
 					// Covers waiting on the dispatcher.
 					if log.V(3) {
-						log.Infof("duration.pipe.pub; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+						log.Infof("duration.pipe.res; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 					}
 					continue
 				}

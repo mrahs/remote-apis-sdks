@@ -445,7 +445,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 	}
 
 	if len(bundle) == 0 {
-		log.V(3).Infof("duration.pub; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+		log.V(3).Infof("duration.res; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 		return
 	}
 
@@ -477,7 +477,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			log.Infof("res.failed.call; %s", fmtCtx(fctx, "digest", d))
 		}
 	}
-	log.V(3).Infof("duration.pub; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+	log.V(3).Infof("duration.res; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 }
 
 // streamer handles files that do not fit into a batching request.
@@ -544,6 +544,7 @@ func (u *uploader) streamer(ctx context.Context) {
 				continue
 			}
 			log.V(3).Infof("duration.throttle.sem; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+			// To avoid a deadlock, send the result in a separate goroutine.
 			u.workerWg.Add(1)
 			go func(req UploadRequest) {
 				defer u.workerWg.Done()
@@ -565,7 +566,7 @@ func (u *uploader) streamer(ctx context.Context) {
 				log.Infof("res; %s", fmtCtx(fctx, "digest", r.Digest, "pending", pending))
 			}
 			// Covers waiting on the dispatcher.
-			log.V(3).Infof("duration.pub; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+			log.V(3).Infof("duration.res; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 		}
 	}
 }
