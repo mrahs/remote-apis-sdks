@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	log "github.com/golang/glog"
 	"github.com/pborman/uuid"
 )
 
@@ -107,4 +109,11 @@ func ctxWithValues(ctx context.Context, kv ...any) context.Context {
 		ctx = context.WithValue(ctx, k, kv[i])
 	}
 	return ctx
+}
+
+func logDuration(ctx context.Context, startTime time.Time, op string, kv ...any) {
+	if !log.V(3) {
+		return
+	}
+	log.Infof("duration.%s; start=%d, end=%d, %s", op, startTime.UnixNano(), time.Now().UnixNano(), fmtCtx(ctx, kv...))
 }

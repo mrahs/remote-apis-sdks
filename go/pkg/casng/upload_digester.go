@@ -73,7 +73,6 @@ func (u *uploader) digester(ctx context.Context) {
 
 	requesterWalkWg := make(map[string]*sync.WaitGroup)
 	for req := range u.digesterCh {
-		startTime := time.Now()
 		fctx := ctxWithValues(ctx, ctxKeyRtID, req.tag, ctxKeySqID, req.id)
 		// If the requester will not be sending any further requests, wait for in-flight walks from previous requests
 		// then tell the dispatcher to forward the signal once all dispatched blobs are done.
@@ -82,10 +81,10 @@ func (u *uploader) digester(ctx context.Context) {
 			wg := requesterWalkWg[req.tag]
 			if wg == nil {
 				log.V(2).Infof("req.done, no more pending walks; %s", fmtCtx(fctx))
+				startTime := time.Now()
 				// Let the dispatcher know that this requester is done.
 				u.dispatcherReqCh <- req
-				// Covers waiting on the dispatcher.
-				log.V(3).Infof("duration.req; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+				logDuration(fctx, startTime, "dispatcher.req")
 				continue
 			}
 			// Remove the wg to ensure a new one is used if the requester decides to send more requests.
@@ -127,21 +126,20 @@ func (u *uploader) digester(ctx context.Context) {
 		}
 
 		if req.Digest.Hash != "" {
+			startTime := time.Now()
 			u.dispatcherReqCh <- req
-			// Covers waiting on the node cache and waiting on the dispatcher.
-			log.V(3).Infof("duration.req; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+			logDuration(fctx, startTime, "dispatcher.req")
 			log.V(3).Infof("req.digested; %s", fmtCtx(fctx, "path", req.Path, "fid", req.Exclude))
 			continue
 		}
 
 		log.V(3).Infof("req.path; %s", fmtCtx(fctx, "path", req.Path, "fid", req.Exclude, "slo", req.SymlinkOptions))
 		// Wait if too many walks are in-flight.
-		startTimeThrottle := time.Now()
+		startTime := time.Now()
 		if !u.walkThrottler.acquire(req.ctx) {
-			log.V(3).Infof("duration.throttle.walk; %s", fmtCtx(fctx, "start", startTimeThrottle.UnixNano(), "end", time.Now().UnixNano()))
 			continue
 		}
-		log.V(3).Infof("duration.throttle.walk; %s", fmtCtx(fctx, "start", startTimeThrottle.UnixNano(), "end", time.Now().UnixNano()))
+		logDuration(fctx, startTime, "sem.walk")
 		wg := requesterWalkWg[req.tag]
 		if wg == nil {
 			wg = &sync.WaitGroup{}
@@ -165,7 +163,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
-			log.V(3).Infof("duration.visit; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "path", req.Path))
+			logDuration(ctx, startTime, "visit", "path", req.Path)
 		}()
 	}
 
@@ -216,7 +214,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				log.V(3).Infof("visit.wait; %s", fmtCtx(ctx, "path", path, "real_path", realPath))
 				startTime := time.Now()
 				wg.Wait()
-				log.V(3).Infof("duration.visit.wait; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "path", path, "real_path", realPath))
+				logDuration(ctx, startTime, "visit.wait", "path", req.Path, "real_path", realPath)
 				delete(deferredWg, key)
 				return walker.Defer, true
 			}
@@ -227,17 +225,21 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			// Forward it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
 			switch node := node.(type) {
 			case *repb.FileNode:
+				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{Path: realPath, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
+				logDuration(ctx, startTime, "dispatcher.req.digsted.file", "path", req.Path, "real_path", realPath)
 			case *repb.DirectoryNode:
 				// The blob of the directory node is the bytes of a repb.Directory message.
 				// Generate and forward it. If it was uploaded before, it'll be reported as a cache hit.
 				// Otherwise, it means the previous attempt to upload it failed and it is going to be retried.
-				node, b, errDigest := digestDirectory(path, u.dirChildren.load(key))
+				node, b, errDigest := digestDirectory(ctx, path, u.dirChildren.load(key))
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
 					return walker.SkipPath, false
 				}
+				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
+				logDuration(ctx, startTime, "dispatcher.req.digsted.dir", "path", req.Path, "real_path", realPath)
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
 			default:
@@ -284,15 +286,17 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				stats.DigestCount++
 				stats.InputDirCount++
 				// All the descendants have already been visited (DFS).
-				node, b, errDigest := digestDirectory(path, u.dirChildren.load(key))
+				node, b, errDigest := digestDirectory(ctx, path, u.dirChildren.load(key))
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
 					return false
 				}
 				u.dirChildren.append(parentKey, node)
+				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 				u.nodeCache.Store(key, node)
 				log.V(3).Infof("visit.post.dir; %s", fmtCtx(ctx, "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude))
+				logDuration(ctx, startTime, "dispatcher.req.dir", "path", req.Path, "real_path", realPath)
 				return true
 
 			case info.Mode().IsRegular():
@@ -311,8 +315,10 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					log.V(3).Infof("visit.post.file.cached; %s", fmtCtx(ctx, "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude))
 					return true
 				}
+				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{Bytes: blb.b, reader: blb.r, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
 				log.V(3).Infof("visit.post.file; %s", fmtCtx(ctx, "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude))
+				logDuration(ctx, startTime, "dispatcher.req.file", "path", req.Path, "real_path", realPath)
 				return true
 
 			default:
@@ -355,7 +361,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 
 			stats.DigestCount++
 			stats.InputSymlinkCount++
-			node, nextStep, errDigest := digestSymlink(req.Path, realPath, req.SymlinkOptions)
+			node, nextStep, errDigest := digestSymlink(ctx, req.Path, realPath, req.SymlinkOptions)
 			if errDigest != nil {
 				err = errors.Join(errDigest, err)
 				return walker.SkipSymlink, false
@@ -373,9 +379,11 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 		},
 	})
 
+	startTime := time.Now()
 	// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
 	// err includes any IO errors that happened during the walk.
 	u.dispatcherResCh <- UploadResponse{endOfWalk: true, tags: []string{req.tag}, reqs: []string{req.id}, Stats: stats, Err: err}
+	logDuration(ctx, startTime, "dispatcher.res", "path", req.Path)
 }
 
 // digestSymlink follows the target and/or constructs a symlink node.
@@ -384,7 +392,14 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 // For example: if the root is /a, the symlink is b/c and the target is /a/foo, the name will be c and the target will be ../foo.
 // Note that the target includes hierarchy information, without specific names.
 // Another example: if the root is /a, the symilnk is b/c and the target is foo, the name will be c, and the target will be foo.
-func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) (*repb.SymlinkNode, walker.SymlinkAction, error) {
+func digestSymlink(ctx context.Context, root impath.Absolute, path impath.Absolute, slo slo.Options) (*repb.SymlinkNode, walker.SymlinkAction, error) {
+	if log.V(3) {
+		startTime := time.Now()
+		defer func(){
+			logDuration(ctx, startTime, "digest.symlink")
+		}()
+	}
+
 	if slo.Skip() {
 		return nil, walker.SkipSymlink, nil
 	}
@@ -447,7 +462,14 @@ func digestSymlink(root impath.Absolute, path impath.Absolute, slo slo.Options) 
 //
 // No syscalls are made in this method.
 // Only the base of path is used. No ancenstory information is included in the returned node.
-func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.DirectoryNode, []byte, error) {
+func digestDirectory(ctx context.Context, path impath.Absolute, children []proto.Message) (*repb.DirectoryNode, []byte, error) {
+	if log.V(3) {
+		startTime := time.Now()
+		defer func(){
+			logDuration(ctx, startTime, "digest.dir")
+		}()
+	}
+
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
 		Name: path.Base().String(),
@@ -489,6 +511,12 @@ func digestDirectory(path impath.Absolute, children []proto.Message) (*repb.Dire
 //
 // If the returned err is not nil, both tokens are released before returning.
 func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, closeLargeFile bool) (node *repb.FileNode, blb *blob, err error) {
+	if log.V(3) {
+		startTime := time.Now()
+		defer func(){
+			logDuration(ctx, startTime, "digest.file")
+		}()
+	}
 	// Always return a clone to ensure the cached version remains owned by the cache.
 	defer func() {
 		if node != nil {
@@ -562,7 +590,7 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 		if !u.ioLargeThrottler.acquire(ctx) {
 			return nil, nil, ctx.Err()
 		}
-		log.V(3).Infof("duration.throttle.io.large; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+		logDuration(ctx, startTime, "sem.io.large")
 		defer func() {
 			// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 			if blb == nil || blb.r == nil {
@@ -575,7 +603,7 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 	if !u.ioThrottler.acquire(ctx) {
 		return nil, nil, ctx.Err()
 	}
-	log.V(3).Infof("duration.throttle.io; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+	logDuration(ctx, startTime, "sem.io")
 	defer func() {
 		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 		if blb == nil || blb.r == nil {

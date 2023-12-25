@@ -433,7 +433,7 @@ func (u *uploader) close(ctx context.Context) {
 	u.workerWg.Wait()
 
 	close(u.logBeatDoneCh)
-	log.V(3).Infof("duration.close; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+	logDuration(ctx, startTime, "close")
 }
 
 func (u *uploader) logBeat(ctx context.Context) {

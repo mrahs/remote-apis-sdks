@@ -216,7 +216,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			log.V(3).Infof("cancel; %s", fmtCtx(ctx))
 			return
 		}
-		log.V(3).Infof("duration.throttle.sem; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+		logDuration(ctx, startTime, "sem.query")
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b, r digestStrings) {
@@ -252,7 +252,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 					Err:    ErrOversizedItem,
 				}, req.tag)
 				// Covers waiting on subscribers.
-				log.V(3).Infof("duration.pub.oversized; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+				logDuration(ctx, startTime, "pub.oversized")
 				continue
 			}
 
@@ -272,14 +272,14 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 				log.V(3).Infof("bundle.full; %s", fmtCtx(ctx, "count", len(bundle)))
 				handle()
 			}
-			log.V(3).Infof("duration.req; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+			logDuration(ctx, startTime, "bundle.req")
 		case <-bundleTicker.C:
 			startTime := time.Now()
 			if len(bundle) > 0 {
 				log.V(3).Infof("bundle.timeout; %s", fmtCtx(ctx, "count", len(bundle)))
 			}
 			handle()
-			log.V(3).Infof("duration.timeout; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+			logDuration(ctx, startTime, "bundle.timeout")
 		}
 	}
 }
@@ -306,7 +306,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, digestTags, digestReqs 
 		res, err = u.cas.FindMissingBlobs(ctx, req)
 		return err
 	})
-	log.V(3).Infof("duration.grpc; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+	logDuration(ctx, startTime, "grpc")
 
 	var missing []*repb.Digest
 	if res != nil {
@@ -336,5 +336,5 @@ func (u *uploader) callMissingBlobs(ctx context.Context, digestTags, digestReqs 
 			Missing: false,
 		}, digestTags[d]...)
 	}
-	log.V(3).Infof("duration.pub.done; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+	logDuration(ctx, startTime, "pub.done")
 }

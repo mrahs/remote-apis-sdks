@@ -214,6 +214,7 @@ func (u *uploader) batcher(ctx context.Context) {
 		// Block the batcher if the concurrency limit is reached.
 		startTime := time.Now()
 		if !u.uploadThrottler.acquire(ctx) {
+			startTime = time.Now()
 			// Ensure responses are dispatched before aborting.
 			for d, item := range bundle {
 				u.dispatcherResCh <- UploadResponse{
@@ -224,9 +225,10 @@ func (u *uploader) batcher(ctx context.Context) {
 					reqs:   item.reqs,
 				}
 			}
+			logDuration(ctx, startTime, "batch->dispatcher.res")
 			return
 		}
-		log.V(3).Infof("duration.throttle.sem; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+		logDuration(ctx, startTime, "sem.upload")
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b uploadRequestBundle) {
@@ -290,7 +292,7 @@ func (u *uploader) batcher(ctx context.Context) {
 						if !u.ioThrottler.acquire(req.ctx) {
 							return req.ctx.Err()
 						}
-						log.V(3).Infof("duration.throttle.io; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+						logDuration(ctx, startTime, "sem.io")
 						defer u.ioThrottler.release()
 						f, err := os.Open(req.Path.String())
 						if err != nil {
@@ -388,7 +390,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		}
 		return reqErr
 	})
-	log.V(3).Infof("duration.grpc; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+	logDuration(ctx, startTime, "grpc")
 	log.V(3).Infof("call.result; %s", fmtCtx(ctx, "uploaded", len(uploaded), "failed", len(failed), "req_failed", len(bundle)-len(uploaded)-len(failed)))
 
 	// Report uploaded.
@@ -444,8 +446,8 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		delete(bundle, d)
 	}
 
+	logDuration(ctx, startTime, "batch->dispatcher.res")
 	if len(bundle) == 0 {
-		log.V(3).Infof("duration.res; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 		return
 	}
 
@@ -477,7 +479,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			log.Infof("res.failed.call; %s", fmtCtx(fctx, "digest", d))
 		}
 	}
-	log.V(3).Infof("duration.res; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+	logDuration(ctx, startTime, "batch->dispatcher.res")
 }
 
 // streamer handles files that do not fit into a batching request.
@@ -543,7 +545,7 @@ func (u *uploader) streamer(ctx context.Context) {
 				}(req)
 				continue
 			}
-			log.V(3).Infof("duration.throttle.sem; %s", fmtCtx(fctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+			logDuration(ctx, startTime, "sem.stream")
 			// To avoid a deadlock, send the result in a separate goroutine.
 			u.workerWg.Add(1)
 			go func(req UploadRequest) {
@@ -565,8 +567,7 @@ func (u *uploader) streamer(ctx context.Context) {
 				fctx := ctxWithValues(ctx, ctxKeySqID, strings.Join(r.reqs, "|"), ctxKeyRtID, strings.Join(r.tags, "|"))
 				log.Infof("res; %s", fmtCtx(fctx, "digest", r.Digest, "pending", pending))
 			}
-			// Covers waiting on the dispatcher.
-			log.V(3).Infof("duration.res; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+			logDuration(ctx, startTime, "stream->dispatcher.res")
 		}
 	}
 }
@@ -599,7 +600,7 @@ func (u *uploader) callStream(ctx context.Context, name string, req UploadReques
 		if !u.ioThrottler.acquire(req.ctx) {
 			return Stats{BytesRequested: req.Digest.Size}, context.Canceled
 		}
-		log.V(3).Infof("duration.throttle.io; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+		logDuration(ctx, startTime, "sem.io")
 		defer u.ioThrottler.release()
 
 		f, errOpen := os.Open(req.Path.String())

@@ -122,7 +122,7 @@ func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Rea
 	defer u.streamThrottle.release()
 	ctx = ctxWithRqID(ctx)
 	ctx = ctxWithValues(ctx, ctxKeyModule, "write_bytes")
-	log.V(3).Infof("duration.throttle.sem; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+	logDuration(ctx, startTime, "sem.stream")
 	return u.writeBytes(ctx, name, r, size, offset, true)
 }
 
@@ -135,7 +135,7 @@ func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r
 	defer u.streamThrottle.release()
 	ctx = ctxWithRqID(ctx)
 	ctx = ctxWithValues(ctx, ctxKeyModule, "write_bytes")
-	log.V(3).Infof("duration.throttle.sem; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
+	logDuration(ctx, startTime, "sem.stream")
 	return u.writeBytes(ctx, name, r, size, offset, false)
 }
 
@@ -145,7 +145,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
-			log.V(3).Infof("duration.write; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "name", name, "size", size, "chunk_size", u.ioCfg.BufferSize))
+			logDuration(ctx, startTime, "write_bytes", "name", name, "size", size, "chunk_size", u.ioCfg.BufferSize)
 		}()
 	}
 
@@ -515,7 +515,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		reqs[i] = r
 		i++
 	}
-	log.V(3).Infof("duration.filter_id; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "fid", filterID))
+	logDuration(ctx, startTime, "filter_id", "fid", filterID)
 
 	// Reslice to take included (shifted) requests only.
 	reqs = reqs[:i]
@@ -531,7 +531,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// 2nd, Upload the requests first to digest the files and cache the nodes.
 	startTime = time.Now()
 	uploaded, stats, err = u.Upload(ctx, reqs...)
-	log.V(3).Infof("duration.upload.reqs; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "fid", filterID))
+	logDuration(ctx, startTime, "upload_inputs", "fid", filterID)
 	if err != nil {
 		return
 	}
@@ -579,7 +579,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			}
 		}
 	}
-	log.V(3).Infof("duration.tree.partial; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "fid", filterID))
+	logDuration(ctx, startTime, "construct_Tree", "fid", filterID)
 
 	// This block generates directory nodes for shared ancestors starting from leaf nodes (DFS-style).
 	dirReqs := make([]UploadRequest, 0, len(dirChildren))
@@ -621,7 +621,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			}
 		}
 
-		node, b, errDigest := digestDirectory(dir, childrenNodes)
+		node, b, errDigest := digestDirectory(ctx, dir, childrenNodes)
 		if errDigest != nil {
 			err = errDigest
 			return
@@ -637,13 +637,13 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		// Attach the node to its parent if it's not the exec root.
 		dirChildren[dir.Dir()][dir] = node
 	}
-	log.V(3).Infof("duration.tree.full; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "fid", filterID))
+	logDuration(ctx, startTime, "fill_tree", "fid", filterID)
 
 	// Upload the blobs of the shared ancestors.
 	log.V(1).Infof("; %s", fmtCtx(ctx, "dirs", len(dirReqs), "fid", filterID))
 	startTime = time.Now()
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
-	log.V(3).Infof("duration.upload.dirs; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano(), "fid", filterID))
+	logDuration(ctx, startTime, "upload_dirs", "fid", filterID)
 	if moreErr != nil {
 		err = moreErr
 	}
