@@ -34,6 +34,9 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
+	if len(ps.subs) == 0 {
+		ps.done = make(chan struct{})
+	}
 	tag := uuid.New()
 	subscriber := make(chan any)
 	ps.subs[tag] = subscriber
@@ -66,7 +69,7 @@ func (ps *pubsub) unsub(ctx context.Context, tag string) {
 		close(subscriber)
 		if len(ps.subs) == 0 {
 			close(ps.done)
-			ps.done = make(chan struct{})
+			infof(ctx, 3, "done")
 		}
 		infof(ctx, 3, "unsub.done")
 	}()
@@ -182,6 +185,9 @@ func (ps *pubsub) wait() {
 	ps.mu.RLock()
 	done := ps.done
 	ps.mu.RUnlock()
+	if done == nil {
+		return
+	}
 	<-done
 }
 
@@ -196,7 +202,6 @@ func (ps *pubsub) len() int {
 func newPubSub() *pubsub {
 	return &pubsub{
 		subs: make(map[string]chan any),
-		done: make(chan struct{}),
 	}
 }
 

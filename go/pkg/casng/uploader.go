@@ -432,8 +432,8 @@ func (u *uploader) close(ctx context.Context) {
 	log.V(1).Infof("waiting for workers; %s", fmtCtx(ctx))
 	u.workerWg.Wait()
 
-	close(u.logBeatDoneCh)
 	logDuration(ctx, startTime, "close")
+	close(u.logBeatDoneCh)
 }
 
 // Done returns a channel that is closed when the the uploader is done.
