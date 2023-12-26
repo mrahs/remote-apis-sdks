@@ -86,7 +86,7 @@ package casng
 //   grep info.log -e 'rid=request_id'
 //
 // To get a csv file of durations, enable verbosity level 3 and use the command:
-//   grep reproxy_info.log -e 'duration.*;' | tr -s ' ' | sort -k2 | cut -d ' ' -f 5- | sed -e 's/; start=/,/' -e 's/, end=/,/' >/tmp/duration.csv
+//   grep reproxy_info.log -e 'duration\..*;' | tr -s ' ' | sort -k2 | cut -d ' ' -f 5- | sed -e 's/; start=/,/' -e 's/, end=/,/' >/tmp/duration.csv
 
 import (
 	"context"

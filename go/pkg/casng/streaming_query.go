@@ -164,8 +164,8 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 		defer u.workerWg.Done()
 		defer u.queryPubSub.unsub(ctx, tag)
 
-		log.V(1).Info("counter.start; %s", fmtCtx(ctx))
-		defer log.V(1).Info("counter.stop; %s", fmtCtx(ctx))
+		infof(ctx, 1, "counter.start")
+		defer infof(ctx, 1, "counter.stop")
 
 		pending := 0
 		done := false

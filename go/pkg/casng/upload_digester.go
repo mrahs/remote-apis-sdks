@@ -55,8 +55,8 @@ type blob struct {
 // The number of concurrent requests is limited to the number of concurrent file system walks.
 func (u *uploader) digester(ctx context.Context) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.digester")
-	log.V(1).Info("start; %s", fmtCtx(ctx))
-	defer log.V(1).Info("stop; %s", fmtCtx(ctx))
+	log.V(1).Infof("start; %s", fmtCtx(ctx))
+	defer log.V(1).Infof("stop; %s", fmtCtx(ctx))
 
 	// The digester receives requests from a stream pipe, and sends digested blobs to the dispatcher.
 	//

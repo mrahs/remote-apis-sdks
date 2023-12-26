@@ -106,6 +106,10 @@ func ctxWithValues(ctx context.Context, kv ...any) context.Context {
 			k = kv[i]
 			continue
 		}
+		if strs, ok := kv[i].([]string); ok {
+			ctx = context.WithValue(ctx, k, strings.Join(strs, "|"))
+			continue
+		}
 		ctx = context.WithValue(ctx, k, kv[i])
 	}
 	return ctx
@@ -116,4 +120,11 @@ func logDuration(ctx context.Context, startTime time.Time, op string, kv ...any)
 		return
 	}
 	log.Infof("duration.%s; start=%d, end=%d, %s", op, startTime.UnixNano(), time.Now().UnixNano(), fmtCtx(ctx, kv...))
+}
+
+func infof(ctx context.Context, level log.Level, msg string, kv ...any) {
+	if !log.V(level) {
+		return
+	}
+	log.Infof("%s; %s", msg, fmtCtx(ctx, kv...))
 }

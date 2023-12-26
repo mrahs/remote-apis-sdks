@@ -2,7 +2,6 @@ package casng
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
@@ -39,7 +38,7 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 	subscriber := make(chan any)
 	ps.subs[tag] = subscriber
 
-	log.V(2).Infof("sub; %s", fmtCtx(ctxWithValues(ctx, ctxKeyModule, "pubusb", ctxKeyRtID, tag)))
+	infof(ctxWithValues(ctx, ctxKeyModule, "pubsub", ctxKeyRtID, tag), 3, "sub")
 	return tag, subscriber
 }
 
@@ -48,7 +47,7 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 // It is an error to publish more messages for tag after this call.
 func (ps *pubsub) unsub(ctx context.Context, tag string) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub", ctxKeyRtID, tag)
-	log.V(2).Infof("unsub.scheduled; %s", fmtCtx(ctx))
+	infof(ctx, 3, "unsub.scheduled")
 	// If unsub is called from the same goroutine that is listening on the subscription
 	// channel, a deadlock might occur.
 	// pub would be holding a read lock while this call wants to hold a write lock that must
@@ -69,7 +68,7 @@ func (ps *pubsub) unsub(ctx context.Context, tag string) {
 			close(ps.done)
 			ps.done = make(chan struct{})
 		}
-		log.V(2).Infof("unsub.done; %s", fmtCtx(ctx))
+		infof(ctx, 3, "unsub.done")
 	}()
 }
 
@@ -161,7 +160,7 @@ func (ps *pubsub) pubN(ctx context.Context, m any, n int, tags ...string) []stri
 			break
 		}
 		retryCount++
-		log.V(3).Infof("retry; %s", fmtCtx(ctxWithValues(ctx, ctxKeyRtID, strings.Join(toRetry, "|")), "retry", retryCount))
+		infof(ctxWithValues(ctx, ctxKeyRtID, toRetry), 3, "retry", "#", retryCount, "count", len(toRetry))
 
 		// Avoid mutating tags because it's expected to remain the same set upstream.
 		// Reslicing toRetry allows shifting retries to the left without without reallocating a new array.

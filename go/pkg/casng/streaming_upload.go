@@ -159,14 +159,14 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	// Forward the requests to the internal processor.
 	u.uploadSenderWg.Add(1)
 	go func() {
-		log.V(1).Infof("sender.start; %s", fmtCtx(ctx))
-		defer log.V(1).Infof("sender.stop; %s", fmtCtx(ctx))
+		infof(ctx, 1, "sender.start")
+		defer infof(ctx, 1, "sender.stop")
 		defer u.uploadSenderWg.Done()
 		for r := range in {
 			r.tag = tag
 			r.ctx = ctx
 			r.id = uuid.New()
-			log.V(3).Infof("req; %s", fmtCtx(ctxWithValues(ctx, ctxKeySqID, r.id), "path", r.Path, "bytes", len(r.Bytes)))
+			infof(ctxWithValues(ctx, ctxKeySqID, r.id), 3, "req", "path", r.Path, "bytes", len(r.Bytes))
 			u.digesterCh <- r
 		}
 		// Let the processor know that no further requests are expected.
@@ -177,8 +177,8 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	// Once the sender above sends a done-tagged request, the processor will send a done-tagged response.
 	u.receiverWg.Add(1)
 	go func() {
-		log.V(1).Infof("receiver.start; %s", fmtCtx(ctx))
-		defer log.V(1).Infof("receiver.stop; %s", fmtCtx(ctx))
+		infof(ctx, 1, "receiver.start")
+		defer infof(ctx, 1, "receiver.stop")
 		defer u.receiverWg.Done()
 		defer close(ch)
 		for rawR := range resChan {
@@ -197,8 +197,8 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 // uploadBatcher handles files that can fit into a batching request.
 func (u *uploader) batcher(ctx context.Context) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.batcher")
-	log.V(1).Info("start; %s", fmtCtx(ctx))
-	defer log.V(1).Info("stop; %s", fmtCtx(ctx))
+	log.V(1).Infof("start; %s", fmtCtx(ctx))
+	defer log.V(1).Infof("stop; %s", fmtCtx(ctx))
 
 	bundle := make(uploadRequestBundle)
 	bundleSize := u.uploadRequestBaseSize
@@ -489,8 +489,8 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 // For other files, only an io hold is acquired and released in this call.
 func (u *uploader) streamer(ctx context.Context) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.streamer")
-	log.V(1).Info("start; %s", fmtCtx(ctx))
-	defer log.V(1).Info("stop; %s", fmtCtx(ctx))
+	log.V(1).Infof("start; %s", fmtCtx(ctx))
+	defer log.V(1).Infof("stop; %s", fmtCtx(ctx))
 
 	// Unify duplicate requests.
 	digestTags := make(map[digest.Digest][]string)

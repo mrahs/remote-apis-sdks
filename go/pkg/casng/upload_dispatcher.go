@@ -21,8 +21,8 @@ type tagCount struct {
 // The dispatcher handles counting in-flight requests per requester and notifying requesters when all of their requests are completed.
 func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.dispatcher")
-	log.V(1).Info("start; %s", fmtCtx(ctx))
-	defer log.V(1).Info("stop; %s", fmtCtx(ctx))
+	log.V(1).Infof("start; %s", fmtCtx(ctx))
+	defer log.V(1).Infof("stop; %s", fmtCtx(ctx))
 
 	defer func() {
 		// Let the batcher and the streamer know we're done dispatching blobs.
@@ -44,8 +44,8 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			// Let the piper know that the sender will not be sending any more blobs.
 			u.dispatcherPipeCh <- UploadRequest{done: true}
 		}()
-		log.V(1).Info("sender.start; %s", fmtCtx(ctx))
-		defer log.V(1).Info("sender.stop; %s", fmtCtx(ctx))
+		infof(ctx, 1, "sender.start")
+		defer infof(ctx, 1, "sender.stop")
 
 		for req := range u.dispatcherReqCh {
 			fctx := ctxWithValues(ctx, ctxKeyRtID, req.tag, ctxKeySqID, req.id)
@@ -85,8 +85,9 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 	// Cache misses are dispatched to the batcher or the streamer.
 	wg.Add(1)
 	go func() {
-		log.V(1).Info("pipe.start; %s", fmtCtx(ctx))
-		defer log.V(1).Info("pipe.stop; %s", fmtCtx(ctx))
+		defer wg.Done()
+		log.V(1).Infof("pipe.start; %s", fmtCtx(ctx))
+		defer log.V(1).Infof("pipe.stop; %s", fmtCtx(ctx))
 
 		done := false
 		batchItemSizeLimit := int64(u.batchRPCCfg.BytesLimit - u.uploadRequestBaseSize - u.uploadRequestItemBaseSize)
@@ -139,7 +140,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 					return
 				}
 				startTime := time.Now()
-				log.V(3).Infof("pipe.res; %s", fmtCtx(ctx, "digest", r.Digest, "missing", r.Missing, "err", r.Err))
+				infof(ctx, 3, "pipe.res", "digest", r.Digest, "missing", r.Missing, "err", r.Err)
 				reqs := digestReqs[r.Digest]
 				delete(digestReqs, r.Digest)
 				res := UploadResponse{Digest: r.Digest, Err: r.Err}
@@ -152,10 +153,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 					}
 				}
 
-				fctx := ctx
-				if log.V(3) {
-					fctx = ctxWithValues(ctx, ctxKeyRtID, strings.Join(res.tags, "|"), ctxKeySqID, strings.Join(res.reqs, "|"))
-				}
+				fctx := ctxWithValues(ctx, ctxKeyRtID, res.tags, ctxKeySqID, res.reqs)
 
 				if r.Err != nil || !r.Missing {
 					res.tags = make([]string, len(reqs))
@@ -167,18 +165,13 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 							u.releaseIOTokens()
 						}
 					}
-					if log.V(3) {
-						log.Infof("pipe.res.hit; %s", fmtCtx(fctx, "digest", r.Digest))
-					}
+					infof(fctx, 3, "pipe.res.hit", "digest", r.Digest)
 					u.dispatcherResCh <- res
-					// Covers waiting on the dispatcher.
 					logDuration(fctx, startTime, "query->res")
 					continue
 				}
 
-				if log.V(3) {
-					log.Infof("pipe.res.miss; %w", fmtCtx(fctx, "digest", r.Digest))
-				}
+				infof(fctx, 3, "pipe.res.miss", "digest", r.Digest)
 				for _, req := range reqs {
 					if req.Digest.Size <= batchItemSizeLimit {
 						u.batcherCh <- req
@@ -204,9 +197,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		for r := range u.dispatcherResCh {
 			startTime := time.Now()
 			fctx := ctxWithValues(ctx, ctxKeyRtID, strings.Join(r.tags, "|"), ctxKeySqID, strings.Join(r.reqs, "|"))
-			if log.V(3) {
-				log.Infof("res; %s", fmtCtx(fctx, "digest", r.Digest, "cache_hit", r.Stats.CacheHitCount, "end_of_walk", r.endOfWalk, "err", r.Err))
-			}
+			infof(fctx, 3, "res", "digest", r.Digest, "tags", len(r.tags), "cache_hit", r.Stats.CacheHitCount, "end_of_walk", r.endOfWalk, "err", r.Err)
 			// If multiple requesters are interested in this response, ensure stats are not double-counted.
 			if len(r.tags) == 1 {
 				u.uploadPubSub.pub(ctx, r, r.tags[0])
@@ -215,7 +206,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				rCached.Stats = r.Stats.ToCacheHit()
 				u.uploadPubSub.mpub(ctx, r, rCached, r.tags...)
 			}
-			logDuration(fctx, startTime, "res->pub")
+			logDuration(fctx, startTime, "res->pub", "count", len(r.tags))
 
 			// Special case: do not decrement if it's an end of walk response.
 			if !r.endOfWalk {
@@ -223,7 +214,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				for _, t := range r.tags {
 					counterCh <- tagCount{t, -1}
 				}
-				logDuration(fctx, startTime, "res->counter.dec")
+				logDuration(fctx, startTime, "res->counter.dec", "count", len(r.tags))
 			}
 		}
 	}()
