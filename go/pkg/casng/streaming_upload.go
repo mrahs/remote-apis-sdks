@@ -68,11 +68,11 @@ type UploadRequest struct {
 	reader io.ReadSeekCloser
 	// ctx is the requester's context which is used to extract metadata from and abort in-flight tasks for this request.
 	ctx context.Context
-	// tag identifies the requester of this request.
-	tag string
-	// done is used internally to signal that no further requests are expected for the associated tag.
+	// route identifies the requester of this request.
+	route string
+	// done is used internally to signal that no further requests are expected for the associated route.
 	// This allows the processor to notify the client once all buffered requests are processed.
-	// Once a tag is associated with done=true, sending subsequent requests for that tag might cause races.
+	// Once a route is associated with done=true, sending subsequent requests for that route might cause races.
 	done bool
 	// digsetOnly indicates that this request is for digestion only.
 	digestOnly bool
@@ -94,18 +94,18 @@ type UploadResponse struct {
 
 	// reqs is used internally to identify the requests that are related to this response.
 	reqs []string
-	// tags is used internally to identify the clients that are interested in this response.
-	tags []string
-	// done is used internally to signal that this is the last response for the associated tags.
+	// routes is used internally to identify the clients that are interested in this response.
+	routes []string
+	// done is used internally to signal that this is the last response for the associated routes.
 	done bool
-	// endofWalk is used internally to signal that this response includes stats only for the associated tags.
+	// endofWalk is used internally to signal that this response includes stats only for the associated routes.
 	endOfWalk bool
 }
 
 // uploadRequestBundleItem is a tuple of an upload request and a list of clients interested in the response.
 type uploadRequestBundleItem struct {
 	req  *repb.BatchUpdateBlobsRequest_Request
-	tags []string
+	routes []string
 	reqs []string
 }
 
@@ -153,8 +153,8 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 
 	// Register a new requester with the internal processor.
 	// This broker should not remove the subscription until the sender tells it to.
-	tag, resChan := u.uploadPubSub.sub(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.stream_pipe", ctxKeyRtID, tag)
+	route, resChan := u.uploadPubSub.sub(ctx)
+	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.stream_pipe", ctxKeyRtID, route)
 
 	// Forward the requests to the internal processor.
 	u.uploadSenderWg.Add(1)
@@ -163,14 +163,14 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 		defer infof(ctx, 1, "sender.stop")
 		defer u.uploadSenderWg.Done()
 		for r := range in {
-			r.tag = tag
+			r.route = route
 			r.ctx = ctx
 			r.id = uuid.New()
 			infof(ctxWithValues(ctx, ctxKeySqID, r.id), 3, "req", "path", r.Path, "bytes", len(r.Bytes))
 			u.digesterCh <- r
 		}
 		// Let the processor know that no further requests are expected.
-		u.digesterCh <- UploadRequest{tag: tag, done: true}
+		u.digesterCh <- UploadRequest{route: route, done: true}
 	}()
 
 	// Receive responses from the internal processor.
@@ -184,7 +184,7 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 		for rawR := range resChan {
 			r := rawR.(UploadResponse)
 			if r.done {
-				u.uploadPubSub.unsub(ctx, tag)
+				u.uploadPubSub.unsub(ctx, route)
 				continue
 			}
 			ch <- r
@@ -221,7 +221,7 @@ func (u *uploader) batcher(ctx context.Context) {
 					Digest: d,
 					Stats:  Stats{BytesRequested: d.Size},
 					Err:    context.Canceled,
-					tags:   item.tags,
+					routes:   item.routes,
 					reqs:   item.reqs,
 				}
 			}
@@ -252,17 +252,17 @@ func (u *uploader) batcher(ctx context.Context) {
 			if !ok {
 				return
 			}
-			fctx := ctxWithValues(ctx, ctxKeyRtID, req.tag, ctxKeySqID, req.id)
+			fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
 			log.V(3).Infof("req; %s", fmtCtx(fctx, "digest", req.Digest))
 
 			// Unify.
 			item, ok := bundle[req.Digest]
 			if ok {
-				// Duplicate tags are allowed to ensure the requester can match the number of responses to the number of requests.
-				item.tags = append(item.tags, req.tag)
+				// Duplicate routes are allowed to ensure the requester can match the number of responses to the number of requests.
+				item.routes = append(item.routes, req.route)
 				item.reqs = append(item.reqs, req.id)
 				bundle[req.Digest] = item
-				log.V(3).Infof("unified; %s", fmtCtx(fctx, "digest", req.Digest, "bundle", len(item.tags)))
+				log.V(3).Infof("unified; %s", fmtCtx(fctx, "digest", req.Digest, "bundle", len(item.routes)))
 				continue
 			}
 
@@ -278,7 +278,7 @@ func (u *uploader) batcher(ctx context.Context) {
 							u.dispatcherResCh <- UploadResponse{
 								Digest: req.Digest,
 								Err:    err,
-								tags:   []string{req.tag},
+								routes:   []string{req.route},
 								reqs:   []string{req.id},
 							}
 							return
@@ -325,7 +325,7 @@ func (u *uploader) batcher(ctx context.Context) {
 				handle()
 			}
 
-			item.tags = append(item.tags, req.tag)
+			item.routes = append(item.routes, req.route)
 			item.req = &repb.BatchUpdateBlobsRequest_Request{
 				Digest: req.Digest.ToProto(),
 				Data:   req.Bytes, // TODO: add compression support as in https://github.com/bazelbuild/remote-apis-sdks/pull/443/files
@@ -410,11 +410,11 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		u.dispatcherResCh <- UploadResponse{
 			Digest: d,
 			Stats:  s,
-			tags:   bundle[d].tags,
+			routes:   bundle[d].routes,
 			reqs:   bundle[d].reqs,
 		}
 		if log.V(3) {
-			fctx := ctxWithValues(ctx, ctxKeySqID, strings.Join(bundle[d].reqs, "|"), ctxKeyRtID, strings.Join(bundle[d].tags, "|"))
+			fctx := ctxWithValues(ctx, ctxKeySqID, strings.Join(bundle[d].reqs, "|"), ctxKeyRtID, strings.Join(bundle[d].routes, "|"))
 			log.Infof("res.uploaded; %s", fmtCtx(fctx, "digest", d))
 		}
 		delete(bundle, d)
@@ -436,11 +436,11 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			Digest: d,
 			Stats:  s,
 			Err:    errors.Join(ErrGRPC, dErr),
-			tags:   bundle[d].tags,
+			routes:   bundle[d].routes,
 			reqs:   bundle[d].reqs,
 		}
 		if log.V(3) {
-			fctx := ctxWithValues(ctx, ctxKeySqID, strings.Join(bundle[d].reqs, "|"), ctxKeyRtID, strings.Join(bundle[d].tags, "|"))
+			fctx := ctxWithValues(ctx, ctxKeySqID, strings.Join(bundle[d].reqs, "|"), ctxKeyRtID, strings.Join(bundle[d].routes, "|"))
 			log.Infof("res.failed; %s", fmtCtx(fctx, "digest", d))
 		}
 		delete(bundle, d)
@@ -471,11 +471,11 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			Digest: d,
 			Stats:  s,
 			Err:    err,
-			tags:   item.tags,
+			routes:   item.routes,
 			reqs:   item.reqs,
 		}
 		if log.V(3) {
-			fctx := ctxWithValues(ctx, ctxKeySqID, strings.Join(bundle[d].reqs, "|"), ctxKeyRtID, strings.Join(bundle[d].tags, "|"))
+			fctx := ctxWithValues(ctx, ctxKeySqID, strings.Join(bundle[d].reqs, "|"), ctxKeyRtID, strings.Join(bundle[d].routes, "|"))
 			log.Infof("res.failed.call; %s", fmtCtx(fctx, "digest", d))
 		}
 	}
@@ -493,7 +493,7 @@ func (u *uploader) streamer(ctx context.Context) {
 	defer log.V(1).Infof("stop; %s", fmtCtx(ctx))
 
 	// Unify duplicate requests.
-	digestTags := make(map[digest.Digest][]string)
+	digestRoutes := make(map[digest.Digest][]string)
 	digestReqs := make(map[digest.Digest][]string)
 	streamResCh := make(chan UploadResponse)
 	pending := 0
@@ -506,16 +506,16 @@ func (u *uploader) streamer(ctx context.Context) {
 				return
 			}
 			shouldReleaseIOTokens := req.reader != nil
-			fctx := ctxWithValues(ctx, ctxKeySqID, req.id, ctxKeyRtID, req.tag)
+			fctx := ctxWithValues(ctx, ctxKeySqID, req.id, ctxKeyRtID, req.route)
 			log.V(3).Infof("req; %s", fmtCtx(fctx, "digest", req.Digest, "large", shouldReleaseIOTokens, "pending", pending))
 
 			digestReqs[req.Digest] = append(digestReqs[req.Digest], req.id)
-			tags := digestTags[req.Digest]
-			tags = append(tags, req.tag)
-			digestTags[req.Digest] = tags
-			if len(tags) > 1 {
+			routes := digestRoutes[req.Digest]
+			routes = append(routes, req.route)
+			digestRoutes[req.Digest] = routes
+			if len(routes) > 1 {
 				// Already in-flight. Release duplicate resources if it's a large file.
-				log.V(3).Infof("unified; %s", fmtCtx(fctx, "digest", req.Digest, "bundle", len(tags)))
+				log.V(3).Infof("unified; %s", fmtCtx(fctx, "digest", req.Digest, "bundle", len(routes)))
 				if shouldReleaseIOTokens {
 					u.releaseIOTokens()
 				}
@@ -557,14 +557,14 @@ func (u *uploader) streamer(ctx context.Context) {
 			}(req)
 		case r := <-streamResCh:
 			startTime := time.Now()
-			r.tags = digestTags[r.Digest]
-			delete(digestTags, r.Digest)
+			r.routes = digestRoutes[r.Digest]
+			delete(digestRoutes, r.Digest)
 			r.reqs = digestReqs[r.Digest]
 			delete(digestReqs, r.Digest)
 			u.dispatcherResCh <- r
 			pending--
 			if log.V(3) {
-				fctx := ctxWithValues(ctx, ctxKeySqID, strings.Join(r.reqs, "|"), ctxKeyRtID, strings.Join(r.tags, "|"))
+				fctx := ctxWithValues(ctx, ctxKeySqID, strings.Join(r.reqs, "|"), ctxKeyRtID, strings.Join(r.routes, "|"))
 				log.Infof("res; %s", fmtCtx(fctx, "digest", r.Digest, "pending", pending))
 			}
 			logDuration(ctx, startTime, "stream->dispatcher.res")

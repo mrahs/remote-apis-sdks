@@ -13,19 +13,19 @@ import (
 type pubsub struct {
 	subs map[string]chan any
 	mu   sync.RWMutex
-	// A signalling channel that gets a message every time the broker hits 0 subscriptions.
+	// A signalling channel that gets closed every time the broker hits 0 subscriptions.
 	// Unlike sync.WaitGroup, this allows the broker to accept more subs while a client is waiting for signal.
 	done chan struct{}
 }
 
-// sub returns a routing tag and a channel to the subscriber to read messages from.
+// sub returns a routing id and a channel to the subscriber to read messages from.
 //
-// Only messages associated with the returned tag are sent on the returned channel.
+// Only messages associated with the returned route are sent on the returned channel.
 // This allows the subscriber to send a tagged message (request) that propagates across the system and eventually
 // receive related messages (responses) from publishers on the returned channel.
 //
 // The subscriber must continue draining the returned channel until it's closed.
-// The returned channel is unbuffered and closed only when unsub is called with the returned tag.
+// The returned channel is unbuffered and closed only when unsub is called with the returned route.
 //
 // To properly terminate the subscription, the subscriber must wait until all expected responses are received
 // on the returned channel before unsubscribing.
@@ -37,19 +37,19 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 	if len(ps.subs) == 0 {
 		ps.done = make(chan struct{})
 	}
-	tag := uuid.New()
+	route := uuid.New()
 	subscriber := make(chan any)
-	ps.subs[tag] = subscriber
+	ps.subs[route] = subscriber
 
-	infof(ctxWithValues(ctx, ctxKeyModule, "pubsub", ctxKeyRtID, tag), 3, "sub")
-	return tag, subscriber
+	infof(ctxWithValues(ctx, ctxKeyModule, "pubsub", ctxKeyRtID, route), 3, "sub")
+	return route, subscriber
 }
 
 // unsub schedules the subscription to be removed as soon as in-flight pubs are done.
 // The subscriber must continue draining the channel until it's closed.
-// It is an error to publish more messages for tag after this call.
-func (ps *pubsub) unsub(ctx context.Context, tag string) {
-	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub", ctxKeyRtID, tag)
+// It is an error to publish more messages for route after this call.
+func (ps *pubsub) unsub(ctx context.Context, route string) {
+	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub", ctxKeyRtID, route)
 	infof(ctx, 3, "unsub.scheduled")
 	// If unsub is called from the same goroutine that is listening on the subscription
 	// channel, a deadlock might occur.
@@ -61,11 +61,11 @@ func (ps *pubsub) unsub(ctx context.Context, tag string) {
 	go func() {
 		ps.mu.Lock()
 		defer ps.mu.Unlock()
-		subscriber, ok := ps.subs[tag]
+		subscriber, ok := ps.subs[route]
 		if !ok {
 			return
 		}
-		delete(ps.subs, tag)
+		delete(ps.subs, route)
 		close(subscriber)
 		if len(ps.subs) == 0 {
 			close(ps.done)
@@ -75,7 +75,7 @@ func (ps *pubsub) unsub(ctx context.Context, tag string) {
 	}()
 }
 
-// pub is a blocking call that fans-out a response to all specified (by tag) subscribers concurrently.
+// pub is a blocking call that fans-out a response to all specified (by route) subscribers concurrently.
 //
 // Returns when all active subscribers have received their copies or timed out.
 // Inactive subscribers (expired by cancelling their context) are skipped (their copies are dropped).
@@ -87,46 +87,46 @@ func (ps *pubsub) unsub(ctx context.Context, tag string) {
 // Blocking 10ms for every subscriber amortizes much better than blocking 10ms for every
 // iteration on the subscribers, even though both have the same worst-case cost.
 // For example, if out of 10 subscribers 5 were busy for 1ms, the attempt will cost ~5ms instead of 10ms.
-func (ps *pubsub) pub(ctx context.Context, m any, tags ...string) {
+func (ps *pubsub) pub(ctx context.Context, m any, routes ...string) {
 	// TODO: experiental async pub to see if it helps with congestion.
 	// go func(){
 		ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub")
-		_ = ps.pubN(ctx, m, len(tags), tags...)
+		_ = ps.pubN(ctx, m, len(routes), routes...)
 	// }()
 }
 
 // mpub (multi-publish) delivers the "once" message to a single subscriber then delivers the "rest" message to the rest of the subscribers.
 // It's useful for cases where the message holds shared information that should not be duplicated among subscribers, such as stats.
-func (ps *pubsub) mpub(ctx context.Context, once any, rest any, tags ...string) {
+func (ps *pubsub) mpub(ctx context.Context, once any, rest any, routes ...string) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub")
-	t := ps.pubOnce(ctx, once, tags...)
+	t := ps.pubOnce(ctx, once, routes...)
 	// TODO: experiental async pub to see if it helps with congestion.
 	// go func(){
-		_ = ps.pubN(ctx, rest, len(tags)-1, excludeTag(tags, t)...)
+		_ = ps.pubN(ctx, rest, len(routes)-1, excludeRoute(routes, t)...)
 	// }()
 }
 
 // pubOnce is like pub, but delivers the message to a single subscriber.
-// The tag of the subscriber that got the message is returned.
-func (ps *pubsub) pubOnce(ctx context.Context, m any, tags ...string) string {
-	received := ps.pubN(ctx, m, 1, tags...)
+// The route of the subscriber that got the message is returned.
+func (ps *pubsub) pubOnce(ctx context.Context, m any, routes ...string) string {
+	received := ps.pubN(ctx, m, 1, routes...)
 	if len(received) == 0 {
 		return ""
 	}
 	return received[0]
 }
 
-// pubN is like pub, but delivers the message to no more than n subscribers. The tags of the subscribers that got the message are returned.
-func (ps *pubsub) pubN(ctx context.Context, m any, n int, tags ...string) []string {
+// pubN is like pub, but delivers the message to no more than n subscribers. The routes of the subscribers that got the message are returned.
+func (ps *pubsub) pubN(ctx context.Context, m any, n int, routes ...string) []string {
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
 			log.Infof("duration.pub; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
 		}()
 	}
-	if len(tags) == 0 {
-		log.Warningf("called without tags, dropping message; %s", fmtCtx(ctx))
-		log.V(4).Infof("called without tags for msg=%v; %s", m, fmtCtx(ctx))
+	if len(routes) == 0 {
+		log.Warningf("called without routes, dropping message; %s", fmtCtx(ctx))
+		log.V(4).Infof("called without routes for msg=%v; %s", m, fmtCtx(ctx))
 		return nil
 	}
 	if n <= 0 {
@@ -146,7 +146,7 @@ func (ps *pubsub) pubN(ctx context.Context, m any, n int, tags ...string) []stri
 
 	retryCount := 0
 	for {
-		for _, t := range tags {
+		for _, t := range routes {
 			subscriber, ok := ps.subs[t]
 			fctx := ctxWithValues(ctx, ctxKeyRtID, t)
 			if !ok {
@@ -171,9 +171,9 @@ func (ps *pubsub) pubN(ctx context.Context, m any, n int, tags ...string) []stri
 		retryCount++
 		infof(ctxWithValues(ctx, ctxKeyRtID, toRetry), 3, "retry", "#", retryCount, "count", len(toRetry))
 
-		// Avoid mutating tags because it's expected to remain the same set upstream.
+		// Avoid mutating routes because it's expected to remain the same set upstream.
 		// Reslicing toRetry allows shifting retries to the left without without reallocating a new array.
-		tags = toRetry
+		routes = toRetry
 		toRetry = toRetry[:0]
 	}
 	return received
@@ -205,25 +205,25 @@ func newPubSub() *pubsub {
 	}
 }
 
-// excludeTag is used by mpub to filter out the tag that received the "once" message.
-func excludeTag(tags []string, et string) []string {
-	if len(tags) == 0 {
+// excludeRoute is used by mpub to filter out the route that received the "once" message.
+func excludeRoute(routes []string, et string) []string {
+	if len(routes) == 0 {
 		return []string{}
 	}
 	// Remove by swapping the item with the last one and then excluding the last index.
 	// This approach avoids allocating a new underlying array without losing any items
 	// in the original unsorted array.
 	i := -1
-	for index, t := range tags {
+	for index, t := range routes {
 		if t == et {
 			i = index
 			break
 		}
 	}
 	if i < 0 {
-		return tags
+		return routes
 	}
-	j := len(tags) - 1
-	tags[i], tags[j] = tags[j], tags[i]
-	return tags[:j]
+	j := len(routes) - 1
+	routes[i], routes[j] = routes[j], routes[i]
+	return routes[:j]
 }

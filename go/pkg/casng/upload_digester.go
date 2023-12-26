@@ -73,12 +73,12 @@ func (u *uploader) digester(ctx context.Context) {
 
 	requesterWalkWg := make(map[string]*sync.WaitGroup)
 	for req := range u.digesterCh {
-		fctx := ctxWithValues(ctx, ctxKeyRtID, req.tag, ctxKeySqID, req.id)
+		fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
 		// If the requester will not be sending any further requests, wait for in-flight walks from previous requests
 		// then tell the dispatcher to forward the signal once all dispatched blobs are done.
 		if req.done {
 			log.V(2).Infof("req.done; %s", fmtCtx(fctx))
-			wg := requesterWalkWg[req.tag]
+			wg := requesterWalkWg[req.route]
 			if wg == nil {
 				log.V(2).Infof("req.done, no more pending walks; %s", fmtCtx(fctx))
 				startTime := time.Now()
@@ -89,16 +89,16 @@ func (u *uploader) digester(ctx context.Context) {
 			}
 			// Remove the wg to ensure a new one is used if the requester decides to send more requests.
 			// Otherwise, races on the wg might happen.
-			requesterWalkWg[req.tag] = nil
+			requesterWalkWg[req.route] = nil
 			u.workerWg.Add(1)
 			// Wait for the walkers to finish dispatching blobs then tell the dispatcher that no further blobs are expected from this requester.
-			go func(tag string) {
+			go func(route string) {
 				defer u.workerWg.Done()
 				log.V(2).Infof("walk.wait.start; %s", fmtCtx(fctx))
 				wg.Wait()
 				log.V(2).Infof("walk.wait.done; %s", fmtCtx(fctx))
-				u.dispatcherReqCh <- UploadRequest{tag: tag, done: true}
-			}(req.tag)
+				u.dispatcherReqCh <- UploadRequest{route: route, done: true}
+			}(req.route)
 			continue
 		}
 
@@ -140,10 +140,10 @@ func (u *uploader) digester(ctx context.Context) {
 			continue
 		}
 		logDuration(fctx, startTime, "sem.walk")
-		wg := requesterWalkWg[req.tag]
+		wg := requesterWalkWg[req.route]
 		if wg == nil {
 			wg = &sync.WaitGroup{}
-			requesterWalkWg[req.tag] = wg
+			requesterWalkWg[req.route] = wg
 		}
 		wg.Add(1)
 		u.walkerWg.Add(1)
@@ -226,8 +226,8 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			switch node := node.(type) {
 			case *repb.FileNode:
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{Path: realPath, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
-				logDuration(ctx, startTime, "dispatcher.req.digested.file", "path", req.Path, "real_path", realPath)
+				u.dispatcherReqCh <- UploadRequest{Path: realPath, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, route: req.route, ctx: req.ctx, digestOnly: req.digestOnly}
+				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
 			case *repb.DirectoryNode:
 				// The blob of the directory node is the bytes of a repb.Directory message.
 				// Generate and forward it. If it was uploaded before, it'll be reported as a cache hit.
@@ -238,8 +238,8 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					return walker.SkipPath, false
 				}
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
-				logDuration(ctx, startTime, "dispatcher.req.digested.dir", "path", req.Path, "real_path", realPath)
+				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, route: req.route, ctx: req.ctx, digestOnly: req.digestOnly}
+				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
 			default:
@@ -293,10 +293,10 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				}
 				u.dirChildren.append(parentKey, node)
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
+				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, route: req.route, ctx: req.ctx, digestOnly: req.digestOnly}
 				u.nodeCache.Store(key, node)
 				log.V(3).Infof("visit.post.dir; %s", fmtCtx(ctx, "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude))
-				logDuration(ctx, startTime, "dispatcher.req.dir", "path", req.Path, "real_path", realPath)
+				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
 				return true
 
 			case info.Mode().IsRegular():
@@ -316,9 +316,9 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					return true
 				}
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{Bytes: blb.b, reader: blb.r, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
+				u.dispatcherReqCh <- UploadRequest{Bytes: blb.b, reader: blb.r, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, route: req.route, ctx: req.ctx, digestOnly: req.digestOnly}
 				log.V(3).Infof("visit.post.file; %s", fmtCtx(ctx, "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude))
-				logDuration(ctx, startTime, "dispatcher.req.file", "path", req.Path, "real_path", realPath)
+				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
 				return true
 
 			default:
@@ -382,7 +382,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 	startTime := time.Now()
 	// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
 	// err includes any IO errors that happened during the walk.
-	u.dispatcherResCh <- UploadResponse{endOfWalk: true, tags: []string{req.tag}, reqs: []string{req.id}, Stats: stats, Err: err}
+	u.dispatcherResCh <- UploadResponse{endOfWalk: true, routes: []string{req.route}, reqs: []string{req.id}, Stats: stats, Err: err}
 	logDuration(ctx, startTime, "dispatcher.res", "path", req.Path)
 }
 

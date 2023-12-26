@@ -23,10 +23,10 @@ package casng
 // Many clients send to one processor, which sends to many workers; each worker sends to many clients.
 //
 // Each client is provided with a channel they send their requests on. The handler of that channel, marks each request
-// with a unique tag and forwards it to the processor.
+// with a unique route id and forwards it to the processor.
 //
-// The processor receives multiple requests, each potentially with a different tag.
-// Each worker receives a bundle of requests that may contain multiple tags.
+// The processor receives multiple requests, each potentially with a different route.
+// Each worker receives a bundle of requests that may contain multiple routes.
 //
 // To facilitate the routing between workers and clients, a simple pubsub implementation is used.
 // Each instance, a broker, manages routing messages between multiple subscribers (clients) and multiple publishers (workers).
@@ -64,7 +64,7 @@ type MissingBlobsResponse struct {
 type missingBlobRequest struct {
 	digest digest.Digest
 	id     string
-	tag    string
+	route    string
 	ctx    context.Context
 }
 
@@ -118,7 +118,7 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 
 	ctx = ctxWithRqID(ctx)
 
-	tag, resCh := u.queryPubSub.sub(ctx)
+	route, resCh := u.queryPubSub.sub(ctx)
 	pendingCh := make(chan int)
 
 	// Sender. It terminates when in is closed, at which point it sends 0 as a termination signal to the counter.
@@ -130,7 +130,7 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 		defer log.V(1).Info("sender.stop; %s", fmtCtx(ctx))
 
 		for r := range in {
-			r.tag = tag
+			r.route = route
 			u.queryCh <- r
 			pendingCh <- 1
 		}
@@ -162,7 +162,7 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 	u.workerWg.Add(1)
 	go func() {
 		defer u.workerWg.Done()
-		defer u.queryPubSub.unsub(ctx, tag)
+		defer u.queryPubSub.unsub(ctx, route)
 
 		infof(ctx, 1, "counter.start")
 		defer infof(ctx, 1, "counter.stop")
@@ -184,7 +184,7 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 	return ch
 }
 
-// digestStrings is used to bundle up (unify) concurrent requests for the same digest from different requesters (tags).
+// digestStrings is used to bundle up (unify) concurrent requests for the same digest from different requesters (routes).
 // It's also used to associate digests with request IDs for loggging purposes.
 type digestStrings map[digest.Digest][]string
 
@@ -241,7 +241,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			}
 			startTime := time.Now()
 
-			ctx = ctxWithValues(ctx, ctxKeyRtID, req.tag, ctxKeySqID, req.id)
+			ctx = ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
 			log.V(3).Infof("req; %s", fmtCtx(ctx, "digest", req.digest, "bundle", len(bundle)))
 			dSize := proto.Size(req.digest.ToProto())
 
@@ -250,9 +250,9 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 				u.queryPubSub.pub(ctx, MissingBlobsResponse{
 					Digest: req.digest,
 					Err:    ErrOversizedItem,
-				}, req.tag)
+				}, req.route)
 				// Covers waiting on subscribers.
-				logDuration(ctx, startTime, "pub.oversized")
+				logDuration(ctx, startTime, "pub")
 				continue
 			}
 
@@ -262,8 +262,8 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 				handle()
 			}
 
-			// Duplicate tags are allowed to ensure the requester can match the number of responses to the number of requests.
-			bundle[req.digest] = append(bundle[req.digest], req.tag)
+			// Duplicate routes are allowed to ensure the requester can match the number of responses to the number of requests.
+			bundle[req.digest] = append(bundle[req.digest], req.route)
 			bundleSize += dSize
 			bundleCtx, _ = contextmd.FromContexts(bundleCtx, req.ctx) // ignore non-essential error.
 
@@ -285,10 +285,10 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 }
 
 // callMissingBlobs calls the gRPC endpoint and notifies requesters of the results.
-// It assumes ownership of its arguments. digestTags is the primary one. digestReqs is used for logging purposes.
-func (u *uploader) callMissingBlobs(ctx context.Context, digestTags, digestReqs digestStrings) {
-	digests := make([]*repb.Digest, 0, len(digestTags))
-	for d := range digestTags {
+// It assumes ownership of its arguments. digestRoutes is the primary one. digestReqs is used for logging purposes.
+func (u *uploader) callMissingBlobs(ctx context.Context, digestRoutes, digestReqs digestStrings) {
+	digests := make([]*repb.Digest, 0, len(digestRoutes))
+	for d := range digestRoutes {
 		digests = append(digests, d.ToProto())
 	}
 
@@ -325,16 +325,16 @@ func (u *uploader) callMissingBlobs(ctx context.Context, digestTags, digestReqs 
 			Digest:  d,
 			Missing: err == nil,
 			Err:     err,
-		}, digestTags[d]...)
-		delete(digestTags, d)
+		}, digestRoutes[d]...)
+		delete(digestRoutes, d)
 	}
 
 	// Report non-missing.
-	for d := range digestTags {
+	for d := range digestRoutes {
 		u.queryPubSub.pub(ctx, MissingBlobsResponse{
 			Digest:  d,
 			Missing: false,
-		}, digestTags[d]...)
+		}, digestRoutes[d]...)
 	}
-	logDuration(ctx, startTime, "pub.done")
+	logDuration(ctx, startTime, "pub")
 }

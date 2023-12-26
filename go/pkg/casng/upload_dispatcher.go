@@ -10,9 +10,9 @@ import (
 	log "github.com/golang/glog"
 )
 
-// tagCount is a tuple used by the dispatcher to track the number of in-flight requests for each requester.
+// routeCount is a tuple used by the dispatcher to track the number of in-flight requests for each requester.
 // A request is in-flight if it has been dispatched, but no corresponding response has been received for it yet.
-type tagCount struct {
+type routeCount struct {
 	t string
 	c int
 }
@@ -31,7 +31,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 	}()
 
 	// Maintain a count of in-flight uploads per requester.
-	counterCh := make(chan tagCount)
+	counterCh := make(chan routeCount)
 	// Wait until all requests have been fully dispatched before terminating.
 	wg := sync.WaitGroup{}
 
@@ -48,13 +48,13 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		defer infof(ctx, 1, "sender.stop")
 
 		for req := range u.dispatcherReqCh {
-			fctx := ctxWithValues(ctx, ctxKeyRtID, req.tag, ctxKeySqID, req.id)
+			fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
 			if req.done { // The digester will not be sending any further blobs.
 				log.V(3).Infof("req.done; %s", fmtCtx(fctx))
 				startTime := time.Now()
-				counterCh <- tagCount{req.tag, 0}
+				counterCh <- routeCount{req.route, 0}
 				logDuration(fctx, startTime, "req->counter.done")
-				if req.tag == "" { // In fact, the digester (and all requesters) have terminated.
+				if req.route == "" { // In fact, the digester (and all requesters) have terminated.
 					return
 				}
 				continue
@@ -66,11 +66,11 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			log.V(3).Infof("req; %s", fmtCtx(fctx, "digest", req.Digest, "bytes", len(req.Bytes)))
 			startTime := time.Now()
 			// Count before sending the request to avoid an edge case where the response makes it to the counter before the increment here.
-			counterCh <- tagCount{req.tag, 1}
+			counterCh <- routeCount{req.route, 1}
 			logDuration(fctx, startTime, "req->counter.inc")
 			if req.digestOnly {
 				startTime := time.Now()
-				u.dispatcherResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{}, tags: []string{req.tag}, reqs: []string{req.id}}
+				u.dispatcherResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{}, routes: []string{req.route}, reqs: []string{req.id}}
 				logDuration(fctx, startTime, "req->res")
 				continue
 			}
@@ -92,7 +92,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		done := false
 		batchItemSizeLimit := int64(u.batchRPCCfg.BytesLimit - u.uploadRequestBaseSize - u.uploadRequestItemBaseSize)
 		// Keep track of blobs that are associated with a digest since the query API only accepts digests.
-		// Each blob may have a different tag and context so all must be dispathced.
+		// Each blob may have a different route and context so all must be dispathced.
 		digestReqs := make(map[digest.Digest][]UploadRequest)
 
 		// BUG: this loop forms a circular path
@@ -103,7 +103,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			// The dispatcher sends blobs on this channel, but never closes it.
 			case req := <-u.dispatcherPipeCh:
 				startTime := time.Now()
-				fctx := ctxWithValues(ctx, ctxKeyRtID, req.tag, ctxKeySqID, req.id)
+				fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
 				// In the off chance that a request is received after a done signal, ignore it to avoid sending on a closed channel.
 				if done {
 					log.Errorf("ignoring a request after a done signal; %s", fmtCtx(fctx))
@@ -153,13 +153,13 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 					}
 				}
 
-				fctx := ctxWithValues(ctx, ctxKeyRtID, res.tags, ctxKeySqID, res.reqs)
+				fctx := ctxWithValues(ctx, ctxKeyRtID, res.routes, ctxKeySqID, res.reqs)
 
 				if r.Err != nil || !r.Missing {
-					res.tags = make([]string, len(reqs))
+					res.routes = make([]string, len(reqs))
 					res.reqs = make([]string, len(reqs))
 					for i, req := range reqs {
-						res.tags[i] = req.tag
+						res.routes[i] = req.route
 						res.reqs[i] = req.id
 						if req.reader != nil {
 							u.releaseIOTokens()
@@ -196,25 +196,25 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		// Messages delivered here are either went through the sender above (dispatched for upload), bypassed (digestion error), or piped back from the querier.
 		for r := range u.dispatcherResCh {
 			startTime := time.Now()
-			fctx := ctxWithValues(ctx, ctxKeyRtID, strings.Join(r.tags, "|"), ctxKeySqID, strings.Join(r.reqs, "|"))
-			infof(fctx, 3, "res", "digest", r.Digest, "tags", len(r.tags), "cache_hit", r.Stats.CacheHitCount, "end_of_walk", r.endOfWalk, "err", r.Err)
+			fctx := ctxWithValues(ctx, ctxKeyRtID, strings.Join(r.routes, "|"), ctxKeySqID, strings.Join(r.reqs, "|"))
+			infof(fctx, 3, "res", "digest", r.Digest, "routes", len(r.routes), "cache_hit", r.Stats.CacheHitCount, "end_of_walk", r.endOfWalk, "err", r.Err)
 			// If multiple requesters are interested in this response, ensure stats are not double-counted.
-			if len(r.tags) == 1 {
-				u.uploadPubSub.pub(ctx, r, r.tags[0])
+			if len(r.routes) == 1 {
+				u.uploadPubSub.pub(ctx, r, r.routes[0])
 			} else {
 				rCached := r
 				rCached.Stats = r.Stats.ToCacheHit()
-				u.uploadPubSub.mpub(ctx, r, rCached, r.tags...)
+				u.uploadPubSub.mpub(ctx, r, rCached, r.routes...)
 			}
-			logDuration(fctx, startTime, "res->pub", "count", len(r.tags))
+			logDuration(fctx, startTime, "res->pub", "count", len(r.routes))
 
 			// Special case: do not decrement if it's an end of walk response.
 			if !r.endOfWalk {
 				startTime := time.Now()
-				for _, t := range r.tags {
-					counterCh <- tagCount{t, -1}
+				for _, t := range r.routes {
+					counterCh <- routeCount{t, -1}
 				}
-				logDuration(fctx, startTime, "res->counter.dec", "count", len(r.tags))
+				logDuration(fctx, startTime, "res->counter.dec", "count", len(r.routes))
 			}
 		}
 	}()
@@ -228,38 +228,38 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		defer log.V(1).Info("counter.stop; %s", fmtCtx(ctx))
 		defer close(u.dispatcherResCh) // Let the receiver know we're done.
 
-		tagReqCount := make(map[string]int)
-		tagDone := make(map[string]bool)
+		routeReqCount := make(map[string]int)
+		routeDone := make(map[string]bool)
 		allDone := false
 		for tc := range counterCh {
 			fctx := ctxWithValues(ctx, ctxKeyRtID, tc.t)
 			if tc.c == 0 { // There will be no more blobs from this requester.
 				log.V(3).Infof("counter.done.in; %s", fmtCtx(fctx))
 				if tc.t == "" { // In fact, no more blobs for any requester.
-					if len(tagReqCount) == 0 { // All counting is done.
+					if len(routeReqCount) == 0 { // All counting is done.
 						return
 					}
 					// Remember to return once all counting is done.
 					allDone = true
 					continue
 				}
-				tagDone[tc.t] = true
+				routeDone[tc.t] = true
 			}
-			tagReqCount[tc.t] += tc.c
-			if tagReqCount[tc.t] < 0 {
-				log.Errorf("counter.negative; %s", fmtCtx(fctx, "inc", tc.c, "count", tagReqCount[tc.t], "done", tagDone[tc.t]))
+			routeReqCount[tc.t] += tc.c
+			if routeReqCount[tc.t] < 0 {
+				log.Errorf("counter.negative; %s", fmtCtx(fctx, "inc", tc.c, "count", routeReqCount[tc.t], "done", routeDone[tc.t]))
 			}
-			log.V(3).Infof("counter.count; %s", fmtCtx(fctx, "inc", tc.c, "count", tagReqCount[tc.t], "done", tagDone[tc.t], "pending_tags", len(tagReqCount)))
-			if tagReqCount[tc.t] <= 0 && tagDone[tc.t] {
+			log.V(3).Infof("counter.count; %s", fmtCtx(fctx, "inc", tc.c, "count", routeReqCount[tc.t], "done", routeDone[tc.t], "pending_routes", len(routeReqCount)))
+			if routeReqCount[tc.t] <= 0 && routeDone[tc.t] {
 				log.V(2).Infof("counter.done.to; %s", fmtCtx(fctx))
-				delete(tagDone, tc.t)
-				delete(tagReqCount, tc.t)
+				delete(routeDone, tc.t)
+				delete(routeReqCount, tc.t)
 				startTime := time.Now()
 				// Signal to the requester that all of its requests are done.
 				u.uploadPubSub.pub(ctx, UploadResponse{done: true}, tc.t)
 				logDuration(fctx, startTime, "coutner->pub")
 			}
-			if len(tagReqCount) == 0 && allDone {
+			if len(routeReqCount) == 0 && allDone {
 				return
 			}
 		}
