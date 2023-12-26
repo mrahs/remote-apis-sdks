@@ -224,6 +224,9 @@ func (c *Client) Close() error {
 	if c.CASConnection != c.Connection {
 		return c.CASConnection.Close()
 	}
+	if c.ngCasUploader != nil {
+		<-c.ngCasUploader.Done()
+	}
 	return nil
 }
 

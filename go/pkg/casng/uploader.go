@@ -436,6 +436,11 @@ func (u *uploader) close(ctx context.Context) {
 	logDuration(ctx, startTime, "close")
 }
 
+// Done returns a channel that is closed when the the uploader is done.
+func (u *uploader) Done() chan struct{} {
+	return u.logBeatDoneCh
+}
+
 func (u *uploader) logBeat(ctx context.Context) {
 	var interval time.Duration
 	if log.V(3) {
