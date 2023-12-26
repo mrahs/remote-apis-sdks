@@ -16,23 +16,23 @@ type ctxKey struct {
 
 var (
 	// Context key for invocation ID.
-	CtxKeyInvID = ctxKey{ key: "invid" }
+	CtxKeyInvID = &ctxKey{ key: "invid" }
 	// Context key for command ID.
-	CtxKeyCmdID  = ctxKey{ key: "cmdid" }
+	CtxKeyCmdID  = &ctxKey{ key: "cmdid" }
 	// Context key for request ID
-	CtxKeyRqID = ctxKey{ key: "rqid" }
+	CtxKeyRqID = &ctxKey{ key: "rqid" }
 	// Context key for route ID.
-	ctxKeyRtID = ctxKey{ key: "rtid" }
+	ctxKeyRtID = &ctxKey{ key: "rtid" }
 	// Context key sub-request ID.
-	ctxKeySqID = ctxKey{ key: "sqid" }
+	ctxKeySqID = &ctxKey{ key: "sqid" }
 	// Context key for module.
-	ctxKeyModule = ctxKey { key: "module" }
+	ctxKeyModule = &ctxKey { key: "module" }
 	// Context key for digester walk ID.
-	ctxKeyWalkID = ctxKey { key: "wid" }
+	ctxKeyWalkID = &ctxKey { key: "wid" }
 
 	// Temporary keys for debugging purposes.
-	CtxKeyNGTree = ctxKey { key: "ng_tree" }
-	CtxKeyClientTree = ctxKey { key: "cl_tree" }
+	CtxKeyNGTree = &ctxKey { key: "ng_tree" }
+	CtxKeyClientTree = &ctxKey { key: "cl_tree" }
 )
 
 func ctxWithRqID(ctx context.Context) context.Context {
