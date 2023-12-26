@@ -782,7 +782,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			BytesLimit:           int(client.MaxBatchSize),
 			ItemsLimit:           int(client.MaxQueryBatchDigests),
-			BundleTimeout:        10 * time.Millisecond, // Low value to fast track queries.
+			BundleTimeout:        time.Duration(client.UnifiedUploadTickDuration),
 			// Timeout:              DefaultRPCTimeouts["FindMissingBlobs"],
 			Timeout:        DefaultRPCTimeouts["default"],
 			RetryPolicy:    client.Retrier.Backoff,
