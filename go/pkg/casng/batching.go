@@ -41,7 +41,7 @@ type namedDigest interface {
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
 	ctx = ctxWithRqID(ctx)
 	ctx =  ctxWithValues(ctx, ctxKeyModule, "query.batch")
-	log.V(1).Infof("start; %s", fmtCtx(ctx, "reqs", len(digests)))
+	infof(ctx, 1, "start", "reqs", len(digests))
 	if len(digests) == 0 {
 		return nil, nil
 	}
@@ -67,7 +67,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	if len(batches) == 0 {
 		return nil, nil
 	}
-	log.V(1).Infof("deduped; %s", fmtCtx(ctx, "reqs", len(dgSet)))
+	infof(ctx, 1, "deduped", "reqs", len(dgSet))
 
 	// Call remote.
 	missing := make([]digest.Digest, 0, len(dgSet))
@@ -94,7 +94,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			missing = append(missing, digest.NewFromProtoUnvalidated(d))
 		}
 	}
-	log.V(1).Infof("done; %s", fmtCtx(ctx, "missing", len(missing)))
+	infof(ctx, 1, "done", "missing", len(missing))
 
 	if err != nil {
 		err = errors.Join(ErrGRPC, err)
@@ -140,8 +140,8 @@ func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r
 }
 
 func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, size, offset int64, finish bool) (Stats, error) {
-	log.V(1).Infof("start; %s", fmtCtx(ctx, "name", name, "size", size, "offset", offset, "finish", finish))
-	defer log.V(1).Infof("done; %s", fmtCtx(ctx, "name", name, "size", size, "offset", offset, "finish", finish))
+	infof(ctx, 1, "start", "name", name, "size", size, "offset", offset, "finish", finish)
+	defer infof(ctx, 1, "done", "name", name, "size", size, "offset", offset, "finish", finish)
 	if log.V(3) {
 		startTime := time.Now()
 		defer func() {
@@ -159,7 +159,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	var encWg sync.WaitGroup
 	var withCompression bool // Used later to ensure the pipe is closed.
 	if IsCompressedWriteResourceName(name) {
-		log.V(1).Infof("compressing; %s", fmtCtx(ctx, "name", name, "size", size))
+		infof(ctx, 1, "compressing", "name", name, "size", size)
 		withCompression = true
 		pr, pw := io.Pipe()
 		// Closing pr always returns a nil error, but also sends ErrClosedPipe to pw.
@@ -328,8 +328,8 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, Stats, error) {
 	ctx = ctxWithRqID(ctx)
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.batch")
-	log.V(1).Infof("start; %s", fmtCtx(ctx, "reqs", len(reqs)))
-	defer log.V(1).Infof("done; %s", fmtCtx(ctx, "reqs", len(reqs)))
+	infof(ctx, 1, "start", "reqs", len(reqs))
+	defer infof(ctx, 1, "done", "reqs", len(reqs))
 	if log.V(3) {
 		startTime := time.Now()
 		defer func(){
@@ -358,7 +358,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	if err != nil {
 		return nil, stats, err
 	}
-	log.V(1).Infof("queured; %s", fmtCtx(ctx, "missing", len(missing), "undigested", len(undigested)))
+	infof(ctx, 1, "queured", "missing", len(missing), "undigested", len(undigested))
 
 	reqs = undigested
 	for _, d := range missing {
@@ -372,11 +372,11 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		stats.DigestCount++
 	}
 	if len(reqs) == 0 {
-		log.V(1).Infof("nothing is missing; %s", fmtCtx(ctx))
+		infof(ctx, 1, "nothing is missing")
 		return nil, stats, nil
 	}
 
-	log.V(1).Infof("uploading; %s", fmtCtx(ctx, "reqs", len(reqs)))
+	infof(ctx, 1, "uploading", "reqs", len(reqs))
 	ch := make(chan UploadRequest)
 	resCh := u.streamPipe(ctx, ch)
 
@@ -386,8 +386,8 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		defer close(ch) // let the streamer terminate.
 		defer u.clientSenderWg.Done()
 
-		log.V(1).Infof("sender.start", fmtCtx(ctx))
-		defer log.V(1).Infof("sender.stop", fmtCtx(ctx))
+		infof(ctx, 1, "sender.start")
+		defer infof(ctx, 1, "sender.stop")
 
 		for _, r := range reqs {
 			select {
@@ -462,8 +462,8 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
 	ctx = ctxWithRqID(ctx)
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.tree")
-	log.V(1).Infof("start; %s", fmtCtx(ctx, "reqs", len(reqs)))
-	defer log.V(1).Infof("done; %s", fmtCtx(ctx))
+	infof(ctx, 1, "start", "reqs", len(reqs))
+	defer infof(ctx, 1, "done")
 
 	if len(reqs) == 0 {
 		return
@@ -532,7 +532,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// 	r := &reqs[i]
 	// 	r.Exclude.ID = filterIDFunc
 	// }
-	log.V(1).Infof("filter; %s", fmtCtx(ctx, "fid", filterID, "reqs", len(reqs), "filtered_reqs", i))
+	infof(ctx, 1, "filter", "fid", filterID, "reqs", len(reqs), "filtered_reqs", i)
 
 	// 2nd, Upload the requests first to digest the files and cache the nodes.
 	startTime = time.Now()
@@ -646,7 +646,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	logDuration(ctx, startTime, "fill_tree", "fid", filterID)
 
 	// Upload the blobs of the shared ancestors.
-	log.V(1).Infof("; %s", fmtCtx(ctx, "dirs", len(dirReqs), "fid", filterID))
+	infof(ctx, 1, "upload dirs", "dirs", len(dirReqs), "fid", filterID)
 	startTime = time.Now()
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
 	logDuration(ctx, startTime, "upload_dirs", "fid", filterID)

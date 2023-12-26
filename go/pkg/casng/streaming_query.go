@@ -117,7 +117,6 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 	}
 
 	ctx = ctxWithRqID(ctx)
-
 	route, resCh := u.queryPubSub.sub(ctx)
 	pendingCh := make(chan int)
 
@@ -126,8 +125,8 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 	go func() {
 		defer u.querySenderWg.Done()
 
-		log.V(1).Info("sender.start; %s", fmtCtx(ctx))
-		defer log.V(1).Info("sender.stop; %s", fmtCtx(ctx))
+		infof(ctx, 1, "sender.start")
+		defer infof(ctx, 1, "sender.stop")
 
 		for r := range in {
 			r.route = route
@@ -213,7 +212,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 					Err:    ctx.Err(),
 				}, bundle[d]...)
 			}
-			log.V(3).Infof("cancel; %s", fmtCtx(ctx))
+			infof(ctx, 3, "cancel")
 			return
 		}
 		logDuration(ctx, startTime, "sem.query")
@@ -242,7 +241,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			startTime := time.Now()
 
 			ctx = ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
-			log.V(3).Infof("req; %s", fmtCtx(ctx, "digest", req.digest, "bundle", len(bundle)))
+			infof(ctx, 3, "req", "digest", req.digest, "bundle", len(bundle))
 			dSize := proto.Size(req.digest.ToProto())
 
 			// Check oversized items.
@@ -258,7 +257,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 
 			// Check size threshold.
 			if bundleSize+dSize >= u.queryRPCCfg.BytesLimit {
-				log.V(3).Infof("bundle.size; %s", fmtCtx(ctx, "bytes", bundleSize, "excess", dSize))
+				infof(ctx, 3, "bundle.size", "bytes", bundleSize, "excess", dSize)
 				handle()
 			}
 
@@ -269,15 +268,13 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
-				log.V(3).Infof("bundle.full; %s", fmtCtx(ctx, "count", len(bundle)))
+				infof(ctx, 3, "bundle.full", "count", len(bundle))
 				handle()
 			}
 			logDuration(ctx, startTime, "bundle.req")
 		case <-bundleTicker.C:
 			startTime := time.Now()
-			if len(bundle) > 0 {
-				log.V(3).Infof("bundle.timeout; %s", fmtCtx(ctx, "count", len(bundle)))
-			}
+			infof(ctx, 3, "bundle.timeout", "count", len(bundle))
 			handle()
 			logDuration(ctx, startTime, "bundle.timeout")
 		}

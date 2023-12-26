@@ -156,7 +156,7 @@ func (ps *pubsub) pubN(ctx context.Context, m any, n int, routes ...string) []st
 			// Send now or reschedule if the subscriber is not ready.
 			select {
 			case subscriber <- m:
-				log.V(3).Infof("sent; %s", fmtCtx(fctx))
+				infof(fctx, 3, "sent")
 				received = append(received, t)
 				if len(received) >= n {
 					return received
