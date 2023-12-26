@@ -85,8 +85,11 @@ func (ps *pubsub) unsub(ctx context.Context, tag string) {
 // iteration on the subscribers, even though both have the same worst-case cost.
 // For example, if out of 10 subscribers 5 were busy for 1ms, the attempt will cost ~5ms instead of 10ms.
 func (ps *pubsub) pub(ctx context.Context, m any, tags ...string) {
-	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub")
-	_ = ps.pubN(ctx, m, len(tags), tags...)
+	// TODO: experiental async pub to see if it helps with congestion.
+	// go func(){
+		ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub")
+		_ = ps.pubN(ctx, m, len(tags), tags...)
+	// }()
 }
 
 // mpub (multi-publish) delivers the "once" message to a single subscriber then delivers the "rest" message to the rest of the subscribers.
@@ -94,7 +97,10 @@ func (ps *pubsub) pub(ctx context.Context, m any, tags ...string) {
 func (ps *pubsub) mpub(ctx context.Context, once any, rest any, tags ...string) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub")
 	t := ps.pubOnce(ctx, once, tags...)
-	_ = ps.pubN(ctx, rest, len(tags)-1, excludeTag(tags, t)...)
+	// TODO: experiental async pub to see if it helps with congestion.
+	// go func(){
+		_ = ps.pubN(ctx, rest, len(tags)-1, excludeTag(tags, t)...)
+	// }()
 }
 
 // pubOnce is like pub, but delivers the message to a single subscriber.
