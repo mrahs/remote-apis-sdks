@@ -227,7 +227,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			case *repb.FileNode:
 				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{Path: realPath, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
-				logDuration(ctx, startTime, "dispatcher.req.digsted.file", "path", req.Path, "real_path", realPath)
+				logDuration(ctx, startTime, "dispatcher.req.digested.file", "path", req.Path, "real_path", realPath)
 			case *repb.DirectoryNode:
 				// The blob of the directory node is the bytes of a repb.Directory message.
 				// Generate and forward it. If it was uploaded before, it'll be reported as a cache hit.
@@ -239,7 +239,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				}
 				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, tag: req.tag, ctx: req.ctx, digestOnly: req.digestOnly}
-				logDuration(ctx, startTime, "dispatcher.req.digsted.dir", "path", req.Path, "real_path", realPath)
+				logDuration(ctx, startTime, "dispatcher.req.digested.dir", "path", req.Path, "real_path", realPath)
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
 			default:

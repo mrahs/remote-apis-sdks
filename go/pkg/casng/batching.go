@@ -330,6 +330,12 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.batch")
 	log.V(1).Infof("start; %s", fmtCtx(ctx, "reqs", len(reqs)))
 	defer log.V(1).Infof("done; %s", fmtCtx(ctx, "reqs", len(reqs)))
+	if log.V(3) {
+		startTime := time.Now()
+		defer func(){
+			logDuration(ctx, startTime, "upload", "reqs", len(reqs))
+		}()
+	}
 
 	var stats Stats
 
