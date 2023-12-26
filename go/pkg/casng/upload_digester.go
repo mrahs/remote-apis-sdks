@@ -226,7 +226,14 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			switch node := node.(type) {
 			case *repb.FileNode:
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{Path: realPath, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, route: req.route, ctx: req.ctx, digestOnly: req.digestOnly}
+				u.dispatcherReqCh <- UploadRequest{
+					Path: realPath,
+					Digest: digest.NewFromProtoUnvalidated(node.Digest),
+					id: req.id,
+					route: req.route,
+					ctx: req.ctx,
+					digestOnly: req.digestOnly,
+				}
 				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
 			case *repb.DirectoryNode:
 				// The blob of the directory node is the bytes of a repb.Directory message.
@@ -238,7 +245,14 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					return walker.SkipPath, false
 				}
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, route: req.route, ctx: req.ctx, digestOnly: req.digestOnly}
+				u.dispatcherReqCh <- UploadRequest{
+					Bytes: b,
+					Digest: digest.NewFromProtoUnvalidated(node.Digest),
+					id: req.id,
+					route: req.route,
+					ctx: req.ctx,
+					digestOnly: req.digestOnly,
+				}
 				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
@@ -293,7 +307,14 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				}
 				u.dirChildren.append(parentKey, node)
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, route: req.route, ctx: req.ctx, digestOnly: req.digestOnly}
+				u.dispatcherReqCh <- UploadRequest{
+					Bytes: b,
+					Digest: digest.NewFromProtoUnvalidated(node.Digest),
+					id: req.id,
+					route: req.route,
+					ctx: req.ctx,
+					digestOnly: req.digestOnly,
+				}
 				u.nodeCache.Store(key, node)
 				infof(ctx, 3, "visit.post.dir", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
 				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
@@ -316,8 +337,16 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					return true
 				}
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{Bytes: blb.b, reader: blb.r, Digest: digest.NewFromProtoUnvalidated(node.Digest), id: req.id, route: req.route, ctx: req.ctx, digestOnly: req.digestOnly}
-				log.V(3).Infof("visit.post.file; %s", fmtCtx(ctx, "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude))
+				u.dispatcherReqCh <- UploadRequest{
+					Bytes: blb.b,
+					reader: blb.r,
+					Digest: digest.NewFromProtoUnvalidated(node.Digest),
+					id: req.id,
+					route: req.route,
+					ctx: req.ctx,
+					digestOnly: req.digestOnly,
+				}
+				infof(ctx, 3, "visit.post.file", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
 				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
 				return true
 
@@ -382,7 +411,13 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 	startTime := time.Now()
 	// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
 	// err includes any IO errors that happened during the walk.
-	u.dispatcherResCh <- UploadResponse{endOfWalk: true, routes: []string{req.route}, reqs: []string{req.id}, Stats: stats, Err: err}
+	u.dispatcherResCh <- UploadResponse{
+		endOfWalk: true,
+		routes: []string{req.route},
+		reqs: []string{req.id},
+		Stats: stats,
+		Err: err,
+	}
 	logDuration(ctx, startTime, "dispatcher.res", "path", req.Path)
 }
 

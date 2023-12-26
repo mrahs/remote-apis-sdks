@@ -61,12 +61,12 @@ type UploadRequest struct {
 
 	// Internal fields.
 
-	// id identifies this request internally for logging purposes.
-	id string
-	// reader is used to keep a large file open while being handed over between workers.
-	reader io.ReadSeekCloser
 	// ctx is the requester's context which is used to extract metadata from and abort in-flight tasks for this request.
 	ctx context.Context
+	// reader is used to keep a large file open while being handed over between workers.
+	reader io.ReadSeekCloser
+	// id identifies this request internally for logging purposes.
+	id string
 	// route identifies the requester of this request.
 	route string
 	// done is used internally to signal that no further requests are expected for the associated route.
@@ -103,9 +103,9 @@ type UploadResponse struct {
 
 // uploadRequestBundleItem is a tuple of an upload request and a list of clients interested in the response.
 type uploadRequestBundleItem struct {
-	req  *repb.BatchUpdateBlobsRequest_Request
+	req    *repb.BatchUpdateBlobsRequest_Request
 	routes []string
-	reqs []string
+	reqs   []string
 }
 
 // uploadRequestBundle is used to aggregate (unify) requests by digest.
@@ -220,7 +220,7 @@ func (u *uploader) batcher(ctx context.Context) {
 					Digest: d,
 					Stats:  Stats{BytesRequested: d.Size},
 					Err:    context.Canceled,
-					routes:   item.routes,
+					routes: item.routes,
 					reqs:   item.reqs,
 				}
 			}
@@ -272,50 +272,11 @@ func (u *uploader) batcher(ctx context.Context) {
 			if len(req.Bytes) == 0 {
 				infof(fctx, 3, "defer", "digest", req.Digest, "path", req.Path)
 				u.workerWg.Add(1)
-				go func(req UploadRequest) (err error) {
+				// The upper bound of these goroutines is controlled by uploadThrottler in handle.
+				go func(){
 					defer u.workerWg.Done()
-					defer func() {
-						if err != nil {
-							u.dispatcherResCh <- UploadResponse{
-								Digest: req.Digest,
-								Err:    err,
-								routes:   []string{req.route},
-								reqs:   []string{req.id},
-							}
-							return
-						}
-						// Send after releasing resources.
-						u.batcherCh <- req
-					}()
-					r := req.reader
-					if r == nil {
-						startTime := time.Now()
-						if !u.ioThrottler.acquire(req.ctx) {
-							return req.ctx.Err()
-						}
-						logDuration(ctx, startTime, "sem.io")
-						defer u.ioThrottler.release()
-						f, err := os.Open(req.Path.String())
-						if err != nil {
-							return errors.Join(ErrIO, err)
-						}
-						r = f
-					} else {
-						// If this blob was from a large file, ensure IO holds are released.
-						defer u.releaseIOTokens()
-					}
-					defer func() {
-						if errClose := r.Close(); err != nil {
-							err = errors.Join(ErrIO, errClose, err)
-						}
-					}()
-					bytes, err := io.ReadAll(r)
-					if err != nil {
-						return errors.Join(ErrIO, err)
-					}
-					req.Bytes = bytes
-					return nil
-				}(req)
+					u.loadRequestBytes(ctx, req)
+				}()
 				continue
 			}
 
@@ -412,7 +373,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		u.dispatcherResCh <- UploadResponse{
 			Digest: d,
 			Stats:  s,
-			routes:   bundle[d].routes,
+			routes: bundle[d].routes,
 			reqs:   bundle[d].reqs,
 		}
 		if log.V(3) {
@@ -438,7 +399,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			Digest: d,
 			Stats:  s,
 			Err:    errors.Join(ErrGRPC, dErr),
-			routes:   bundle[d].routes,
+			routes: bundle[d].routes,
 			reqs:   bundle[d].reqs,
 		}
 		if log.V(3) {
@@ -473,7 +434,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			Digest: d,
 			Stats:  s,
 			Err:    err,
-			routes:   item.routes,
+			routes: item.routes,
 			reqs:   item.reqs,
 		}
 		if log.V(3) {
@@ -559,8 +520,8 @@ func (u *uploader) streamer(ctx context.Context) {
 		case r := <-streamResCh:
 			startTime := time.Now()
 			r.routes = digestRoutes[r.Digest]
-			delete(digestRoutes, r.Digest)
 			r.reqs = digestReqs[r.Digest]
+			delete(digestRoutes, r.Digest)
 			delete(digestReqs, r.Digest)
 			u.dispatcherResCh <- r
 			pending--
@@ -617,4 +578,50 @@ func (u *uploader) callStream(ctx context.Context, name string, req UploadReques
 	}
 
 	return u.writeBytes(req.ctx, name, reader, req.Digest.Size, 0, true)
+}
+
+func (u *uploader) loadRequestBytes(ctx context.Context, req UploadRequest) {
+	var err error
+	defer func() {
+		if err != nil {
+			u.dispatcherResCh <- UploadResponse{
+				Digest: req.Digest,
+				Err:    err,
+				routes: []string{req.route},
+				reqs:   []string{req.id},
+			}
+			return
+		}
+		u.batcherCh <- req
+	}()
+	r := req.reader
+	if r == nil {
+		startTime := time.Now()
+		if !u.ioThrottler.acquire(req.ctx) {
+			err = req.ctx.Err()
+			return
+		}
+		defer u.ioThrottler.release()
+		logDuration(ctx, startTime, "sem.io")
+		f, err := os.Open(req.Path.String())
+		if err != nil {
+			err = errors.Join(ErrIO, err)
+			return
+		}
+		r = f
+	} else {
+		// If this blob was from a large file, ensure IO holds are released.
+		defer u.releaseIOTokens()
+	}
+	defer func() {
+		if errClose := r.Close(); err != nil {
+			err = errors.Join(ErrIO, errClose, err)
+		}
+	}()
+	bytes, err := io.ReadAll(r)
+	if err != nil {
+		err = errors.Join(ErrIO, err)
+		return
+	}
+	req.Bytes = bytes
 }

@@ -58,15 +58,27 @@ type MissingBlobsResponse struct {
 	Digest  digest.Digest
 	Missing bool
 	Err     error
+	refs    []any
 }
 
 // missingBlobRequest associates a digest with its requester's context.
 type missingBlobRequest struct {
 	digest digest.Digest
 	id     string
-	route    string
+	route  string
 	ctx    context.Context
+	ref    any
 }
+
+// queryRequestBundleItem is a tuple of an upload request and a list of clients interested in the response.
+type queryRequestBundleItem struct {
+	routes []string
+	refs []any
+}
+
+// queryRequestBundle is used to bundle up (unify) concurrent requests for the same digest from different requesters (routes).
+// It's also used to associate digests with request IDs for logging purposes.
+type queryRequestBundle map[digest.Digest]queryRequestBundleItem
 
 // MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
 //
@@ -110,6 +122,9 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 			res := MissingBlobsResponse{Err: ErrTerminatedUploader}
 			for req := range in {
 				res.Digest = req.digest
+				if req.ref != nil {
+					res.refs = []any{req.ref}
+				}
 				ch <- res
 			}
 		}()
@@ -183,18 +198,13 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 	return ch
 }
 
-// digestStrings is used to bundle up (unify) concurrent requests for the same digest from different requesters (routes).
-// It's also used to associate digests with request IDs for loggging purposes.
-type digestStrings map[digest.Digest][]string
-
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
 func (u *uploader) queryProcessor(ctx context.Context) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "query.processor")
 	log.V(1).Info("start; %s", fmtCtx(ctx))
 	defer log.V(1).Info("stop; %s", fmtCtx(ctx))
 
-	bundle := make(digestStrings)
-	reqs := make(digestStrings)
+	bundle := make(queryRequestBundle)
 	bundleCtx := ctx // context with unified metadata.
 	bundleSize := u.queryRequestBaseSize
 
@@ -210,7 +220,8 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 				u.queryPubSub.pub(ctx, MissingBlobsResponse{
 					Digest: d,
 					Err:    ctx.Err(),
-				}, bundle[d]...)
+					refs:   bundle[d].refs,
+				}, bundle[d].routes...)
 			}
 			infof(ctx, 3, "cancel")
 			return
@@ -218,14 +229,13 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 		logDuration(ctx, startTime, "sem.query")
 
 		u.workerWg.Add(1)
-		go func(ctx context.Context, b, r digestStrings) {
+		go func(ctx context.Context, b queryRequestBundle) {
 			defer u.workerWg.Done()
 			defer u.queryThrottler.release()
-			u.callMissingBlobs(ctx, b, r)
-		}(bundleCtx, bundle, reqs)
+			u.callMissingBlobs(ctx, b)
+		}(bundleCtx, bundle)
 
-		bundle = make(digestStrings)
-		reqs = make(digestStrings)
+		bundle = make(queryRequestBundle)
 		bundleSize = u.queryRequestBaseSize
 		bundleCtx = ctx
 	}
@@ -246,10 +256,14 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 
 			// Check oversized items.
 			if u.queryRequestBaseSize+dSize > u.queryRPCCfg.BytesLimit {
-				u.queryPubSub.pub(ctx, MissingBlobsResponse{
+				res := MissingBlobsResponse{
 					Digest: req.digest,
 					Err:    ErrOversizedItem,
-				}, req.route)
+				}
+				if req.ref != nil {
+					res.refs = []any{req.ref}
+				}
+				u.queryPubSub.pub(ctx, res, req.route)
 				// Covers waiting on subscribers.
 				logDuration(ctx, startTime, "pub")
 				continue
@@ -262,7 +276,10 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			}
 
 			// Duplicate routes are allowed to ensure the requester can match the number of responses to the number of requests.
-			bundle[req.digest] = append(bundle[req.digest], req.route)
+			item := bundle[req.digest]
+			item.routes = append(item.routes, req.route)
+			item.refs = append(item.refs, req.ref)
+			bundle[req.digest] = item
 			bundleSize += dSize
 			bundleCtx, _ = contextmd.FromContexts(bundleCtx, req.ctx) // ignore non-essential error.
 
@@ -283,9 +300,9 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 
 // callMissingBlobs calls the gRPC endpoint and notifies requesters of the results.
 // It assumes ownership of its arguments. digestRoutes is the primary one. digestReqs is used for logging purposes.
-func (u *uploader) callMissingBlobs(ctx context.Context, digestRoutes, digestReqs digestStrings) {
-	digests := make([]*repb.Digest, 0, len(digestRoutes))
-	for d := range digestRoutes {
+func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBundle) {
+	digests := make([]*repb.Digest, 0, len(bundle))
+	for d := range bundle {
 		digests = append(digests, d.ToProto())
 	}
 
@@ -322,16 +339,18 @@ func (u *uploader) callMissingBlobs(ctx context.Context, digestRoutes, digestReq
 			Digest:  d,
 			Missing: err == nil,
 			Err:     err,
-		}, digestRoutes[d]...)
-		delete(digestRoutes, d)
+			refs:    bundle[d].refs,
+		}, bundle[d].routes...)
+		delete(bundle, d)
 	}
 
 	// Report non-missing.
-	for d := range digestRoutes {
+	for d := range bundle {
 		u.queryPubSub.pub(ctx, MissingBlobsResponse{
 			Digest:  d,
 			Missing: false,
-		}, digestRoutes[d]...)
+			refs:    bundle[d].refs,
+		}, bundle[d].routes...)
 	}
 	logDuration(ctx, startTime, "pub")
 }
