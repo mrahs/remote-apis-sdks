@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	log "github.com/golang/glog"
 	"github.com/pborman/uuid"
 )
 
@@ -41,7 +40,8 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 	subscriber := make(chan any)
 	ps.subs[route] = subscriber
 
-	infof(ctxWithValues(ctx, ctxKeyModule, "pubsub", ctxKeyRtID, route), 3, "sub")
+	ctx = ctxWithValues(ctxWithLogDepthInc(ctx), ctxKeyRtID, route)
+	infof(ctx, 3, "sub")
 	return route, subscriber
 }
 
@@ -49,7 +49,7 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 // The subscriber must continue draining the channel until it's closed.
 // It is an error to publish more messages for route after this call.
 func (ps *pubsub) unsub(ctx context.Context, route string) {
-	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub", ctxKeyRtID, route)
+	ctx = ctxWithValues(ctxWithLogDepthInc(ctx), ctxKeyRtID, route)
 	infof(ctx, 3, "unsub.scheduled")
 	// If unsub is called from the same goroutine that is listening on the subscription
 	// channel, a deadlock might occur.
@@ -59,6 +59,8 @@ func (ps *pubsub) unsub(ctx context.Context, route string) {
 	// Ideally, the user should call unsub after confirming all pub calls have returned. However, this
 	// relieves the user from that burden with minimal overhead.
 	go func() {
+		// reset depth to 0 because goroutines do not retain call stacks.
+		ctx := ctxWithValues(ctx, ctxKeyLogDepth, 0)
 		ps.mu.Lock()
 		defer ps.mu.Unlock()
 		subscriber, ok := ps.subs[route]
@@ -118,26 +120,21 @@ func (ps *pubsub) pubOnce(ctx context.Context, m any, routes ...string) string {
 
 // pubN is like pub, but delivers the message to no more than n subscribers. The routes of the subscribers that got the message are returned.
 func (ps *pubsub) pubN(ctx context.Context, m any, n int, routes ...string) []string {
-	if log.V(3) {
-		startTime := time.Now()
-		defer func() {
-			log.Infof("duration.pub; %s", fmtCtx(ctx, "start", startTime.UnixNano(), "end", time.Now().UnixNano()))
-		}()
-	}
+	ctx = ctxWithLogDepthInc(ctx)
+	defer durationf(ctx, time.Now(), "pub")
+
 	if len(routes) == 0 {
-		log.Warningf("called without routes, dropping message; %s", fmtCtx(ctx))
-		log.V(4).Infof("called without routes for msg=%v; %s", m, fmtCtx(ctx))
+		warnf(ctx, "called without routes, dropping message")
+		infof(ctx, 4, "called without routes", "msg", m)
 		return nil
 	}
 	if n <= 0 {
-		log.Warningf("nothing published because n=%d; %s", n, fmtCtx(ctx))
+		warnf(ctx, "nothing published", "n", n)
 		return nil
 	}
 
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
-
-	log.V(4).Infof("msg; type=%[1]T, value=%[1]v, %s", m, fmtCtx(ctx))
 
 	var toRetry []string
 	var received []string
@@ -150,7 +147,7 @@ func (ps *pubsub) pubN(ctx context.Context, m any, n int, routes ...string) []st
 			subscriber, ok := ps.subs[t]
 			fctx := ctxWithValues(ctx, ctxKeyRtID, t)
 			if !ok {
-				log.Warningf("drop; %s", fmtCtx(fctx))
+				warnf(fctx, "drop orphaned message")
 				continue
 			}
 			// Send now or reschedule if the subscriber is not ready.

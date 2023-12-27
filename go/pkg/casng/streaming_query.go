@@ -97,6 +97,7 @@ type queryRequestBundle map[digest.Digest]queryRequestBundleItem
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
+	ctx = ctxWithRqID(ctx)
 	pipeIn := make(chan missingBlobRequest)
 	out := u.missingBlobsPipe(ctx, pipeIn)
 	u.clientSenderWg.Add(1)
@@ -112,7 +113,7 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 
 // missingBlobsPipe is a shared implementation between batching and streaming interfaces.
 func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRequest) <-chan MissingBlobsResponse {
-	ctx = ctxWithValues(ctx, ctxKeyModule, "query.streamer")
+	ctx = ctxWithValues(ctx, ctxKeyModule, "query.stream_pipe")
 	ch := make(chan MissingBlobsResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
@@ -131,8 +132,8 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 		return ch
 	}
 
-	ctx = ctxWithRqID(ctx)
 	route, resCh := u.queryPubSub.sub(ctx)
+	ctx = ctxWithValues(ctx, ctxKeyRtID, route)
 	pendingCh := make(chan int)
 
 	// Sender. It terminates when in is closed, at which point it sends 0 as a termination signal to the counter.
@@ -157,8 +158,8 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 		defer u.receiverWg.Done()
 		defer close(ch)
 
-		log.V(1).Info("receiver.start; %s", fmtCtx(ctx))
-		defer log.V(1).Info("receiver.stop; %s", fmtCtx(ctx))
+		infof(ctx, 1, "receiver.start")
+		defer infof(ctx, 1, "receiver.stop")
 
 		// Continue to drain until the broker closes the channel.
 		for {
@@ -201,8 +202,8 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 // queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
 func (u *uploader) queryProcessor(ctx context.Context) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "query.processor")
-	log.V(1).Info("start; %s", fmtCtx(ctx))
-	defer log.V(1).Info("stop; %s", fmtCtx(ctx))
+	infof(ctx, 1, "start")
+	defer infof(ctx, 1, "stop")
 
 	bundle := make(queryRequestBundle)
 	bundleCtx := ctx // context with unified metadata.
@@ -226,12 +227,12 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			infof(ctx, 3, "cancel")
 			return
 		}
-		logDuration(ctx, startTime, "sem.query")
+		durationf(ctx, startTime, "sem.query")
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b queryRequestBundle) {
 			defer u.workerWg.Done()
-			defer u.queryThrottler.release()
+			defer u.queryThrottler.release(ctx)
 			u.callMissingBlobs(ctx, b)
 		}(bundleCtx, bundle)
 
@@ -250,8 +251,8 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			}
 			startTime := time.Now()
 
-			ctx = ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
-			infof(ctx, 3, "req", "digest", req.digest, "bundle", len(bundle))
+			ctx = ctxWithValues(ctx, ctxKeyRtID, req.meta.route, ctxKeySqID, req.meta.id)
+			infof(ctx, 3, "req", "digest", req.digest, "bundle_count", len(bundle))
 			dSize := proto.Size(req.digest.ToProto())
 
 			// Check oversized items.
@@ -288,12 +289,11 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 				infof(ctx, 3, "bundle.full", "count", len(bundle))
 				handle()
 			}
-			logDuration(ctx, startTime, "bundle.req")
+			durationf(ctx, startTime, "bundle.append", "digest", req.digest, "count", len(bundle))
 		case <-bundleTicker.C:
 			startTime := time.Now()
-			infof(ctx, 3, "bundle.timeout", "count", len(bundle))
 			handle()
-			logDuration(ctx, startTime, "bundle.timeout")
+			durationf(ctx, startTime, "bundle.timeout", "count", len(bundle))
 		}
 	}
 }
@@ -320,7 +320,6 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBund
 		res, err = u.cas.FindMissingBlobs(ctx, req)
 		return err
 	})
-	logDuration(ctx, startTime, "grpc")
 
 	var missing []*repb.Digest
 	if res != nil {
@@ -330,6 +329,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBund
 		err = errors.Join(ErrGRPC, err)
 		missing = digests
 	}
+	durationf(ctx, startTime, "grpc", "missing", len(missing), "err", err)
 
 	startTime = time.Now()
 	// Report missing.
@@ -352,5 +352,5 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBund
 			refs:    bundle[d].refs,
 		}, bundle[d].routes...)
 	}
-	logDuration(ctx, startTime, "pub")
+	durationf(ctx, startTime, "query->pub")
 }

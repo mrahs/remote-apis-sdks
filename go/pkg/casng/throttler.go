@@ -16,6 +16,7 @@ func (t *throttler) acquire(ctx context.Context) bool {
 	for {
 		select {
 		case t.ch <- struct{}{}:
+			infof(ctxWithLogDepthInc(ctx), 3, "throttler.acquire")
 			return true
 		case <-ctx.Done():
 			return false
@@ -24,8 +25,9 @@ func (t *throttler) acquire(ctx context.Context) bool {
 }
 
 // release returns a token to the pool. Must be called after acquire. Otherwise, it will block until acquire is called.
-func (t *throttler) release() {
+func (t *throttler) release(ctx context.Context) {
 	<-t.ch
+	infof(ctxWithLogDepthInc(ctx), 3, "throttler.release")
 }
 
 // len returns the number of acquired tokens.

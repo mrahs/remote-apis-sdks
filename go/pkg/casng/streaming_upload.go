@@ -70,8 +70,8 @@ type UploadRequest struct {
 	// route identifies the requester of this request.
 	route string
 	// done is used internally to signal that no further requests are expected for the associated route.
-	// This allows the processor to notify the client once all buffered requests are processed.
-	// Once a route is associated with done=true, sending subsequent requests for that route might cause races.
+	// This allows the processor to notify the client once all buffered sub-requests are processed.
+	// Once a route is associated with done=true, sending sub-sequent requests for that route might cause races.
 	done bool
 	// digsetOnly indicates that this request is for digestion only.
 	digestOnly bool
@@ -136,6 +136,7 @@ func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest)
 // streamPipe is used by both the streaming and the batching interfaces.
 // Each request will be enriched with internal fields for control and logging purposes.
 func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
+	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.stream_pipe")
 	ch := make(chan UploadResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
@@ -153,7 +154,7 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 	// Register a new requester with the internal processor.
 	// This broker should not remove the subscription until the sender tells it to.
 	route, resChan := u.uploadPubSub.sub(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.stream_pipe", ctxKeyRtID, route)
+	ctx = ctxWithValues(ctx, ctxKeyRtID, route)
 
 	// Forward the requests to the internal processor.
 	u.uploadSenderWg.Add(1)
@@ -224,15 +225,15 @@ func (u *uploader) batcher(ctx context.Context) {
 					reqs:   item.reqs,
 				}
 			}
-			logDuration(ctx, startTime, "batch->dispatcher.res")
+			durationf(ctx, startTime, "batcher->dispatcher.res")
 			return
 		}
-		logDuration(ctx, startTime, "sem.upload")
+		durationf(ctx, startTime, "sem.upload")
 
 		u.workerWg.Add(1)
 		go func(ctx context.Context, b uploadRequestBundle) {
 			defer u.workerWg.Done()
-			defer u.uploadThrottler.release()
+			defer u.uploadThrottler.release(ctx)
 			// TODO: cancel ctx if all requesters have cancelled their contexts.
 			u.callBatchUpload(ctx, b)
 		}(bundleCtx, bundle)
@@ -301,12 +302,11 @@ func (u *uploader) batcher(ctx context.Context) {
 				infof(fctx, 3, "bundle.full", "count", len(bundle))
 				handle()
 			}
-			logDuration(ctx, startTime, "bundle.req")
+			durationf(ctx, startTime, "bundle.append", "digest", req.Digest, "count", len(bundle))
 		case <-bundleTicker.C:
 			startTime := time.Now()
-			infof(ctx, 3, "bundle.timeout", "count", len(bundle))
 			handle()
-			logDuration(ctx, startTime, "bundle.timeout")
+			durationf(ctx, startTime, "bundle.timeout", "count", len(bundle))
 		}
 	}
 }
@@ -353,8 +353,8 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		}
 		return reqErr
 	})
-	logDuration(ctx, startTime, "grpc")
-	infof(ctx, 3, "call.result", "uploaded", len(uploaded), "failed", len(failed), "req_failed", len(bundle)-len(uploaded)-len(failed))
+	durationf(ctx, startTime, "grpc",
+		"uploaded", len(uploaded), "failed", len(failed), "req_failed", len(bundle)-len(uploaded)-len(failed))
 
 	// Report uploaded.
 	for _, d := range uploaded {
@@ -408,8 +408,8 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		}
 		delete(bundle, d)
 	}
+	durationf(ctx, startTime, "batcher->dispatcher.res")
 
-	logDuration(ctx, startTime, "batch->dispatcher.res")
 	if len(bundle) == 0 {
 		return
 	}
@@ -442,16 +442,15 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			infof(fctx, 3, "res.failed.call", "digest", d)
 		}
 	}
-	logDuration(ctx, startTime, "batch->dispatcher.res")
+	durationf(ctx, startTime, "batcher->dispatcher.res")
 }
 
 // streamer handles files that do not fit into a batching request.
-// Unlike the batched call, querying the CAS is not required because the API handles this automatically.
-// See https://github.com/bazelbuild/remote-apis/blob/0cd22f7b466ced15d7803e8845d08d3e8d2c51bc/build/bazel/remote/execution/v2/remote_execution.proto#L250-L254
 // For files above the large threshold, this call assumes the io and large io holds are already acquired and will release them accordingly.
 // For other files, only an io hold is acquired and released in this call.
 func (u *uploader) streamer(ctx context.Context) {
-	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.streamer")
+	m := "upload.streamer"
+	ctx = ctxWithValues(ctx, ctxKeyModule, m)
 	infof(ctx, 1, "start")
 	defer infof(ctx, 1, "stop")
 
@@ -469,8 +468,8 @@ func (u *uploader) streamer(ctx context.Context) {
 				return
 			}
 			shouldReleaseIOTokens := req.reader != nil
-			fctx := ctxWithValues(ctx, ctxKeySqID, req.id, ctxKeyRtID, req.route)
-			infof(fctx, 3, "req", "digest", req.Digest, "large", shouldReleaseIOTokens, "pending", pending)
+			rctx := ctxWithValues(req.ctx, ctxKeyModule, m, ctxKeySqID, req.id, ctxKeyRtID, req.route)
+			infof(rctx, 3, "req", "digest", req.Digest, "large", shouldReleaseIOTokens, "pending", pending)
 
 			digestReqs[req.Digest] = append(digestReqs[req.Digest], req.id)
 			routes := digestRoutes[req.Digest]
@@ -478,16 +477,17 @@ func (u *uploader) streamer(ctx context.Context) {
 			digestRoutes[req.Digest] = routes
 			if len(routes) > 1 {
 				// Already in-flight. Release duplicate resources if it's a large file.
-				infof(fctx, 3, "unified", "digest", req.Digest, "bundle", len(routes))
 				if shouldReleaseIOTokens {
-					u.releaseIOTokens()
+					u.ioThrottler.release(ctx)
+					u.ioLargeThrottler.release(ctx)
 				}
+				infof(rctx, 3, "unified", "digest", req.Digest, "bundle_count", len(routes))
 				continue
 			}
 
 			var name string
 			if req.Digest.Size >= u.ioCfg.CompressionSizeThreshold {
-				infof(fctx, 3, "compress", "digest", req.Digest)
+				infof(rctx, 3, "compress", "digest", req.Digest)
 				name = MakeCompressedWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
 			} else {
 				name = MakeWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
@@ -496,26 +496,31 @@ func (u *uploader) streamer(ctx context.Context) {
 			pending++
 			// Block the streamer if the gRPC call is being throttled.
 			startTime := time.Now()
-			if !u.streamThrottle.acquire(ctx) {
+			if !u.streamThrottle.acquire(ctx) { // TODO: should also cancel if req.ctx is cancelled.
 				if shouldReleaseIOTokens {
-					u.releaseIOTokens()
+					u.ioThrottler.release(ctx)
+					u.ioLargeThrottler.release(ctx)
 				}
 				// Ensure the response is dispatched before aborting.
 				u.workerWg.Add(1)
 				go func(req UploadRequest) {
 					defer u.workerWg.Done()
+					startTime := time.Now()
 					streamResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{BytesRequested: req.Digest.Size}, Err: ctx.Err()}
+					durationf(rctx, startTime, "req->res", "digest", req.Digest)
 				}(req)
 				continue
 			}
-			logDuration(ctx, startTime, "sem.stream")
+			durationf(rctx, startTime, "sem.stream")
 			u.workerWg.Add(1)
 			go func(req UploadRequest) {
 				defer u.workerWg.Done()
-				s, err := u.callStream(fctx, name, req)
+				s, err := u.callStream(rctx, name, req)
+				startTime := time.Now()
 				// Release before sending on the channel to avoid blocking without actually using the gRPC resources.
-				u.streamThrottle.release()
+				u.streamThrottle.release(ctx)
 				streamResCh <- UploadResponse{Digest: req.Digest, Stats: s, Err: err}
+				durationf(rctx, startTime, "req->res", "digest", req.Digest)
 			}(req)
 		case r := <-streamResCh:
 			startTime := time.Now()
@@ -527,14 +532,12 @@ func (u *uploader) streamer(ctx context.Context) {
 			pending--
 			if log.V(3) {
 				fctx := ctxWithValues(ctx, ctxKeySqID, r.reqs, ctxKeyRtID, r.routes)
-				infof(fctx, 3, "res", "digest", r.Digest, "pending", pending)
+				durationf(fctx, startTime, "streamer->dispatcher.res", "digest", r.Digest, "pending", pending)
 			}
-			logDuration(ctx, startTime, "stream->dispatcher.res")
 		}
 	}
 }
 
-// ctx is used for logging while req.ctx is used for cancellation.
 func (u *uploader) callStream(ctx context.Context, name string, req UploadRequest) (stats Stats, err error) {
 	var reader io.Reader
 
@@ -549,7 +552,8 @@ func (u *uploader) callStream(ctx context.Context, name string, req UploadReques
 				err = errors.Join(ErrIO, errClose, err)
 			}
 			// IO holds were acquired during digestion for large files and are expected to be released here.
-			u.releaseIOTokens()
+			u.ioThrottler.release(ctx)
+			u.ioLargeThrottler.release(ctx)
 		}()
 
 	// Small file, a proto message (node), or an empty file.
@@ -559,11 +563,11 @@ func (u *uploader) callStream(ctx context.Context, name string, req UploadReques
 	// Medium file.
 	default:
 		startTime := time.Now()
-		if !u.ioThrottler.acquire(req.ctx) {
+		if !u.ioThrottler.acquire(ctx) {
 			return Stats{BytesRequested: req.Digest.Size}, context.Canceled
 		}
-		logDuration(ctx, startTime, "sem.io")
-		defer u.ioThrottler.release()
+		durationf(ctx, startTime, "sem.io")
+		defer u.ioThrottler.release(ctx)
 
 		f, errOpen := os.Open(req.Path.String())
 		if errOpen != nil {
@@ -577,7 +581,7 @@ func (u *uploader) callStream(ctx context.Context, name string, req UploadReques
 		reader = f
 	}
 
-	return u.writeBytes(req.ctx, name, reader, req.Digest.Size, 0, true)
+	return u.writeBytes(ctx, name, reader, req.Digest.Size, 0, true)
 }
 
 func (u *uploader) loadRequestBytes(ctx context.Context, req UploadRequest) {
@@ -601,8 +605,8 @@ func (u *uploader) loadRequestBytes(ctx context.Context, req UploadRequest) {
 			err = req.ctx.Err()
 			return
 		}
-		defer u.ioThrottler.release()
-		logDuration(ctx, startTime, "sem.io")
+		defer u.ioThrottler.release(ctx)
+		durationf(ctx, startTime, "sem.io")
 		f, err := os.Open(req.Path.String())
 		if err != nil {
 			err = errors.Join(ErrIO, err)
@@ -610,8 +614,9 @@ func (u *uploader) loadRequestBytes(ctx context.Context, req UploadRequest) {
 		}
 		r = f
 	} else {
-		// If this blob was from a large file, ensure IO holds are released.
-		defer u.releaseIOTokens()
+		// This blob was from a large file; ensure IO holds are released.
+		defer u.ioThrottler.release(ctx)
+		defer u.ioLargeThrottler.release(ctx)
 	}
 	defer func() {
 		if errClose := r.Close(); err != nil {

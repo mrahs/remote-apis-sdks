@@ -40,8 +40,8 @@ type namedDigest interface {
 // If no error is returned, the returned slice contains all the missing digests.
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
 	ctx = ctxWithRqID(ctx)
-	ctx =  ctxWithValues(ctx, ctxKeyModule, "query.batch")
-	infof(ctx, 1, "start", "reqs", len(digests))
+	ctx = ctxWithValues(ctx, ctxKeyModule, "query.batch")
+	defer durationf(ctx, time.Now(), "missing_blobs", "reqs", len(digests))
 	if len(digests) == 0 {
 		return nil, nil
 	}
@@ -115,39 +115,37 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
 // If an error was returned, the returned stats may indicate that all the bytes were sent, but that does not guarantee that the server committed all of them.
 func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size, offset int64) (Stats, error) {
+	ctx = ctxWithRqID(ctx)
+	ctx = ctxWithValues(ctx, ctxKeyModule, "write_bytes")
+
 	startTime := time.Now()
 	if !u.streamThrottle.acquire(ctx) {
 		return Stats{}, ctx.Err()
 	}
-	defer u.streamThrottle.release()
-	ctx = ctxWithRqID(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyModule, "write_bytes")
-	logDuration(ctx, startTime, "sem.stream")
+	defer u.streamThrottle.release(ctx)
+	durationf(ctx, startTime, "sem.stream")
+
 	return u.writeBytes(ctx, name, r, size, offset, true)
 }
 
 // WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
 func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size, offset int64) (Stats, error) {
+	ctx = ctxWithRqID(ctx)
+	ctx = ctxWithValues(ctx, ctxKeyModule, "write_bytes")
+
 	startTime := time.Now()
 	if !u.streamThrottle.acquire(ctx) {
 		return Stats{}, ctx.Err()
 	}
-	defer u.streamThrottle.release()
-	ctx = ctxWithRqID(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyModule, "write_bytes")
-	logDuration(ctx, startTime, "sem.stream")
+	defer u.streamThrottle.release(ctx)
+	durationf(ctx, startTime, "sem.stream")
+
 	return u.writeBytes(ctx, name, r, size, offset, false)
 }
 
 func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, size, offset int64, finish bool) (Stats, error) {
-	infof(ctx, 1, "start", "name", name, "size", size, "offset", offset, "finish", finish)
-	defer infof(ctx, 1, "done", "name", name, "size", size, "offset", offset, "finish", finish)
-	if log.V(3) {
-		startTime := time.Now()
-		defer func() {
-			logDuration(ctx, startTime, "write_bytes", "name", name, "size", size, "chunk_size", u.ioCfg.BufferSize)
-		}()
-	}
+	defer durationf(ctx, time.Now(), "write_bytes",
+		"name", name, "size", size, "offset", offset, "finish", finish, "chunk_size", u.ioCfg.BufferSize)
 
 	var stats Stats
 	// Read raw bytes if compression is disabled.
@@ -328,14 +326,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, Stats, error) {
 	ctx = ctxWithRqID(ctx)
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.batch")
-	infof(ctx, 1, "start", "reqs", len(reqs))
-	defer infof(ctx, 1, "done", "reqs", len(reqs))
-	if log.V(3) {
-		startTime := time.Now()
-		defer func(){
-			logDuration(ctx, startTime, "upload", "reqs", len(reqs))
-		}()
-	}
+	defer durationf(ctx, time.Now(), "upload", "reqs", len(reqs))
 
 	var stats Stats
 
@@ -427,7 +418,7 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 
 	req := UploadRequest{Path: root, SymlinkOptions: slo, Exclude: exclude, ctx: ctx, digestOnly: true}
 	select {
-	// In both cases, the channel must be closed before proceeding beyong the select statement to ensure
+	// In both cases, the channel must be closed before proceeding beyond the select statement to ensure
 	// the proper closure of resCh.
 	case ch <- req:
 		close(ch)
@@ -462,8 +453,7 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
 	ctx = ctxWithRqID(ctx)
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.tree")
-	infof(ctx, 1, "start", "reqs", len(reqs))
-	defer infof(ctx, 1, "done")
+	defer durationf(ctx, time.Now(), "upload_tree", "reqs", len(reqs))
 
 	if len(reqs) == 0 {
 		return
@@ -521,7 +511,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		reqs[i] = r
 		i++
 	}
-	logDuration(ctx, startTime, "filter_id", "fid", filterID)
+	durationf(ctx, startTime, "filter_id", "fid", filterID)
 
 	// Reslice to take included (shifted) requests only.
 	reqs = reqs[:i]
@@ -537,7 +527,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// 2nd, Upload the requests first to digest the files and cache the nodes.
 	startTime = time.Now()
 	uploaded, stats, err = u.Upload(ctx, reqs...)
-	logDuration(ctx, startTime, "upload_inputs", "fid", filterID)
+	durationf(ctx, startTime, "upload_inputs", "fid", filterID)
 	if err != nil {
 		return
 	}
@@ -561,7 +551,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		// Start by swapping the working directory with the remote one.
 		rp, errIm := ReplaceWorkingDir(ctx, r.Path, execRoot, workingDir, remoteWorkingDir)
 		if errIm != nil {
-			err = errors.Join(fmt.Errorf("cannot construct the merkle tree with a path outside the root: %q", r.Path, fmtCtx(ctx, "root", execRoot, "wd", workingDir, "rws", remoteWorkingDir)), errIm)
+			err = errors.Join(fmt.Errorf("cannot construct the merkle tree with a path outside the root: %q; %s", r.Path, fmtCtx(ctx, "root", execRoot, "wd", workingDir, "rws", remoteWorkingDir)), errIm)
 			return
 		}
 		parent := rp
@@ -585,7 +575,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			}
 		}
 	}
-	logDuration(ctx, startTime, "construct_Tree", "fid", filterID)
+	durationf(ctx, startTime, "construct_Tree", "fid", filterID)
 
 	// This block generates directory nodes for shared ancestors starting from leaf nodes (DFS-style).
 	dirReqs := make([]UploadRequest, 0, len(dirChildren))
@@ -643,13 +633,13 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		// Attach the node to its parent if it's not the exec root.
 		dirChildren[dir.Dir()][dir] = node
 	}
-	logDuration(ctx, startTime, "fill_tree", "fid", filterID)
+	durationf(ctx, startTime, "fill_tree", "fid", filterID)
 
 	// Upload the blobs of the shared ancestors.
 	infof(ctx, 1, "upload dirs", "dirs", len(dirReqs), "fid", filterID)
 	startTime = time.Now()
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
-	logDuration(ctx, startTime, "upload_dirs", "fid", filterID)
+	durationf(ctx, startTime, "upload_dirs", "fid", filterID)
 	if moreErr != nil {
 		err = moreErr
 	}

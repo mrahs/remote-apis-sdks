@@ -2,11 +2,9 @@ package casng
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	log "github.com/golang/glog"
 )
 
@@ -18,17 +16,14 @@ type routeCount struct {
 }
 
 // dispatcher receives digested blobs and forwards them to the uploader or back to the requester in case of a cache hit or error.
-// The dispatcher handles counting in-flight requests per requester and notifying requesters when all of their requests are completed.
+// A single upload request may generate multiple upload requests (file tree).
+// The dispatcher handles counting in-flight (sub-)requests per requester and notifying requesters when all of their requests are completed.
 func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.dispatcher")
-	log.V(1).Infof("start; %s", fmtCtx(ctx))
-	defer log.V(1).Infof("stop; %s", fmtCtx(ctx))
-
-	defer func() {
-		// Let the batcher and the streamer know we're done dispatching blobs.
-		close(u.batcherCh)
-		close(u.streamerCh)
-	}()
+	infof(ctx, 1, "start")
+	defer infof(ctx, 1, "stop")
+	defer close(u.batcherCh)
+	defer close(u.streamerCh)
 
 	// Maintain a count of in-flight uploads per requester.
 	counterCh := make(chan routeCount)
@@ -50,7 +45,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		for req := range u.dispatcherReqCh {
 			fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
 			if req.done { // The digester will not be sending any further blobs.
-				log.V(3).Infof("req.done; %s", fmtCtx(fctx))
+				infof(fctx, 3, "req.done")
 				startTime := time.Now()
 				counterCh <- routeCount{req.route, 0}
 				logDuration(fctx, startTime, "req->counter.done")
@@ -63,20 +58,20 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				log.Errorf("ignoring a request without a digest; %s", fmtCtx(fctx))
 				continue
 			}
-			log.V(3).Infof("req; %s", fmtCtx(fctx, "digest", req.Digest, "bytes", len(req.Bytes)))
+			infof(fctx, 3, "req", "digest", req.Digest, "bytes", len(req.Bytes))
 			startTime := time.Now()
 			// Count before sending the request to avoid an edge case where the response makes it to the counter before the increment here.
 			counterCh <- routeCount{req.route, 1}
-			logDuration(fctx, startTime, "req->counter.inc")
+			durationf(fctx, startTime, "req->counter.inc")
 			if req.digestOnly {
 				startTime := time.Now()
 				u.dispatcherResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{}, routes: []string{req.route}, reqs: []string{req.id}}
-				logDuration(fctx, startTime, "req->res")
+				durationf(fctx, startTime, "req->res")
 				continue
 			}
 			startTime = time.Now()
 			u.dispatcherPipeCh <- req
-			logDuration(fctx, startTime, "req->pipe")
+			durationf(fctx, startTime, "req->pipe")
 		}
 	}()
 
@@ -190,13 +185,13 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.V(1).Info("receiver.start; %s", fmtCtx(ctx))
-		defer log.V(1).Info("receiver.stop; %s", fmtCtx(ctx))
+		infof(ctx, 1, "receiver.start")
+		defer infof(ctx, 1, "receiver.stop")
 
 		// Messages delivered here are either went through the sender above (dispatched for upload), bypassed (digestion error), or piped back from the querier.
 		for r := range u.dispatcherResCh {
 			startTime := time.Now()
-			fctx := ctxWithValues(ctx, ctxKeyRtID, strings.Join(r.routes, "|"), ctxKeySqID, strings.Join(r.reqs, "|"))
+			fctx := ctxWithValues(ctx, ctxKeyRtID, r.routes, ctxKeySqID, r.reqs)
 			infof(fctx, 3, "res", "digest", r.Digest, "routes", len(r.routes), "cache_hit", r.Stats.CacheHitCount, "end_of_walk", r.endOfWalk, "err", r.Err)
 			// If multiple requesters are interested in this response, ensure stats are not double-counted.
 			if len(r.routes) == 1 {
@@ -206,7 +201,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				rCached.Stats = r.Stats.ToCacheHit()
 				u.uploadPubSub.mpub(ctx, r, rCached, r.routes...)
 			}
-			logDuration(fctx, startTime, "res->pub", "count", len(r.routes))
+			durationf(fctx, startTime, "res->pub", "count", len(r.routes))
 
 			// Special case: do not decrement if it's an end of walk response.
 			if !r.endOfWalk {
@@ -214,7 +209,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				for _, t := range r.routes {
 					counterCh <- routeCount{t, -1}
 				}
-				logDuration(fctx, startTime, "res->counter.dec", "count", len(r.routes))
+				durationf(fctx, startTime, "res->counter.dec", "count", len(r.routes))
 			}
 		}
 	}()

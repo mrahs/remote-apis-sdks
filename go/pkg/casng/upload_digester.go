@@ -77,14 +77,14 @@ func (u *uploader) digester(ctx context.Context) {
 		// If the requester will not be sending any further requests, wait for in-flight walks from previous requests
 		// then tell the dispatcher to forward the signal once all dispatched blobs are done.
 		if req.done {
-			infof(ctx, 2, "req.done")
+			infof(fctx, 2, "req.done")
 			wg := requesterWalkWg[req.route]
 			if wg == nil {
 				infof(fctx, 2, "req.done, no more pending walks")
 				startTime := time.Now()
 				// Let the dispatcher know that this requester is done.
 				u.dispatcherReqCh <- req
-				logDuration(fctx, startTime, "dispatcher.req")
+				durationf(fctx, startTime, "digester->dispatcher.req")
 				continue
 			}
 			// Remove the wg to ensure a new one is used if the requester decides to send more requests.
@@ -96,7 +96,7 @@ func (u *uploader) digester(ctx context.Context) {
 				defer u.workerWg.Done()
 				startTime := time.Now()
 				wg.Wait()
-				logDuration(fctx, startTime, "walk.wait")
+				durationf(fctx, startTime, "walk.wait")
 				u.dispatcherReqCh <- UploadRequest{route: route, done: true}
 			}(req.route)
 			continue
@@ -126,10 +126,10 @@ func (u *uploader) digester(ctx context.Context) {
 		}
 
 		if req.Digest.Hash != "" {
+			infof(fctx, 3, "req.digested", "path", req.Path, "fid", req.Exclude)
 			startTime := time.Now()
 			u.dispatcherReqCh <- req
-			logDuration(fctx, startTime, "dispatcher.req")
-			infof(fctx, 3, "req.digested", "path", req.Path, "fid", req.Exclude)
+			durationf(fctx, startTime, "digster->dispatcher.req")
 			continue
 		}
 
@@ -139,7 +139,7 @@ func (u *uploader) digester(ctx context.Context) {
 		if !u.walkThrottler.acquire(req.ctx) {
 			continue
 		}
-		logDuration(fctx, startTime, "sem.walk")
+		durationf(fctx, startTime, "sem.walk")
 		wg := requesterWalkWg[req.route]
 		if wg == nil {
 			wg = &sync.WaitGroup{}
@@ -150,7 +150,7 @@ func (u *uploader) digester(ctx context.Context) {
 		go func(r UploadRequest) {
 			defer u.walkerWg.Done()
 			defer wg.Done()
-			defer u.walkThrottler.release()
+			defer u.walkThrottler.release(ctx)
 			u.digest(fctx, r) // uploader ctx, not req.ctx
 		}(req)
 	}
@@ -160,12 +160,7 @@ func (u *uploader) digester(ctx context.Context) {
 // ctx is the uploader's ctx, not specific to req, which already has req.ctx.
 func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 	ctx = ctxWithValues(ctx, ctxKeyWalkID, uuid.New())
-	if log.V(3) {
-		startTime := time.Now()
-		defer func() {
-			logDuration(ctx, startTime, "visit", "path", req.Path)
-		}()
-	}
+	defer durationf(ctx, time.Now(), "visit", "path", req.Path)
 
 	stats := Stats{}
 	var err error
@@ -176,6 +171,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			err = errors.Join(errVisit, err)
 			return false
 		},
+
 		Pre: func(path impath.Absolute, realPath impath.Absolute) (walker.PreAction, bool) {
 			infof(ctx, 3, "visit.pre", "path", path, "real_path", realPath, "fid", req.Exclude)
 
@@ -214,7 +210,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				infof(ctx, 3, "visit.wait", "path", path, "real_path", realPath)
 				startTime := time.Now()
 				wg.Wait()
-				logDuration(ctx, startTime, "visit.wait", "path", req.Path, "real_path", realPath)
+				durationf(ctx, startTime, "visit.wait", "path", req.Path, "real_path", realPath)
 				delete(deferredWg, key)
 				return walker.Defer, true
 			}
@@ -234,7 +230,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					ctx: req.ctx,
 					digestOnly: req.digestOnly,
 				}
-				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
+				durationf(ctx, startTime, "digster->dispatcher.req", "path", req.Path, "real_path", realPath)
 			case *repb.DirectoryNode:
 				// The blob of the directory node is the bytes of a repb.Directory message.
 				// Generate and forward it. If it was uploaded before, it'll be reported as a cache hit.
@@ -253,7 +249,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					ctx: req.ctx,
 					digestOnly: req.digestOnly,
 				}
-				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
+				durationf(ctx, startTime, "digester->dispatcher.req", "path", req.Path, "real_path", realPath)
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
 			default:
@@ -263,6 +259,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 
 			return walker.SkipPath, true
 		},
+
 		Post: func(path impath.Absolute, realPath impath.Absolute, info fs.FileInfo) (ok bool) {
 			infof(ctx, 3, "visit.post", "path", path, "real_path", realPath, "fid", req.Exclude)
 
@@ -305,6 +302,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					err = errors.Join(errDigest, err)
 					return false
 				}
+				infof(ctx, 3, "visit.post.dir", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
 				u.dirChildren.append(parentKey, node)
 				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{
@@ -316,8 +314,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					digestOnly: req.digestOnly,
 				}
 				u.nodeCache.Store(key, node)
-				infof(ctx, 3, "visit.post.dir", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
-				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
+				durationf(ctx, startTime, "digester->dispatcher.req", "path", req.Path, "real_path", realPath)
 				return true
 
 			case info.Mode().IsRegular():
@@ -329,6 +326,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					err = errors.Join(errDigest, err)
 					return false
 				}
+				infof(ctx, 3, "visit.post.file", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
 				node.Name = path.Base().String()
 				u.nodeCache.Store(key, node)
 				u.dirChildren.append(parentKey, node)
@@ -346,8 +344,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					ctx: req.ctx,
 					digestOnly: req.digestOnly,
 				}
-				infof(ctx, 3, "visit.post.file", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
-				logDuration(ctx, startTime, "dispatcher.req", "path", req.Path, "real_path", realPath)
+				durationf(ctx, startTime, "digester->dispatcher.req", "path", req.Path, "real_path", realPath)
 				return true
 
 			default:
@@ -356,6 +353,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			}
 			return true
 		},
+
 		Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (action walker.SymlinkAction, ok bool) {
 			infof(ctx, 3, "visit.symlink", "path", path, "real_path", realPath, "slo", req.SymlinkOptions, "fid", req.Exclude)
 
@@ -418,7 +416,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 		Stats: stats,
 		Err: err,
 	}
-	logDuration(ctx, startTime, "dispatcher.res", "path", req.Path)
+	durationf(ctx, startTime, "digester->dispatcher.res", "path", req.Path)
 }
 
 // digestSymlink follows the target and/or constructs a symlink node.
@@ -428,12 +426,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 // Note that the target includes hierarchy information, without specific names.
 // Another example: if the root is /a, the symilnk is b/c and the target is foo, the name will be c, and the target will be foo.
 func digestSymlink(ctx context.Context, root impath.Absolute, path impath.Absolute, slo slo.Options) (*repb.SymlinkNode, walker.SymlinkAction, error) {
-	if log.V(3) {
-		startTime := time.Now()
-		defer func() {
-			logDuration(ctx, startTime, "digest.symlink")
-		}()
-	}
+	defer durationf(ctx, time.Now(), "digest.symlink")
 
 	if slo.Skip() {
 		return nil, walker.SkipSymlink, nil
@@ -498,12 +491,7 @@ func digestSymlink(ctx context.Context, root impath.Absolute, path impath.Absolu
 // No syscalls are made in this method.
 // Only the base of path is used. No ancenstory information is included in the returned node.
 func digestDirectory(ctx context.Context, path impath.Absolute, children []proto.Message) (*repb.DirectoryNode, []byte, error) {
-	if log.V(3) {
-		startTime := time.Now()
-		defer func() {
-			logDuration(ctx, startTime, "digest.dir")
-		}()
-	}
+	defer durationf(ctx, time.Now(), "digest.dir")
 
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
@@ -546,12 +534,8 @@ func digestDirectory(ctx context.Context, path impath.Absolute, children []proto
 //
 // If the returned err is not nil, both tokens are released before returning.
 func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo, closeLargeFile bool) (node *repb.FileNode, blb *blob, err error) {
-	if log.V(3) {
-		startTime := time.Now()
-		defer func() {
-			logDuration(ctx, startTime, "digest.file")
-		}()
-	}
+	defer durationf(ctx, time.Now(), "digest.file")
+
 	// Always return a clone to ensure the cached version remains owned by the cache.
 	defer func() {
 		if node != nil {
@@ -567,7 +551,7 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 		m, ok := u.fileNodeCache.LoadOrStore(path, wg)
 		// Claimed.
 		if !ok {
-			log.V(3).Infof("file.claimed; %s", fmtCtx(ctx, "path", path))
+			infof(ctx, 3, "file.claimed", "path", path)
 			break
 		}
 		// Cached.
@@ -625,11 +609,11 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 		if !u.ioLargeThrottler.acquire(ctx) {
 			return nil, nil, ctx.Err()
 		}
-		logDuration(ctx, startTime, "sem.io.large")
+		durationf(ctx, startTime, "sem.io.large")
 		defer func() {
 			// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 			if blb == nil || blb.r == nil {
-				u.ioLargeThrottler.release()
+				u.ioLargeThrottler.release(ctx)
 			}
 		}()
 	}
@@ -638,11 +622,11 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 	if !u.ioThrottler.acquire(ctx) {
 		return nil, nil, ctx.Err()
 	}
-	logDuration(ctx, startTime, "sem.io")
+	durationf(ctx, startTime, "sem.io")
 	defer func() {
 		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 		if blb == nil || blb.r == nil {
-			u.ioThrottler.release()
+			u.ioThrottler.release(ctx)
 		}
 	}()
 

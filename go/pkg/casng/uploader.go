@@ -396,43 +396,42 @@ func (u *uploader) close(ctx context.Context) {
 	// all producers are terminated before releasing resources.
 	u.done = true
 
-	startTime := time.Now()
+	defer durationf(ctx, time.Now(), "close")
 
 	// 1st, batching API senders should stop producing requests.
 	// These senders are terminated by the user.
-	log.V(1).Infof("waiting for client senders; %s", fmtCtx(ctx))
+	infof(ctx, 1, "waiting for client senders")
 	u.clientSenderWg.Wait()
 
 	// 2nd, streaming API upload senders should stop producing queries and requests.
 	// These senders are terminated by the user.
-	log.V(1).Infof("waiting for upload senders; %s", fmtCtx(ctx))
+	infof(ctx, 1, "waiting for upload senders")
 	u.uploadSenderWg.Wait()
 	close(u.digesterCh) // The digester will propagate the termination signal.
 
 	// 3rd, streaming API query senders should stop producing queries.
 	// This propagates from the uploader's pipe, hence, the uploader must stop first.
-	log.V(1).Infof("waiting for query senders; %s", fmtCtx(ctx))
+	infof(ctx, 1, "waiting for query senders")
 	u.querySenderWg.Wait()
 	close(u.queryCh) // Terminate the query processor.
 
 	// 4th, internal routres should flush all remaining requests.
-	log.V(1).Infof("waiting for processors; %s", fmtCtx(ctx))
+	infof(ctx, 1, "waiting for processors")
 	u.processorWg.Wait()
 
 	// 5th, internal brokers should flush all remaining messages.
-	log.V(1).Infof("waiting for brokers; %s", fmtCtx(ctx))
+	infof(ctx, 1, "waiting for brokers")
 	u.queryPubSub.wait()
 	u.uploadPubSub.wait()
 
 	// 6th, receivers should have drained their channels by now.
-	log.V(1).Infof("waiting for receivers; %s", fmtCtx(ctx))
+	infof(ctx, 1, "waiting for receivers")
 	u.receiverWg.Wait()
 
 	// 7th, workers should have terminated by now.
-	log.V(1).Infof("waiting for workers; %s", fmtCtx(ctx))
+	infof(ctx, 1, "waiting for workers")
 	u.workerWg.Wait()
 
-	logDuration(ctx, startTime, "close")
 	close(u.logBeatDoneCh)
 }
 
@@ -453,20 +452,20 @@ func (u *uploader) logBeat(ctx context.Context) {
 		return
 	}
 
-	log.Infof("beat.start; %s", fmtCtx(ctx, "interval", interval))
+	infof(ctx, 1, "beat.start", "interval", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	i := 0
 	for {
 		select {
 		case <-u.logBeatDoneCh:
-			log.Infof("beat.stop; %s", fmtCtx(ctx, "interval", interval, "count", i))
+			infof(ctx, 1, "beat.stop", "interval", interval, "count", i)
 			return
 		case <-ticker.C:
 		}
 
 		i++
-		log.Infof("beat; %s", fmtCtx(ctx,
+		infof(ctx, 1, "beat",
 			"#", i,
 			"upload_subs", u.uploadPubSub.len(),
 			"query_subs", u.queryPubSub.len(),
@@ -476,14 +475,8 @@ func (u *uploader) logBeat(ctx context.Context) {
 			"querying", u.queryThrottler.len(),
 			"open_files", u.ioThrottler.len(),
 			"large_open_files", u.ioLargeThrottler.len(),
-		))
+		)
 	}
-}
-
-// releaseIOTokens releases from both ioThrottler and ioLargeThrottler.
-func (u *uploader) releaseIOTokens() {
-	u.ioThrottler.release()
-	u.ioLargeThrottler.release()
 }
 
 func isExec(mode fs.FileMode) bool {
