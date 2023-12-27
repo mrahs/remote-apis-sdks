@@ -67,8 +67,8 @@ func (u *uploader) digester(ctx context.Context) {
 
 	defer func() {
 		u.walkerWg.Wait()
-		// Let the dispatcher know that the digester has terminated by sending an untagged done blob.
-		u.dispatcherReqCh <- UploadRequest{done: true}
+		// Let the dispatcher know that the digester has terminated.
+		close(u.dispatcherReqCh)
 	}()
 
 	requesterWalkWg := make(map[string]*sync.WaitGroup)
@@ -223,11 +223,11 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			case *repb.FileNode:
 				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{
-					Path: realPath,
-					Digest: digest.NewFromProtoUnvalidated(node.Digest),
-					id: req.id,
-					route: req.route,
-					ctx: req.ctx,
+					Path:       realPath,
+					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
+					id:         req.id,
+					route:      req.route,
+					ctx:        req.ctx,
 					digestOnly: req.digestOnly,
 				}
 				durationf(ctx, startTime, "digster->dispatcher.req", "path", req.Path, "real_path", realPath)
@@ -242,11 +242,11 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				}
 				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{
-					Bytes: b,
-					Digest: digest.NewFromProtoUnvalidated(node.Digest),
-					id: req.id,
-					route: req.route,
-					ctx: req.ctx,
+					Bytes:      b,
+					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
+					id:         req.id,
+					route:      req.route,
+					ctx:        req.ctx,
 					digestOnly: req.digestOnly,
 				}
 				durationf(ctx, startTime, "digester->dispatcher.req", "path", req.Path, "real_path", realPath)
@@ -306,11 +306,11 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				u.dirChildren.append(parentKey, node)
 				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{
-					Bytes: b,
-					Digest: digest.NewFromProtoUnvalidated(node.Digest),
-					id: req.id,
-					route: req.route,
-					ctx: req.ctx,
+					Bytes:      b,
+					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
+					id:         req.id,
+					route:      req.route,
+					ctx:        req.ctx,
 					digestOnly: req.digestOnly,
 				}
 				u.nodeCache.Store(key, node)
@@ -336,12 +336,12 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				}
 				startTime := time.Now()
 				u.dispatcherReqCh <- UploadRequest{
-					Bytes: blb.b,
-					reader: blb.r,
-					Digest: digest.NewFromProtoUnvalidated(node.Digest),
-					id: req.id,
-					route: req.route,
-					ctx: req.ctx,
+					Bytes:      blb.b,
+					reader:     blb.r,
+					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
+					id:         req.id,
+					route:      req.route,
+					ctx:        req.ctx,
 					digestOnly: req.digestOnly,
 				}
 				durationf(ctx, startTime, "digester->dispatcher.req", "path", req.Path, "real_path", realPath)
@@ -411,10 +411,10 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 	// err includes any IO errors that happened during the walk.
 	u.dispatcherResCh <- UploadResponse{
 		endOfWalk: true,
-		routes: []string{req.route},
-		reqs: []string{req.id},
-		Stats: stats,
-		Err: err,
+		routes:    []string{req.route},
+		reqs:      []string{req.id},
+		Stats:     stats,
+		Err:       err,
 	}
 	durationf(ctx, startTime, "digester->dispatcher.res", "path", req.Path)
 }

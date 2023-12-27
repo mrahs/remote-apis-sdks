@@ -35,12 +35,11 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer func() {
-			// Let the piper know that the sender will not be sending any more blobs.
-			u.dispatcherPipeCh <- UploadRequest{done: true}
-		}()
 		infof(ctx, 1, "sender.start")
 		defer infof(ctx, 1, "sender.stop")
+		defer close(u.dispatcherPipeCh)
+		// Let the counter know we're done incrementing.
+		defer func(){ counterCh <- routeCount{} }()
 
 		for req := range u.dispatcherReqCh {
 			fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
@@ -48,10 +47,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				infof(fctx, 3, "req.done")
 				startTime := time.Now()
 				counterCh <- routeCount{req.route, 0}
-				logDuration(fctx, startTime, "req->counter.done")
-				if req.route == "" { // In fact, the digester (and all requesters) have terminated.
-					return
-				}
+				durationf(fctx, startTime, "req->counter.done")
 				continue
 			}
 			if req.Digest.Hash == "" {
@@ -75,108 +71,71 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		}
 	}()
 
-	// The piper forwards blobs from the sender to the query processor.
+	// The pipe sender forwards blobs from the sender to the query processor.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		infof(ctx, 1, "pipe.send.start")
+		defer infof(ctx, 1, "pipe.send.stop")
+		defer close(queryCh)
+
+		// This channel is closed by the sender.
+		for req := range u.dispatcherPipeCh {
+			startTime := time.Now()
+			fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
+			infof(fctx, 3, "pipe.req", "digest", req.Digest)
+			queryCh <- missingBlobRequest{digest: req.Digest, meta: missingBlobRequestMeta{ctx: req.ctx, id: req.id, ref: req}}
+			durationf(fctx, startTime, "pipe->query")
+		}
+	}()
+
+	// The pipe receiver forwards blobs from the sender to the query processor.
 	// Cache hits are forwarded to the receiver.
 	// Cache misses are dispatched to the batcher or the streamer.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.V(1).Infof("pipe.start; %s", fmtCtx(ctx))
-		defer log.V(1).Infof("pipe.stop; %s", fmtCtx(ctx))
+		infof(ctx, 1, "pipe.receive.start")
+		defer infof(ctx, 1, "pipe.receive.stop")
 
-		done := false
 		batchItemSizeLimit := int64(u.batchRPCCfg.BytesLimit - u.uploadRequestBaseSize - u.uploadRequestItemBaseSize)
-		// Keep track of blobs that are associated with a digest since the query API only accepts digests.
-		// Each blob may have a different route and context so all must be dispathced.
-		digestReqs := make(map[digest.Digest][]UploadRequest)
+		// This channel is closed by the processor when queryCh is closed, which happens when the sender
+		// sends a done signal. This ensures all responses are forwarded to the dispatcher.
+		for r := range queryResCh {
+			startTime := time.Now()
+			fctx := ctxWithValues(ctx, ctxKeyRtID, r.meta.route, ctxKeySqID, r.meta.id)
+			infof(ctx, 3, "pipe.res", "digest", r.Digest, "missing", r.Missing, "err", r.Err)
 
-		// BUG: this loop forms a circular path
-		// The path is: digester -> dispatcherReqCh -> dispatcherPipeCh -> queryCh -> pubsub -> queryResCh -> dispatcherResCh
-		// The loop may block sending on queryCh, but at the same time pubsub may be blocked sending on queryResCh.
-		for {
-			select {
-			// The dispatcher sends blobs on this channel, but never closes it.
-			case req := <-u.dispatcherPipeCh:
-				startTime := time.Now()
-				fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
-				// In the off chance that a request is received after a done signal, ignore it to avoid sending on a closed channel.
-				if done {
-					log.Errorf("ignoring a request after a done signal; %s", fmtCtx(fctx))
-					continue
-				}
-				// If the dispatcher has terminated, tell the streamer we're done and continue draining the response channel.
-				if req.done {
-					log.V(2).Info("pipe.done; %s", fmtCtx(fctx))
-					done = true
-					close(queryCh)
-					continue
-				}
+			req := r.meta.ref.(UploadRequest)
+			res := UploadResponse{Digest: r.Digest, Err: r.Err, routes: []string{req.route}, reqs: []string{req.id}}
 
-				log.V(3).Infof("pipe.req; %s", fmtCtx(fctx, "digest", req.Digest))
-				reqs := digestReqs[req.Digest]
-				reqs = append(reqs, req)
-				digestReqs[req.Digest] = reqs
-				if len(reqs) > 1 {
-					continue
+			if !r.Missing {
+				res.Stats = Stats{
+					BytesRequested:     r.Digest.Size,
+					LogicalBytesCached: r.Digest.Size,
+					CacheHitCount:      1,
 				}
-				// TODO: experimental fix for the deadlock. Not yet sure about the upper bound of the number of
-				// spawned goroutines here.
-				u.workerWg.Add(1)
-				go func(ctx context.Context, reqID string, d digest.Digest){
-					defer u.workerWg.Done()
-					queryCh <- missingBlobRequest{digest: d, ctx: ctx, id: reqID}
-				}(req.ctx, req.id, req.Digest)
-				logDuration(fctx, startTime, "pipe->query")
-
-			// This channel is closed by the query pipe when queryCh is closed, which happens when the sender
-			// sends a done signal. This ensures all responses are forwarded to the dispatcher.
-			case r, ok := <-queryResCh:
-				if !ok {
-					return
-				}
-				startTime := time.Now()
-				infof(ctx, 3, "pipe.res", "digest", r.Digest, "missing", r.Missing, "err", r.Err)
-				reqs := digestReqs[r.Digest]
-				delete(digestReqs, r.Digest)
-				res := UploadResponse{Digest: r.Digest, Err: r.Err}
-
-				if !r.Missing {
-					res.Stats = Stats{
-						BytesRequested:     r.Digest.Size,
-						LogicalBytesCached: r.Digest.Size,
-						CacheHitCount:      1,
-					}
-				}
-
-				fctx := ctxWithValues(ctx, ctxKeyRtID, res.routes, ctxKeySqID, res.reqs)
-
-				if r.Err != nil || !r.Missing {
-					res.routes = make([]string, len(reqs))
-					res.reqs = make([]string, len(reqs))
-					for i, req := range reqs {
-						res.routes[i] = req.route
-						res.reqs[i] = req.id
-						if req.reader != nil {
-							u.releaseIOTokens()
-						}
-					}
-					infof(fctx, 3, "pipe.res.hit", "digest", r.Digest)
-					u.dispatcherResCh <- res
-					logDuration(fctx, startTime, "query->res")
-					continue
-				}
-
-				infof(fctx, 3, "pipe.res.miss", "digest", r.Digest)
-				for _, req := range reqs {
-					if req.Digest.Size <= batchItemSizeLimit {
-						u.batcherCh <- req
-						continue
-					}
-					u.streamerCh <- req
-				}
-				// Covers waiting on the batcher and streamer.
-				logDuration(fctx, startTime, "query->upload")
 			}
+
+			if r.Err != nil || !r.Missing {
+				// Release associated IO holds before dispatching the result.
+				if req.reader != nil {
+					u.ioThrottler.release(ctx)
+					u.ioLargeThrottler.release(ctx)
+				}
+
+				u.dispatcherResCh <- res
+				durationf(fctx, startTime, "query->res")
+				continue
+			}
+
+			if req.Digest.Size <= batchItemSizeLimit {
+				u.batcherCh <- req
+				durationf(fctx, startTime, "query->upload.batcher")
+				continue
+			}
+			u.streamerCh <- req
+			durationf(fctx, startTime, "query->upload.streamer")
 		}
 	}()
 
@@ -219,40 +178,40 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.V(1).Info("counter.start; %s", fmtCtx(ctx))
-		defer log.V(1).Info("counter.stop; %s", fmtCtx(ctx))
-		defer close(u.dispatcherResCh) // Let the receiver know we're done.
+		infof(ctx, 1, "counter.start")
+		defer infof(ctx, 1, "counter.stop")
+		defer close(u.dispatcherResCh)
 
 		routeReqCount := make(map[string]int)
 		routeDone := make(map[string]bool)
 		allDone := false
-		for tc := range counterCh {
-			fctx := ctxWithValues(ctx, ctxKeyRtID, tc.t)
-			if tc.c == 0 { // There will be no more blobs from this requester.
-				log.V(3).Infof("counter.done.in; %s", fmtCtx(fctx))
-				if tc.t == "" { // In fact, no more blobs for any requester.
+		for rc := range counterCh {
+			fctx := ctxWithValues(ctx, ctxKeyRtID, rc.t)
+			if rc.c == 0 { // There will be no more blobs from this route.
+				infof(fctx, 3, "counter.done.in")
+				if rc.t == "" { // In fact, no more blobs for any route.
 					if len(routeReqCount) == 0 { // All counting is done.
 						return
 					}
-					// Remember to return once all counting is done.
+					// Remember to terminate once all counting is done.
 					allDone = true
 					continue
 				}
-				routeDone[tc.t] = true
+				routeDone[rc.t] = true
 			}
-			routeReqCount[tc.t] += tc.c
-			if routeReqCount[tc.t] < 0 {
-				log.Errorf("counter.negative; %s", fmtCtx(fctx, "inc", tc.c, "count", routeReqCount[tc.t], "done", routeDone[tc.t]))
+			routeReqCount[rc.t] += rc.c
+			if routeReqCount[rc.t] < 0 {
+				log.Errorf("counter.negative; %s", fmtCtx(fctx, "inc", rc.c, "count", routeReqCount[rc.t], "done", routeDone[rc.t]))
 			}
-			log.V(3).Infof("counter.count; %s", fmtCtx(fctx, "inc", tc.c, "count", routeReqCount[tc.t], "done", routeDone[tc.t], "pending_routes", len(routeReqCount)))
-			if routeReqCount[tc.t] <= 0 && routeDone[tc.t] {
-				log.V(2).Infof("counter.done.to; %s", fmtCtx(fctx))
-				delete(routeDone, tc.t)
-				delete(routeReqCount, tc.t)
+			infof(ctx, 3, "counter.count", "inc", rc.c, "count", routeReqCount[rc.t], "done", routeDone[rc.t], "pending_routes", len(routeReqCount))
+			if routeReqCount[rc.t] <= 0 && routeDone[rc.t] {
+				infof(ctx, 2, "counter.done.to")
+				delete(routeDone, rc.t)
+				delete(routeReqCount, rc.t)
 				startTime := time.Now()
 				// Signal to the requester that all of its requests are done.
-				u.uploadPubSub.pub(ctx, UploadResponse{done: true}, tc.t)
-				logDuration(fctx, startTime, "coutner->pub")
+				u.uploadPubSub.pub(ctx, UploadResponse{done: true}, rc.t)
+				durationf(fctx, startTime, "coutner->pub")
 			}
 			if len(routeReqCount) == 0 && allDone {
 				return

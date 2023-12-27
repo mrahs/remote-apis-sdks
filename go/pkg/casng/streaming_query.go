@@ -46,10 +46,16 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-	log "github.com/golang/glog"
 	"github.com/pborman/uuid"
 	"google.golang.org/protobuf/proto"
 )
+
+type missingBlobRequestMeta struct {
+	ctx   context.Context
+	id    string
+	route string
+	ref   any
+}
 
 // MissingBlobsResponse represents a query result for a single digest.
 //
@@ -58,27 +64,18 @@ type MissingBlobsResponse struct {
 	Digest  digest.Digest
 	Missing bool
 	Err     error
-	refs    []any
+	meta    missingBlobRequestMeta
 }
 
 // missingBlobRequest associates a digest with its requester's context.
 type missingBlobRequest struct {
 	digest digest.Digest
-	id     string
-	route  string
-	ctx    context.Context
-	ref    any
-}
-
-// queryRequestBundleItem is a tuple of an upload request and a list of clients interested in the response.
-type queryRequestBundleItem struct {
-	routes []string
-	refs []any
+	meta   missingBlobRequestMeta
 }
 
 // queryRequestBundle is used to bundle up (unify) concurrent requests for the same digest from different requesters (routes).
 // It's also used to associate digests with request IDs for logging purposes.
-type queryRequestBundle map[digest.Digest]queryRequestBundleItem
+type queryRequestBundle map[digest.Digest][]missingBlobRequestMeta
 
 // MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
 //
@@ -105,7 +102,7 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 		defer u.clientSenderWg.Done()
 		defer close(pipeIn)
 		for d := range in {
-			pipeIn <- missingBlobRequest{digest: d, ctx: ctx, id: uuid.New()}
+			pipeIn <- missingBlobRequest{digest: d, meta: missingBlobRequestMeta{ctx: ctx, id: uuid.New()}}
 		}
 	}()
 	return out
@@ -123,9 +120,7 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 			res := MissingBlobsResponse{Err: ErrTerminatedUploader}
 			for req := range in {
 				res.Digest = req.digest
-				if req.ref != nil {
-					res.refs = []any{req.ref}
-				}
+				res.meta = req.meta
 				ch <- res
 			}
 		}()
@@ -145,7 +140,7 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 		defer infof(ctx, 1, "sender.stop")
 
 		for r := range in {
-			r.route = route
+			r.meta.route = route
 			u.queryCh <- r
 			pendingCh <- 1
 		}
@@ -162,11 +157,7 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 		defer infof(ctx, 1, "receiver.stop")
 
 		// Continue to drain until the broker closes the channel.
-		for {
-			r, ok := <-resCh
-			if !ok {
-				return
-			}
+		for r := range resCh {
 			ch <- r.(MissingBlobsResponse)
 			pendingCh <- -1
 		}
@@ -184,7 +175,9 @@ func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRe
 
 		pending := 0
 		done := false
-		for x := range pendingCh {
+		for {
+			// This channel is never closed because it has two senders.
+			x := <-pendingCh
 			if x == 0 {
 				done = true
 			}
@@ -210,7 +203,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 	bundleSize := u.queryRequestBaseSize
 
 	handle := func() {
-		if len(bundle) < 1 {
+		if len(bundle) == 0 {
 			return
 		}
 		// Block the entire processor if the concurrency limit is reached.
@@ -218,11 +211,13 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 		if !u.queryThrottler.acquire(ctx) {
 			// Ensure responses are dispatched before aborting.
 			for d := range bundle {
-				u.queryPubSub.pub(ctx, MissingBlobsResponse{
-					Digest: d,
-					Err:    ctx.Err(),
-					refs:   bundle[d].refs,
-				}, bundle[d].routes...)
+				for _, m := range bundle[d] {
+					u.queryPubSub.pub(ctx, MissingBlobsResponse{
+						Digest: d,
+						Err:    ctx.Err(),
+						meta:   m,
+					}, m.route)
+				}
 			}
 			infof(ctx, 3, "cancel")
 			return
@@ -260,13 +255,10 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 				res := MissingBlobsResponse{
 					Digest: req.digest,
 					Err:    ErrOversizedItem,
+					meta:   req.meta,
 				}
-				if req.ref != nil {
-					res.refs = []any{req.ref}
-				}
-				u.queryPubSub.pub(ctx, res, req.route)
-				// Covers waiting on subscribers.
-				logDuration(ctx, startTime, "pub")
+				u.queryPubSub.pub(ctx, res, req.meta.route)
+				durationf(ctx, startTime, "query->pub")
 				continue
 			}
 
@@ -277,12 +269,9 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			}
 
 			// Duplicate routes are allowed to ensure the requester can match the number of responses to the number of requests.
-			item := bundle[req.digest]
-			item.routes = append(item.routes, req.route)
-			item.refs = append(item.refs, req.ref)
-			bundle[req.digest] = item
+			bundle[req.digest] = append(bundle[req.digest], req.meta)
 			bundleSize += dSize
-			bundleCtx, _ = contextmd.FromContexts(bundleCtx, req.ctx) // ignore non-essential error.
+			bundleCtx, _ = contextmd.FromContexts(bundleCtx, req.meta.ctx) // ignore non-essential error.
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
@@ -335,22 +324,26 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBund
 	// Report missing.
 	for _, dpb := range missing {
 		d := digest.NewFromProtoUnvalidated(dpb)
-		u.queryPubSub.pub(ctx, MissingBlobsResponse{
-			Digest:  d,
-			Missing: err == nil,
-			Err:     err,
-			refs:    bundle[d].refs,
-		}, bundle[d].routes...)
+		for _, m := range bundle[d] {
+			u.queryPubSub.pub(ctx, MissingBlobsResponse{
+				Digest:  d,
+				Missing: err == nil,
+				Err:     err,
+				meta:    m,
+			}, m.route)
+		}
 		delete(bundle, d)
 	}
 
 	// Report non-missing.
 	for d := range bundle {
-		u.queryPubSub.pub(ctx, MissingBlobsResponse{
-			Digest:  d,
-			Missing: false,
-			refs:    bundle[d].refs,
-		}, bundle[d].routes...)
+		for _, m := range bundle[d] {
+			u.queryPubSub.pub(ctx, MissingBlobsResponse{
+				Digest:  d,
+				Missing: false,
+				meta:    m,
+			}, m.route)
+		}
 	}
 	durationf(ctx, startTime, "query->pub")
 }

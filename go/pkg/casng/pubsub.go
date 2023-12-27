@@ -90,32 +90,31 @@ func (ps *pubsub) unsub(ctx context.Context, route string) {
 // iteration on the subscribers, even though both have the same worst-case cost.
 // For example, if out of 10 subscribers 5 were busy for 1ms, the attempt will cost ~5ms instead of 10ms.
 func (ps *pubsub) pub(ctx context.Context, m any, routes ...string) {
-	// TODO: experiental async pub to see if it helps with congestion.
-	// go func(){
-		ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub")
-		_ = ps.pubN(ctx, m, len(routes), routes...)
-	// }()
+	ctx = ctxWithLogDepthInc(ctx)
+	_ = ps.pubN(ctx, m, len(routes), routes...)
 }
+
+// func (ps *pubsub) pubZip(ctx context.Context, msgs []any, routes []string) error {
+// 	ctx = ctxWithLogDepthInc(ctx)
+// 	if len(msgs) != len(routes) {
+// 		return fmt.Errorf("pubZip: slice length mismatch, msgs=%d, routes=%d, %s", len(msgs), len(routes), fmtCtx(ctx))
+// 	}
+// 	for i := range msgs {
+//
+// 	}
+// }
 
 // mpub (multi-publish) delivers the "once" message to a single subscriber then delivers the "rest" message to the rest of the subscribers.
 // It's useful for cases where the message holds shared information that should not be duplicated among subscribers, such as stats.
 func (ps *pubsub) mpub(ctx context.Context, once any, rest any, routes ...string) {
-	ctx = ctxWithValues(ctx, ctxKeyModule, "pubsub")
-	t := ps.pubOnce(ctx, once, routes...)
-	// TODO: experiental async pub to see if it helps with congestion.
-	// go func(){
-		_ = ps.pubN(ctx, rest, len(routes)-1, excludeRoute(routes, t)...)
-	// }()
-}
+	ctx = ctxWithLogDepthInc(ctx)
 
-// pubOnce is like pub, but delivers the message to a single subscriber.
-// The route of the subscriber that got the message is returned.
-func (ps *pubsub) pubOnce(ctx context.Context, m any, routes ...string) string {
-	received := ps.pubN(ctx, m, 1, routes...)
-	if len(received) == 0 {
-		return ""
+	usedRoute := ""
+	usedRoutes := ps.pubN(ctx, once, 1, routes...)
+	if len(usedRoutes) > 0 {
+		usedRoute = usedRoutes[0]
 	}
-	return received[0]
+	_ = ps.pubN(ctx, rest, len(routes)-1, excludeRoute(routes, usedRoute)...)
 }
 
 // pubN is like pub, but delivers the message to no more than n subscribers. The routes of the subscribers that got the message are returned.
