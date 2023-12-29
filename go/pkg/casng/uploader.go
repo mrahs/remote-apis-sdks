@@ -302,6 +302,7 @@ func newUploader(
 	}
 
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload")
+	chBuffer := 500_000
 	u := &uploader{
 		cas:          cas,
 		byteStream:   byteStream,
@@ -334,13 +335,13 @@ func newUploader(
 		ioLargeThrottler: newThrottler(int64(ioCfg.OpenLargeFilesLimit)),
 		dirChildren:      nodeSliceMap{store: make(map[string][]proto.Message)},
 
-		queryCh:          make(chan missingBlobRequest, 100000),
+		queryCh:          make(chan missingBlobRequest, chBuffer),
 		queryPubSub:      newPubSub(),
 		digesterCh:       make(chan UploadRequest),
-		dispatcherReqCh:  make(chan UploadRequest, 100000),
-		dispatcherResCh:  make(chan UploadResponse, 100000),
-		batcherCh:        make(chan UploadRequest),
-		streamerCh:       make(chan UploadRequest),
+		dispatcherReqCh:  make(chan UploadRequest, chBuffer),
+		dispatcherResCh:  make(chan UploadResponse, chBuffer),
+		batcherCh:        make(chan UploadRequest, chBuffer),
+		streamerCh:       make(chan UploadRequest, chBuffer),
 		uploadPubSub:     newPubSub(),
 
 		queryRequestBaseSize:      proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),
@@ -435,6 +436,7 @@ func (u *uploader) close(ctx context.Context) {
 	u.workerWg.Wait()
 
 	close(u.logBeatDoneCh)
+	infof(ctx, 1, "done")
 }
 
 // Done returns a channel that is closed when the the uploader is done.
@@ -461,13 +463,12 @@ func (u *uploader) logBeat(ctx context.Context) {
 	for {
 		select {
 		case <-u.logBeatDoneCh:
-			infof(ctx, 1, "beat.stop", "interval", interval, "count", i)
 			return
 		case <-ticker.C:
 		}
 
 		i++
-		infof(ctx, 1, "beat",
+		infof(ctx, 0, "beat",
 			"#", i,
 			"upload_subs", u.uploadPubSub.len(),
 			"query_subs", u.queryPubSub.len(),
@@ -478,8 +479,10 @@ func (u *uploader) logBeat(ctx context.Context) {
 			"batching", u.uploadThrottler.len(),
 			"streaming", u.streamThrottle.len(),
 			"dispatcher.req", len(u.dispatcherReqCh),
-			"dispatcher.res", len(u.dispatcherResCh),
 			"query", len(u.queryCh),
+			"batcher", len(u.batcherCh),
+			"streamer", len(u.streamerCh),
+			"dispatcher.res", len(u.dispatcherResCh),
 		)
 	}
 }

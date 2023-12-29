@@ -112,7 +112,7 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 // missingBlobsPipe is a shared implementation between batching and streaming interfaces.
 func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRequest) <-chan MissingBlobsResponse {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "query.stream_pipe")
-	ch := make(chan MissingBlobsResponse, 100000)
+	ch := make(chan MissingBlobsResponse)
 
 	// If this was called after the the uploader was terminated, short the circuit and return.
 	if u.done {

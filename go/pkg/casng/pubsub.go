@@ -38,7 +38,7 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 		ps.done = make(chan struct{})
 	}
 	route := uuid.New()
-	subscriber := make(chan any, 100000)
+	subscriber := make(chan any)
 	ps.subs[route] = subscriber
 
 	ctx = ctxWithValues(ctxWithLogDepthInc(ctx), ctxKeyRtID, route)
