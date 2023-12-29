@@ -40,6 +40,9 @@ var (
 )
 
 func ctxWithRqID(ctx context.Context) context.Context {
+	if !log.V(4) {
+		return ctx
+	}
 	if id := ctx.Value(CtxKeyRqID); id != nil {
 		return ctx
 	}
@@ -48,6 +51,9 @@ func ctxWithRqID(ctx context.Context) context.Context {
 }
 
 func ctxWithLogDepthInc(ctx context.Context) context.Context {
+	if !log.V(4) {
+		return ctx
+	}
 	d := 0
 	if dRaw := ctx.Value(ctxKeyLogDepth); dRaw != nil {
 		d = dRaw.(int)
@@ -70,6 +76,10 @@ func fmtCtx(ctx context.Context, kv ...any) string {
 			continue
 		}
 		s = append(s, fmt.Sprintf("%s=%v", k, kv[i]))
+	}
+
+	if !log.V(4) {
+		return strings.Join(s, ", ")
 	}
 
 	rawModule := ctx.Value(ctxKeyModule)
@@ -106,6 +116,9 @@ func fmtCtx(ctx context.Context, kv ...any) string {
 }
 
 func ctxWithValues(ctx context.Context, kv ...any) context.Context {
+	if !log.V(4) {
+		return ctx
+	}
 	var k any
 	for i := 0; i < len(kv); i++ {
 		if i%2 == 0 {
@@ -126,7 +139,8 @@ func durationf(ctx context.Context, startTime time.Time, op string, kv ...any) {
 		return
 	}
 	endTime := time.Now()
-	log.InfoDepthf(1, "duration.%s; start=%d, end=%d, d=%s, %s", op, startTime.UnixNano(), endTime.UnixNano(), endTime.Sub(startTime), fmtCtx(ctx, kv...))
+	// reclient uses an old version of glog that doesn't have InfoDepthf.
+	log.InfoDepth(1, fmt.Sprintf("duration.%s; start=%d, end=%d, d=%s, %s", op, startTime.UnixNano(), endTime.UnixNano(), endTime.Sub(startTime), fmtCtx(ctx, kv...)))
 }
 
 func infof(ctx context.Context, level log.Level, msg string, kv ...any) {
@@ -134,12 +148,14 @@ func infof(ctx context.Context, level log.Level, msg string, kv ...any) {
 		return
 	}
 	depth := depthFromCtx(ctx)
-	log.InfoDepthf(depth+1, "%s; %s", msg, fmtCtx(ctx, kv...))
+	// reclient uses an old version of glog that doesn't have InfoDepthf.
+	log.InfoDepth(depth+1, fmt.Sprintf("%s; %s", msg, fmtCtx(ctx, kv...)))
 }
 
 func warnf(ctx context.Context, msg string, kv ...any) {
 	depth := depthFromCtx(ctx)
-	log.WarningDepthf(depth+1, "%s; %s", msg, fmtCtx(ctx, kv...))
+	// reclient uses an old version of glog that doesn't have WarningDepthf.
+	log.WarningDepth(depth+1, fmt.Sprintf("%s; %s", msg, fmtCtx(ctx, kv...)))
 }
 
 func depthFromCtx(ctx context.Context) int {

@@ -41,7 +41,7 @@ type namedDigest interface {
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
 	ctx = ctxWithRqID(ctx)
 	ctx = ctxWithValues(ctx, ctxKeyModule, "query.batch")
-	defer durationf(ctx, time.Now(), "missing_blobs", "reqs", len(digests))
+	defer durationf(ctx, time.Now(), "missing_blobs", "count", len(digests))
 	if len(digests) == 0 {
 		return nil, nil
 	}
@@ -67,7 +67,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	if len(batches) == 0 {
 		return nil, nil
 	}
-	infof(ctx, 1, "deduped", "reqs", len(dgSet))
+	infof(ctx, 1, "deduped", "count", len(dgSet))
 
 	// Call remote.
 	missing := make([]digest.Digest, 0, len(dgSet))
@@ -326,7 +326,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, Stats, error) {
 	ctx = ctxWithRqID(ctx)
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.batch")
-	defer durationf(ctx, time.Now(), "upload", "reqs", len(reqs))
+	defer durationf(ctx, time.Now(), "upload", "count", len(reqs))
 
 	var stats Stats
 
@@ -349,7 +349,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	if err != nil {
 		return nil, stats, err
 	}
-	infof(ctx, 1, "queured", "missing", len(missing), "undigested", len(undigested))
+	infof(ctx, 1, "query", "count", len(reqs), "missing", len(missing), "undigested", len(undigested))
 
 	reqs = undigested
 	for _, d := range missing {
@@ -367,7 +367,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 		return nil, stats, nil
 	}
 
-	infof(ctx, 1, "uploading", "reqs", len(reqs))
+	infof(ctx, 1, "uploading", "count", len(reqs))
 	ch := make(chan UploadRequest)
 	resCh := u.streamPipe(ctx, ch)
 
@@ -404,7 +404,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	}
 
 	if c < len(reqs) {
-		err = errors.Join(fmt.Errorf("incomplete request: %w; %s", ctx.Err(), fmtCtx(ctx, "sent", c, "reqs", len(reqs))), err)
+		err = errors.Join(fmt.Errorf("incomplete request: %w; %s", ctx.Err(), fmtCtx(ctx, "sent", c, "count", len(reqs))), err)
 	}
 	return uploaded, stats, err
 }
@@ -453,7 +453,7 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
 	ctx = ctxWithRqID(ctx)
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.tree")
-	defer durationf(ctx, time.Now(), "upload_tree", "reqs", len(reqs))
+	defer durationf(ctx, time.Now(), "upload_tree", "count", len(reqs))
 
 	if len(reqs) == 0 {
 		return
@@ -522,7 +522,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// 	r := &reqs[i]
 	// 	r.Exclude.ID = filterIDFunc
 	// }
-	infof(ctx, 1, "filter", "fid", filterID, "reqs", len(reqs), "filtered_reqs", i)
+	infof(ctx, 1, "filter", "fid", filterID, "count", len(reqs), "filtered", i)
 
 	// 2nd, Upload the requests first to digest the files and cache the nodes.
 	startTime = time.Now()
@@ -575,7 +575,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			}
 		}
 	}
-	durationf(ctx, startTime, "construct_Tree", "fid", filterID)
+	durationf(ctx, startTime, "construct_tree", "fid", filterID)
 
 	// This block generates directory nodes for shared ancestors starting from leaf nodes (DFS-style).
 	dirReqs := make([]UploadRequest, 0, len(dirChildren))

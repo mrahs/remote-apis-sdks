@@ -75,18 +75,18 @@ package casng
 // Logging:
 //  Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
 //  Level 2 is used for internal functions that may be called per request.
-//  Level 3 is used for internal functions that may be called multiple times per request. Duration logs are also level 3 to avoid the overhead in level 4.
-//  Level 4 is used for messages with large objects.
-//  Level 5 is used for messages that require custom processing (extra compute).
+//  Level 3 is used for durations.
+//  Level 4 is used for internal functions that may be called multiple times per request.
+//  Level 5 is used for messages with large objects or messages that require extra compute.
 //
 // Log messages are formatted to be grep-friendly. You can do things like:
 //   grep info.log -e 'upload.digester'
-//   grep info.log -e 'tid=trace_id' | sort
-//   grep info.log -e 'tag=route_id' | sort | less
+//   grep info.log -e 'tid=trace_id' | tr -s ' ' | sort -k2 | less
+//   grep info.log -e 'tag=route_id'
 //   grep info.log -e 'rid=request_id'
 //
 // To get a csv file of durations, enable verbosity level 3 and use the command:
-//   grep reproxy_info.log -e 'duration\..*;' | tr -s ' ' | sort -k2 | cut -d ' ' -f 5- | sed -e 's/; start=/,/' -e 's/, end=/,/' >/tmp/duration.csv
+//  grep 'duration\..*;' | tr -s ' ' | sort -k2 | cut -d ' ' -f 5- | sed -e 's/; start=/,/' -e 's/, end=/,/' >/tmp/duration.csv
 
 import (
 	"context"
@@ -299,6 +299,7 @@ func newUploader(
 		return nil, err
 	}
 
+	ctx = ctxWithValues(ctx, ctxKeyModule, "upload")
 	u := &uploader{
 		cas:          cas,
 		byteStream:   byteStream,

@@ -2,6 +2,8 @@ package casng
 
 import (
 	"context"
+
+	log "github.com/golang/glog"
 )
 
 // throttler provides a simple semaphore interface to limit in-flight goroutines.
@@ -16,7 +18,7 @@ func (t *throttler) acquire(ctx context.Context) bool {
 	for {
 		select {
 		case t.ch <- struct{}{}:
-			infof(ctxWithLogDepthInc(ctx), 3, "throttler.acquire")
+			infof(ctxWithLogDepthInc(ctx), 4, "throttler.acquire")
 			return true
 		case <-ctx.Done():
 			return false
@@ -26,8 +28,12 @@ func (t *throttler) acquire(ctx context.Context) bool {
 
 // release returns a token to the pool. Must be called after acquire. Otherwise, it will block until acquire is called.
 func (t *throttler) release(ctx context.Context) {
-	<-t.ch
-	infof(ctxWithLogDepthInc(ctx), 3, "throttler.release")
+	select {
+	case <-t.ch:
+		infof(ctxWithLogDepthInc(ctx), 4, "throttler.release")
+	default:
+		log.Errorf("throttler.release called before acquire; %s", fmtCtx(ctx))
+	}
 }
 
 // len returns the number of acquired tokens.

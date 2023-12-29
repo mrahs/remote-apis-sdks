@@ -104,7 +104,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		for r := range queryResCh {
 			startTime := time.Now()
 			fctx := ctxWithValues(ctx, ctxKeyRtID, r.meta.route, ctxKeySqID, r.meta.id)
-			infof(ctx, 3, "pipe.res", "digest", r.Digest, "missing", r.Missing, "err", r.Err)
+			infof(ctx, 4, "pipe.res", "digest", r.Digest, "missing", r.Missing, "err", r.Err)
 
 			req := r.meta.ref.(UploadRequest)
 			res := UploadResponse{Digest: r.Digest, Err: r.Err, routes: []string{req.route}, reqs: []string{req.id}}
@@ -125,17 +125,17 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				}
 
 				u.dispatcherResCh <- res
-				durationf(fctx, startTime, "query->res")
+				durationf(fctx, startTime, "dispatcher.res.q->dispatcher.res")
 				continue
 			}
 
 			if req.Digest.Size <= batchItemSizeLimit {
 				u.batcherCh <- req
-				durationf(fctx, startTime, "query->upload.batcher")
+				durationf(fctx, startTime, "dispatcher.res.q->batcher.req")
 				continue
 			}
 			u.streamerCh <- req
-			durationf(fctx, startTime, "query->upload.streamer")
+			durationf(fctx, startTime, "dispatcher.res.q->streamer.req")
 		}
 	}()
 
@@ -151,7 +151,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		for r := range u.dispatcherResCh {
 			startTime := time.Now()
 			fctx := ctxWithValues(ctx, ctxKeyRtID, r.routes, ctxKeySqID, r.reqs)
-			infof(fctx, 3, "res", "digest", r.Digest, "routes", len(r.routes), "cache_hit", r.Stats.CacheHitCount, "end_of_walk", r.endOfWalk, "err", r.Err)
+			infof(fctx, 4, "res", "digest", r.Digest, "routes", len(r.routes), "cache_hit", r.Stats.CacheHitCount, "end_of_walk", r.endOfWalk, "err", r.Err)
 			// If multiple requesters are interested in this response, ensure stats are not double-counted.
 			if len(r.routes) == 1 {
 				u.uploadPubSub.pub(ctx, r, r.routes[0])
@@ -160,7 +160,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				rCached.Stats = r.Stats.ToCacheHit()
 				u.uploadPubSub.mpub(ctx, r, rCached, r.routes...)
 			}
-			durationf(fctx, startTime, "res->pub", "count", len(r.routes))
+			durationf(fctx, startTime, "dispatcher.res->pub", "count", len(r.routes))
 
 			// Special case: do not decrement if it's an end of walk response.
 			if !r.endOfWalk {
@@ -168,7 +168,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				for _, t := range r.routes {
 					counterCh <- routeCount{t, -1}
 				}
-				durationf(fctx, startTime, "res->counter.dec", "count", len(r.routes))
+				durationf(fctx, startTime, "dispatcher.res->dispatcher.counter", "count", len(r.routes))
 			}
 		}
 	}()
@@ -188,7 +188,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		for rc := range counterCh {
 			fctx := ctxWithValues(ctx, ctxKeyRtID, rc.t)
 			if rc.c == 0 { // There will be no more blobs from this route.
-				infof(fctx, 3, "counter.done.in")
+				infof(fctx, 4, "counter.done.in")
 				if rc.t == "" { // In fact, no more blobs for any route.
 					if len(routeReqCount) == 0 { // All counting is done.
 						return
@@ -203,7 +203,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 			if routeReqCount[rc.t] < 0 {
 				log.Errorf("counter.negative; %s", fmtCtx(fctx, "inc", rc.c, "count", routeReqCount[rc.t], "done", routeDone[rc.t]))
 			}
-			infof(ctx, 3, "counter.count", "inc", rc.c, "count", routeReqCount[rc.t], "done", routeDone[rc.t], "pending_routes", len(routeReqCount))
+			infof(ctx, 4, "counter.count", "inc", rc.c, "count", routeReqCount[rc.t], "done", routeDone[rc.t], "pending_routes", len(routeReqCount))
 			if routeReqCount[rc.t] <= 0 && routeDone[rc.t] {
 				infof(ctx, 2, "counter.done.to")
 				delete(routeDone, rc.t)
@@ -211,7 +211,7 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 				startTime := time.Now()
 				// Signal to the requester that all of its requests are done.
 				u.uploadPubSub.pub(ctx, UploadResponse{done: true}, rc.t)
-				durationf(fctx, startTime, "coutner->pub")
+				durationf(fctx, startTime, "dispatcher.counter->pub")
 			}
 			if len(routeReqCount) == 0 && allDone {
 				return

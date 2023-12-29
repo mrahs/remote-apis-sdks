@@ -166,7 +166,7 @@ func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-ch
 			r.route = route
 			r.ctx = ctx
 			r.id = uuid.New()
-			infof(ctxWithValues(ctx, ctxKeySqID, r.id), 3, "req", "path", r.Path, "bytes", len(r.Bytes))
+			infof(ctxWithValues(ctx, ctxKeySqID, r.id), 4, "req", "path", r.Path, "bytes", len(r.Bytes))
 			u.digesterCh <- r
 		}
 		// Let the processor know that no further requests are expected.
@@ -200,7 +200,7 @@ func (u *uploader) batcher(ctx context.Context) {
 	infof(ctx, 1, "start")
 	defer infof(ctx, 1, "stop")
 
-	bundle := make(uploadRequestBundle)
+	bundle := make(uploadRequestBundle, u.batchRPCCfg.ItemsLimit)
 	bundleSize := u.uploadRequestBaseSize
 	bundleCtx := ctx // context with unified metadata.
 
@@ -255,7 +255,7 @@ func (u *uploader) batcher(ctx context.Context) {
 			startTime := time.Now()
 
 			fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
-			infof(fctx, 3, "req", "digest", req.Digest)
+			infof(fctx, 4, "req", "digest", req.Digest)
 
 			// Unify.
 			item, ok := bundle[req.Digest]
@@ -264,14 +264,14 @@ func (u *uploader) batcher(ctx context.Context) {
 				item.routes = append(item.routes, req.route)
 				item.reqs = append(item.reqs, req.id)
 				bundle[req.Digest] = item
-				infof(fctx, 3, "unified", "digest", req.Digest, "bundle", len(item.routes))
+				infof(fctx, 4, "unified", "digest", req.Digest, "bundle", len(item.routes))
 				continue
 			}
 
 			// It's possible for files to be considered medium and large, but still fit into a batch request.
 			// Load the bytes without blocking the batcher by deferring the blob.
 			if len(req.Bytes) == 0 {
-				infof(fctx, 3, "defer", "digest", req.Digest, "path", req.Path)
+				infof(fctx, 4, "defer", "digest", req.Digest, "path", req.Path)
 				u.workerWg.Add(1)
 				// The upper bound of these goroutines is controlled by uploadThrottler in handle.
 				go func(){
@@ -284,7 +284,7 @@ func (u *uploader) batcher(ctx context.Context) {
 			// If the blob doesn't fit in the current bundle, cycle it.
 			rSize := u.uploadRequestItemBaseSize + len(req.Bytes)
 			if bundleSize+rSize >= u.batchRPCCfg.BytesLimit {
-				infof(fctx, 3, "bundle.size", "bytes", bundleSize, "excess", rSize)
+				infof(fctx, 4, "bundle.size", "bytes", bundleSize, "excess", rSize)
 				handle()
 			}
 
@@ -299,14 +299,15 @@ func (u *uploader) batcher(ctx context.Context) {
 
 			// If the bundle is full, cycle it.
 			if len(bundle) >= u.batchRPCCfg.ItemsLimit {
-				infof(fctx, 3, "bundle.full", "count", len(bundle))
+				infof(fctx, 4, "bundle.full", "count", len(bundle))
 				handle()
 			}
-			durationf(ctx, startTime, "bundle.append", "digest", req.Digest, "count", len(bundle))
+			durationf(ctx, startTime, "batcher->bundle.append", "digest", req.Digest, "count", len(bundle))
 		case <-bundleTicker.C:
 			startTime := time.Now()
+			l := len(bundle)
 			handle()
-			durationf(ctx, startTime, "bundle.timeout", "count", len(bundle))
+			durationf(ctx, startTime, "batcher->bundle.timeout", "count", l)
 		}
 	}
 }
@@ -349,13 +350,15 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 			uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
 		}
 		if l := len(req.Requests); l > 0 {
-			infof(ctx, 3, "call.retry", "count", l)
+			infof(ctx, 4, "call.retry", "count", l)
 		}
 		return reqErr
 	})
-	durationf(ctx, startTime, "grpc",
-		"uploaded", len(uploaded), "failed", len(failed), "req_failed", len(bundle)-len(uploaded)-len(failed))
+	durationf(ctx, startTime, "batcher.grpc",
+		"count", len(bundle), "uploaded", len(uploaded), "failed", len(failed),
+		"req_failed", len(bundle)-len(uploaded)-len(failed))
 
+	startTime = time.Now()
 	// Report uploaded.
 	for _, d := range uploaded {
 		s := Stats{
@@ -378,7 +381,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		}
 		if log.V(3) {
 			fctx := ctxWithValues(ctx, ctxKeySqID, bundle[d].reqs, ctxKeyRtID, bundle[d].routes)
-			infof(fctx, 3, "res.uploaded", "digest", d)
+			infof(fctx, 4, "res.uploaded", "digest", d)
 		}
 		delete(bundle, d)
 	}
@@ -404,13 +407,13 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		}
 		if log.V(3) {
 			fctx := ctxWithValues(ctx, ctxKeySqID, bundle[d].reqs, ctxKeyRtID, bundle[d].routes)
-			infof(fctx, 3, "res.failed", "digest", d)
+			infof(fctx, 4, "res.failed", "digest", d)
 		}
 		delete(bundle, d)
 	}
-	durationf(ctx, startTime, "batcher->dispatcher.res")
 
 	if len(bundle) == 0 {
+		durationf(ctx, startTime, "batcher.grpc->dispatcher.res")
 		return
 	}
 
@@ -439,10 +442,10 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadRequestBund
 		}
 		if log.V(3) {
 			fctx := ctxWithValues(ctx, ctxKeySqID, bundle[d].reqs, ctxKeyRtID, bundle[d].routes)
-			infof(fctx, 3, "res.failed.call", "digest", d)
+			infof(fctx, 4, "res.failed.call", "digest", d)
 		}
 	}
-	durationf(ctx, startTime, "batcher->dispatcher.res")
+	durationf(ctx, startTime, "batcher.grpc->dispatcher.res")
 }
 
 // streamer handles files that do not fit into a batching request.
@@ -469,7 +472,7 @@ func (u *uploader) streamer(ctx context.Context) {
 			}
 			shouldReleaseIOTokens := req.reader != nil
 			rctx := ctxWithValues(req.ctx, ctxKeyModule, m, ctxKeySqID, req.id, ctxKeyRtID, req.route)
-			infof(rctx, 3, "req", "digest", req.Digest, "large", shouldReleaseIOTokens, "pending", pending)
+			infof(rctx, 4, "req", "digest", req.Digest, "large", shouldReleaseIOTokens, "pending", pending)
 
 			digestReqs[req.Digest] = append(digestReqs[req.Digest], req.id)
 			routes := digestRoutes[req.Digest]
@@ -481,13 +484,13 @@ func (u *uploader) streamer(ctx context.Context) {
 					u.ioThrottler.release(ctx)
 					u.ioLargeThrottler.release(ctx)
 				}
-				infof(rctx, 3, "unified", "digest", req.Digest, "bundle_count", len(routes))
+				infof(rctx, 4, "unified", "digest", req.Digest, "bundle_count", len(routes))
 				continue
 			}
 
 			var name string
 			if req.Digest.Size >= u.ioCfg.CompressionSizeThreshold {
-				infof(rctx, 3, "compress", "digest", req.Digest)
+				infof(rctx, 4, "compress", "digest", req.Digest)
 				name = MakeCompressedWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
 			} else {
 				name = MakeWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
@@ -507,7 +510,7 @@ func (u *uploader) streamer(ctx context.Context) {
 					defer u.workerWg.Done()
 					startTime := time.Now()
 					streamResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{BytesRequested: req.Digest.Size}, Err: ctx.Err()}
-					durationf(rctx, startTime, "req->res", "digest", req.Digest)
+					durationf(rctx, startTime, "streamer.req->streamer.res", "digest", req.Digest)
 				}(req)
 				continue
 			}
@@ -520,7 +523,7 @@ func (u *uploader) streamer(ctx context.Context) {
 				// Release before sending on the channel to avoid blocking without actually using the gRPC resources.
 				u.streamThrottle.release(ctx)
 				streamResCh <- UploadResponse{Digest: req.Digest, Stats: s, Err: err}
-				durationf(rctx, startTime, "req->res", "digest", req.Digest)
+				durationf(rctx, startTime, "streamer->streamer.res", "digest", req.Digest)
 			}(req)
 		case r := <-streamResCh:
 			startTime := time.Now()
@@ -532,7 +535,7 @@ func (u *uploader) streamer(ctx context.Context) {
 			pending--
 			if log.V(3) {
 				fctx := ctxWithValues(ctx, ctxKeySqID, r.reqs, ctxKeyRtID, r.routes)
-				durationf(fctx, startTime, "streamer->dispatcher.res", "digest", r.Digest, "pending", pending)
+				durationf(fctx, startTime, "streamer.res->dispatcher.res", "digest", r.Digest, "pending", pending)
 			}
 		}
 	}

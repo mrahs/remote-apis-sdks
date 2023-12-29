@@ -2,6 +2,7 @@ package casng
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -41,7 +42,7 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 	ps.subs[route] = subscriber
 
 	ctx = ctxWithValues(ctxWithLogDepthInc(ctx), ctxKeyRtID, route)
-	infof(ctx, 3, "sub")
+	infof(ctx, 4, "sub")
 	return route, subscriber
 }
 
@@ -50,7 +51,7 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 // It is an error to publish more messages for route after this call.
 func (ps *pubsub) unsub(ctx context.Context, route string) {
 	ctx = ctxWithValues(ctxWithLogDepthInc(ctx), ctxKeyRtID, route)
-	infof(ctx, 3, "unsub.scheduled")
+	infof(ctx, 4, "unsub.scheduled")
 	// If unsub is called from the same goroutine that is listening on the subscription
 	// channel, a deadlock might occur.
 	// pub would be holding a read lock while this call wants to hold a write lock that must
@@ -71,9 +72,9 @@ func (ps *pubsub) unsub(ctx context.Context, route string) {
 		close(subscriber)
 		if len(ps.subs) == 0 {
 			close(ps.done)
-			infof(ctx, 3, "done")
+			infof(ctx, 4, "done")
 		}
-		infof(ctx, 3, "unsub.done")
+		infof(ctx, 4, "unsub.done")
 	}()
 }
 
@@ -124,7 +125,7 @@ func (ps *pubsub) pubN(ctx context.Context, m any, n int, routes ...string) []st
 
 	if len(routes) == 0 {
 		warnf(ctx, "called without routes, dropping message")
-		infof(ctx, 4, "called without routes", "msg", m)
+		infof(ctx, 5, "called without routes", "msg", m)
 		return nil
 	}
 	if n <= 0 {
@@ -142,30 +143,30 @@ func (ps *pubsub) pubN(ctx context.Context, m any, n int, routes ...string) []st
 
 	retryCount := 0
 	for {
-		for _, t := range routes {
-			subscriber, ok := ps.subs[t]
-			fctx := ctxWithValues(ctx, ctxKeyRtID, t)
+		for _, r := range routes {
+			fctx := ctxWithValues(ctx, ctxKeyRtID, r)
+			subscriber, ok := ps.subs[r]
 			if !ok {
-				warnf(fctx, "drop orphaned message")
+				warnf(fctx, "dropped orphaned message")
 				continue
 			}
 			// Send now or reschedule if the subscriber is not ready.
 			select {
 			case subscriber <- m:
-				infof(fctx, 3, "sent")
-				received = append(received, t)
+				infof(fctx, 4, "sent")
+				received = append(received, r)
 				if len(received) >= n {
 					return received
 				}
 			case <-ticker.C:
-				toRetry = append(toRetry, t)
+				toRetry = append(toRetry, r)
 			}
 		}
 		if len(toRetry) == 0 {
 			break
 		}
 		retryCount++
-		infof(ctxWithValues(ctx, ctxKeyRtID, toRetry), 3, "retry", "#", retryCount, "count", len(toRetry))
+		infof(ctxWithValues(ctx, ctxKeyRtID, toRetry), 4, "retry", "#", retryCount, "count", len(toRetry))
 
 		// Avoid mutating routes because it's expected to remain the same set upstream.
 		// Reslicing toRetry allows shifting retries to the left without without reallocating a new array.
