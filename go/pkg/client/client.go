@@ -778,21 +778,31 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 		return nil, fmt.Errorf("CASConcurrency should be at least 1")
 	}
 	if client.useCasNg {
+		queryItemsLimit := int(client.UnifiedUploadBufferSize)
+		if queryItemsLimit > int(client.MaxQueryBatchDigests) {
+			queryItemsLimit = int(client.MaxQueryBatchDigests)
+			log.Warningf("upload_buffer_size=%d > max_query_batch_digests=%d; using the latter instead.", client.UnifiedUploadBufferSize, client.MaxQueryBatchDigests)
+		}
 		queryCfg := casng.GRPCConfig{
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			BytesLimit:           int(client.MaxBatchSize),
-			ItemsLimit:           int(client.MaxQueryBatchDigests),
+			ItemsLimit:           queryItemsLimit,
 			BundleTimeout:        time.Duration(client.UnifiedUploadTickDuration),
 			// Timeout:              DefaultRPCTimeouts["FindMissingBlobs"],
 			Timeout:        DefaultRPCTimeouts["default"],
 			RetryPolicy:    client.Retrier.Backoff,
 			RetryPredicate: client.Retrier.ShouldRetry,
 		}
+		batchItemsLimit := int(client.UnifiedUploadBufferSize)
+		if batchItemsLimit > int(client.MaxBatchDigests) {
+			batchItemsLimit = int(client.MaxBatchDigests)
+			log.Warningf("upload_buffer_size=%d > max_batch_digests=%d; using the latter instead.", client.UnifiedUploadBufferSize, client.MaxBatchDigests)
+		}
 		batchCfg := casng.GRPCConfig{
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			BytesLimit:           int(client.MaxBatchSize),
-			ItemsLimit:           int(client.UnifiedUploadBufferSize),
-			BundleTimeout:        time.Duration(client.UnifiedUploadTickDuration), // Low value to fast track queries.
+			ItemsLimit:           batchItemsLimit,
+			BundleTimeout:        time.Duration(client.UnifiedUploadTickDuration),
 			Timeout:              DefaultRPCTimeouts["BatchUpdateBlobs"],
 			RetryPolicy:          client.Retrier.Backoff,
 			RetryPredicate:       client.Retrier.ShouldRetry,
@@ -801,13 +811,13 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			BytesLimit:           1,                // Unused.
 			ItemsLimit:           1,                // Unused.
-			BundleTimeout:        time.Millisecond, // Unused.
+			BundleTimeout:        time.Second,      // Unused.
 			Timeout:              DefaultRPCTimeouts["default"],
 			RetryPolicy:          client.Retrier.Backoff,
 			RetryPredicate:       client.Retrier.ShouldRetry,
 		}
 		ioCfg := casng.IOConfig{
-			ConcurrentWalksLimit:     2*int(client.casConcurrency),
+			ConcurrentWalksLimit:     10*int(client.casConcurrency),
 			OpenFilesLimit:           casng.DefaultOpenFilesLimit,
 			OpenLargeFilesLimit:      casng.DefaultOpenLargeFilesLimit,
 			SmallFileSizeThreshold:   casng.DefaultSmallFileSizeThreshold,

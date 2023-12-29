@@ -196,6 +196,9 @@ type uploader struct {
 	// dirChildren is shared between all callers. However, since a directory is owned by a single
 	// walker at a time, there is no concurrent read/write to this map, but there might be concurrent reads.
 	dirChildren               nodeSliceMap
+	// casHasDigest helps short-circuit querying the CAS. It maps a digest to a boolean.
+	// If the digest was previously seen in the CAS, the boolean will be true.
+	casHasDigest sync.Map
 	queryRequestBaseSize      int
 	uploadRequestBaseSize     int
 	uploadRequestItemBaseSize int
@@ -211,7 +214,6 @@ type uploader struct {
 	queryCh          chan missingBlobRequest // Fan-in channel for query requests.
 	digesterCh       chan UploadRequest      // Fan-in channel for upload requests.
 	dispatcherReqCh  chan UploadRequest      // Fan-in channel for dispatched requests.
-	dispatcherPipeCh chan UploadRequest      // A pipe channel for presence checking before uploading.
 	dispatcherResCh  chan UploadResponse     // Fan-in channel for responses.
 	batcherCh        chan UploadRequest      // Fan-in channel for unified requests to the batching API.
 	streamerCh       chan UploadRequest      // Fan-in channel for unified requests to the byte streaming API.
@@ -332,12 +334,11 @@ func newUploader(
 		ioLargeThrottler: newThrottler(int64(ioCfg.OpenLargeFilesLimit)),
 		dirChildren:      nodeSliceMap{store: make(map[string][]proto.Message)},
 
-		queryCh:          make(chan missingBlobRequest),
+		queryCh:          make(chan missingBlobRequest, 100000),
 		queryPubSub:      newPubSub(),
 		digesterCh:       make(chan UploadRequest),
-		dispatcherReqCh:  make(chan UploadRequest),
-		dispatcherPipeCh: make(chan UploadRequest),
-		dispatcherResCh:  make(chan UploadResponse),
+		dispatcherReqCh:  make(chan UploadRequest, 100000),
+		dispatcherResCh:  make(chan UploadResponse, 100000),
 		batcherCh:        make(chan UploadRequest),
 		streamerCh:       make(chan UploadRequest),
 		uploadPubSub:     newPubSub(),
@@ -471,11 +472,14 @@ func (u *uploader) logBeat(ctx context.Context) {
 			"upload_subs", u.uploadPubSub.len(),
 			"query_subs", u.queryPubSub.len(),
 			"walkers", u.walkThrottler.len(),
-			"batching", u.uploadThrottler.len(),
-			"streaming", u.streamThrottle.len(),
-			"querying", u.queryThrottler.len(),
 			"open_files", u.ioThrottler.len(),
 			"large_open_files", u.ioLargeThrottler.len(),
+			"querying", u.queryThrottler.len(),
+			"batching", u.uploadThrottler.len(),
+			"streaming", u.streamThrottle.len(),
+			"dispatcher.req", len(u.dispatcherReqCh),
+			"dispatcher.res", len(u.dispatcherResCh),
+			"query", len(u.queryCh),
 		)
 	}
 }

@@ -208,7 +208,7 @@ func (u *uploader) batcher(ctx context.Context) {
 	// This allows resetting the bundle and associated variables in one call rather than having to repeat the reset
 	// code after every call to this function.
 	handle := func() {
-		if len(bundle) < 1 {
+		if len(bundle) == 0 {
 			return
 		}
 		// Block the batcher if the concurrency limit is reached.
@@ -238,7 +238,7 @@ func (u *uploader) batcher(ctx context.Context) {
 			u.callBatchUpload(ctx, b)
 		}(bundleCtx, bundle)
 
-		bundle = make(uploadRequestBundle)
+		bundle = make(uploadRequestBundle, u.batchRPCCfg.ItemsLimit)
 		bundleSize = u.uploadRequestBaseSize
 		bundleCtx = ctx
 	}

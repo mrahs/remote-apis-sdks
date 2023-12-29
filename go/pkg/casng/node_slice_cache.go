@@ -13,15 +13,22 @@ type nodeSliceMap struct {
 }
 
 // load returns the slice associated with the given key or nil.
-func (c *nodeSliceMap) load(key string) []proto.Message {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.store[key]
+func (nsm *nodeSliceMap) load(key string) []proto.Message {
+	nsm.mu.RLock()
+	defer nsm.mu.RUnlock()
+	return nsm.store[key]
 }
 
 // append appends the specified value to the slice associated with the specified key.
-func (c *nodeSliceMap) append(key string, m proto.Message) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.store[key] = append(c.store[key], m)
+func (nsm *nodeSliceMap) append(key string, m proto.Message) {
+	nsm.mu.Lock()
+	defer nsm.mu.Unlock()
+	nsm.store[key] = append(nsm.store[key], m)
+}
+
+// len returns the number of entries in the map.
+func (nsm *nodeSliceMap) len() int {
+	nsm.mu.RLock()
+	defer nsm.mu.RUnlock()
+	return len(nsm.store)
 }

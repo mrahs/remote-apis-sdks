@@ -38,7 +38,7 @@ func (ps *pubsub) sub(ctx context.Context) (string, <-chan any) {
 		ps.done = make(chan struct{})
 	}
 	route := uuid.New()
-	subscriber := make(chan any)
+	subscriber := make(chan any, 100000)
 	ps.subs[route] = subscriber
 
 	ctx = ctxWithValues(ctxWithLogDepthInc(ctx), ctxKeyRtID, route)
@@ -95,15 +95,34 @@ func (ps *pubsub) pub(ctx context.Context, m any, routes ...string) {
 	_ = ps.pubN(ctx, m, len(routes), routes...)
 }
 
-// func (ps *pubsub) pubZip(ctx context.Context, msgs []any, routes []string) error {
-// 	ctx = ctxWithLogDepthInc(ctx)
-// 	if len(msgs) != len(routes) {
-// 		return fmt.Errorf("pubZip: slice length mismatch, msgs=%d, routes=%d, %s", len(msgs), len(routes), fmtCtx(ctx))
-// 	}
-// 	for i := range msgs {
-//
-// 	}
-// }
+func (ps *pubsub) pubZip(ctx context.Context, msgs []any, routes []string) error {
+	ctx = ctxWithLogDepthInc(ctx)
+	if len(msgs) != len(routes) {
+		return fmt.Errorf("pubZip: slice length mismatch, msgs=%d, routes=%d, %s", len(msgs), len(routes), fmtCtx(ctx))
+	}
+	defer durationf(ctx, time.Now(), "pubzip", "count", len(msgs))
+
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	wg := sync.WaitGroup{}
+	wg.Add(len(msgs))
+	for i := range msgs {
+		go func(m any, r string){
+			defer wg.Done()
+			fctx := ctxWithValues(ctx, ctxKeyRtID, r)
+			subscriber, ok := ps.subs[r]
+			if !ok {
+				warnf(fctx, "dropped orphaned message")
+				return
+			}
+			subscriber <- m
+			infof(fctx, 4, "sent")
+		}(msgs[i], routes[i])
+	}
+	wg.Wait()
+	return nil
+}
 
 // mpub (multi-publish) delivers the "once" message to a single subscriber then delivers the "rest" message to the rest of the subscribers.
 // It's useful for cases where the message holds shared information that should not be duplicated among subscribers, such as stats.

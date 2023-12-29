@@ -55,6 +55,9 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			continue
 		}
 		dgSet[d] = struct{}{}
+		if _, ok := u.casHasDigest.Load(d); ok {
+			continue
+		}
 		batch = append(batch, d.ToProto())
 		if len(batch) >= u.queryRPCCfg.ItemsLimit {
 			batches = append(batches, batch)
@@ -90,11 +93,17 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			err = errors.Join(errRes, err)
 			res.MissingBlobDigests = batch
 		}
-		for _, d := range res.MissingBlobDigests {
-			missing = append(missing, digest.NewFromProtoUnvalidated(d))
+		for _, dg := range res.MissingBlobDigests {
+			d := digest.NewFromProtoUnvalidated(dg)
+			missing = append(missing, d)
+			delete(dgSet, d)
 		}
 	}
 	infof(ctx, 1, "done", "missing", len(missing))
+
+	for d := range dgSet {
+		u.casHasDigest.Store(d, true)
+	}
 
 	if err != nil {
 		err = errors.Join(ErrGRPC, err)

@@ -37,55 +37,37 @@ func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobReq
 		defer wg.Done()
 		infof(ctx, 1, "sender.start")
 		defer infof(ctx, 1, "sender.stop")
-		defer close(u.dispatcherPipeCh)
+		defer close(queryCh)
 		// Let the counter know we're done incrementing.
 		defer func(){ counterCh <- routeCount{} }()
 
 		for req := range u.dispatcherReqCh {
 			fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
 			if req.done { // The digester will not be sending any further blobs.
-				infof(fctx, 3, "req.done")
+				infof(fctx, 4, "req.done")
 				startTime := time.Now()
 				counterCh <- routeCount{req.route, 0}
-				durationf(fctx, startTime, "req->counter.done")
+				durationf(fctx, startTime, "dispatcher.req->dispatcher.counter")
 				continue
 			}
 			if req.Digest.Hash == "" {
 				log.Errorf("ignoring a request without a digest; %s", fmtCtx(fctx))
 				continue
 			}
-			infof(fctx, 3, "req", "digest", req.Digest, "bytes", len(req.Bytes))
+			infof(fctx, 4, "req", "digest", req.Digest, "bytes", len(req.Bytes))
 			startTime := time.Now()
 			// Count before sending the request to avoid an edge case where the response makes it to the counter before the increment here.
 			counterCh <- routeCount{req.route, 1}
-			durationf(fctx, startTime, "req->counter.inc")
+			durationf(fctx, startTime, "dispatcher.req->dispatcher.counter")
 			if req.digestOnly {
 				startTime := time.Now()
 				u.dispatcherResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{}, routes: []string{req.route}, reqs: []string{req.id}}
-				durationf(fctx, startTime, "req->res")
+				durationf(fctx, startTime, "dispatcher.req->dispatcher.res")
 				continue
 			}
 			startTime = time.Now()
-			u.dispatcherPipeCh <- req
-			durationf(fctx, startTime, "req->pipe")
-		}
-	}()
-
-	// The pipe sender forwards blobs from the sender to the query processor.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		infof(ctx, 1, "pipe.send.start")
-		defer infof(ctx, 1, "pipe.send.stop")
-		defer close(queryCh)
-
-		// This channel is closed by the sender.
-		for req := range u.dispatcherPipeCh {
-			startTime := time.Now()
-			fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
-			infof(fctx, 3, "pipe.req", "digest", req.Digest)
 			queryCh <- missingBlobRequest{digest: req.Digest, meta: missingBlobRequestMeta{ctx: req.ctx, id: req.id, ref: req}}
-			durationf(fctx, startTime, "pipe->query")
+			durationf(fctx, startTime, "dispatcher.req->query")
 		}
 	}()
 
