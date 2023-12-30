@@ -209,27 +209,27 @@ type uploader struct {
 	casPresenceCache sync.Map
 
 	// Size padding values are used to improve the accuracy of estimating size limits for gRPC services.
-	queryRequestMaxSize       int
-	uploadRequestBaseSize     int
-	uploadRequestItemBaseSize int
+	uploadBatchRequestItemBytesLimit int64
+	uploadBatchRequestItemBaseSize   int
+	uploadBatchRequestBaseSize       int
 
 	// Concurrency controls.
-	clientSenderWg sync.WaitGroup // Batching API producers.
-	querySenderWg  sync.WaitGroup // Query streaming API producers.
-	uploadSenderWg sync.WaitGroup // Upload streaming API producers.
-	processorWg    sync.WaitGroup // Internal routers.
-	receiverWg     sync.WaitGroup // Consumers.
-	workerWg       sync.WaitGroup // Short-lived intermediate producers/consumers.
-	walkerWg       sync.WaitGroup // Tracks all walkers.
+	requestWorkerWg sync.WaitGroup
+	digestWorkerWg  sync.WaitGroup
+	queryWorkerWg   sync.WaitGroup
+	uploadWorkerWg  sync.WaitGroup
+	batchWorkerWg   sync.WaitGroup
+	streamWorkerWg  sync.WaitGroup
+	workerWg        sync.WaitGroup
 
 	// Channels.
-	digesterCh      chan UploadRequest      // Fan-in channel for upload requests.
-	dispatcherReqCh chan UploadRequest      // Fan-in channel for dispatched requests.
-	dispatcherResCh chan UploadResponse     // Fan-in channel for responses.
-	batcherCh       chan UploadRequest      // Fan-in channel for unified requests to the batching API.
-	streamerCh      chan UploadRequest      // Fan-in channel for unified requests to the byte streaming API.
-	queryPubSub     *pubsub                 // Fan-out broker for query responses.
-	uploadPubSub    *pubsub                 // Fan-out broker for upload responses.
+	digesterCh      chan UploadRequest  // Fan-in channel for upload requests.
+	dispatcherReqCh chan UploadRequest  // Fan-in channel for dispatched requests.
+	dispatcherResCh chan UploadResponse // Fan-in channel for responses.
+	batcherCh       chan UploadRequest  // Fan-in channel for unified requests to the batching API.
+	streamerCh      chan UploadRequest  // Fan-in channel for unified requests to the byte streaming API.
+	queryPubSub     *pubsub             // Fan-out broker for query responses.
+	uploadPubSub    *pubsub             // Fan-out broker for upload responses.
 
 	logBeatDoneCh chan struct{}
 	done          bool
@@ -312,6 +312,25 @@ func newUploader(
 		return nil, err
 	}
 
+	queryRequestBaseSize := proto.Size(&repb.FindMissingBlobsRequest{
+		InstanceName: instanceName,
+		BlobDigests:  []*repb.Digest{},
+	})
+	dgProtoSample := digest.NewFromBlob([]byte("casng")).ToProto()
+	dgProtoSize := proto.Size(dgProtoSample)
+	queryRequestMaxSize := dgProtoSize*queryCfg.ItemsLimit + queryRequestBaseSize
+	if queryRequestMaxSize > queryCfg.BytesLimit {
+		return nil, fmt.Errorf("%w: insufficient bytes limit %d for items limit %d with estimated size of %d",
+			ErrInvalidGRPCConfig, queryCfg.BytesLimit, queryCfg.ItemsLimit, queryRequestMaxSize)
+	}
+
+	uploadBatchRequestBaseSize := proto.Size(&repb.BatchUpdateBlobsRequest{
+		InstanceName: instanceName,
+		Requests:     []*repb.BatchUpdateBlobsRequest_Request{},
+	})
+	uploadBatchRequestItemBaseSize := proto.Size(&repb.BatchUpdateBlobsRequest_Request{Digest: dgProtoSample, Data: []byte{}})
+	uploadBatchRequestItemBytesLimit := int64(uploadCfg.BytesLimit - uploadBatchRequestBaseSize - uploadBatchRequestItemBaseSize)
+
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload")
 	chBuffer := 500_000
 	u := &uploader{
@@ -354,37 +373,13 @@ func newUploader(
 		streamerCh:      make(chan UploadRequest, chBuffer),
 		uploadPubSub:    newPubSub(),
 
-		queryRequestMaxSize:       queryCfg.RequestMaxSize(),
-		uploadRequestBaseSize:     proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),
-		uploadRequestItemBaseSize: proto.Size(&repb.BatchUpdateBlobsRequest_Request{Digest: digest.NewFromBlob([]byte("abc")).ToProto(), Data: []byte{}}),
+		uploadBatchRequestBaseSize:       uploadBatchRequestBaseSize,
+		uploadBatchRequestItemBaseSize:   uploadBatchRequestItemBaseSize,
+		uploadBatchRequestItemBytesLimit: uploadBatchRequestItemBytesLimit,
 
 		logBeatDoneCh: make(chan struct{}),
 	}
 	log.V(1).Infof("new; cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v, %s", queryCfg, uploadCfg, streamCfg, ioCfg, fmtCtx(ctx))
-
-	u.processorWg.Add(1)
-	go func() {
-		u.digester(ctx)
-		u.processorWg.Done()
-	}()
-
-	u.processorWg.Add(1)
-	go func() {
-		u.dispatcher(ctx)
-		u.processorWg.Done()
-	}()
-
-	u.processorWg.Add(1)
-	go func() {
-		u.batcher(ctx)
-		u.processorWg.Done()
-	}()
-
-	u.processorWg.Add(1)
-	go func() {
-		u.streamer(ctx)
-		u.processorWg.Done()
-	}()
 
 	go u.close(ctx)
 	go u.logBeat(ctx)
@@ -404,32 +399,31 @@ func (u *uploader) close(ctx context.Context) {
 
 	// 1st, batching API senders should stop producing requests.
 	// These senders are terminated by the user.
-	infof(ctx, 1, "waiting for client senders")
-	u.clientSenderWg.Wait()
+	infof(ctx, 1, "waiting for request workers")
+	u.requestWorkerWg.Wait()
 
 	// 2nd, streaming API upload senders should stop producing queries and requests.
 	// These senders are terminated by the user.
-	infof(ctx, 1, "waiting for upload senders")
-	u.uploadSenderWg.Wait()
-	close(u.digesterCh) // The digester will propagate the termination signal.
+	infof(ctx, 1, "waiting for digest workers")
+	u.digestWorkerWg.Wait()
 
 	// 3rd, streaming API query senders should stop producing queries.
 	// This propagates from the uploader's pipe, hence, the uploader must stop first.
-	infof(ctx, 1, "waiting for query senders")
-	u.querySenderWg.Wait()
+	infof(ctx, 1, "waiting for query workers")
+	u.queryWorkerWg.Wait()
 
-	// 4th, internal routres should flush all remaining requests.
-	infof(ctx, 1, "waiting for processors")
-	u.processorWg.Wait()
+	infof(ctx, 1, "waiting for upload workers")
+	u.uploadWorkerWg.Wait()
+
+	infof(ctx, 1, "waiting for batch workers")
+	u.batchWorkerWg.Wait()
+	infof(ctx, 1, "waiting for stream workers")
+	u.streamWorkerWg.Wait()
 
 	// 5th, internal brokers should flush all remaining messages.
 	infof(ctx, 1, "waiting for brokers")
 	u.queryPubSub.wait()
 	u.uploadPubSub.wait()
-
-	// 6th, receivers should have drained their channels by now.
-	infof(ctx, 1, "waiting for receivers")
-	u.receiverWg.Wait()
 
 	// 7th, workers should have terminated by now.
 	infof(ctx, 1, "waiting for workers")

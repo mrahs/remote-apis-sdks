@@ -7,13 +7,10 @@ import (
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
-	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-	"google.golang.org/protobuf/proto"
 )
 
 var (
 	ErrInvalidGRPCConfig = errors.New("invalid grpc config")
-	QueryRequestItemSize = proto.Size(&repb.Digest{Hash: "a6949c540d283821eaa28aef4929db7ee7a8e3e9d8b350e3a3de5abd9ee9f01e", SizeBytes: 11})
 )
 
 const (
@@ -93,14 +90,6 @@ type GRPCConfig struct {
 
 	// RetryPredicate is called to determine if the error is retryable. If not set, nothing is retried.
 	RetryPredicate func(error) bool
-}
-
-func (c GRPCConfig) RequestMaxSize() int {
-	queryRequestBaseSize := proto.Size(&repb.FindMissingBlobsRequest{
-		InstanceName: c.InstanceName,
-		BlobDigests: []*repb.Digest{},
-	})
-	return QueryRequestItemSize * c.ItemsLimit + queryRequestBaseSize
 }
 
 // IOConfig specifies the configuration for IO operations.
@@ -275,10 +264,6 @@ func (s *Stats) ToCacheHit() Stats {
 func validateGrpcConfig(cfg *GRPCConfig) error {
 	if cfg.ConcurrentCallsLimit < 1 || cfg.ItemsLimit < 1 || cfg.BytesLimit < 1 {
 		return fmt.Errorf("%w: negative limit", ErrInvalidGRPCConfig)
-	}
-	estimatedSize := cfg.RequestMaxSize()
-	if estimatedSize > cfg.BytesLimit {
-		return fmt.Errorf("%w: insufficient bytes limit %d for items limit %d with estimated size of %d", cfg.BytesLimit, cfg.ItemsLimit, estimatedSize)
 	}
 	return nil
 }

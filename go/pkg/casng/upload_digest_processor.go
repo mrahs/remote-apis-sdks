@@ -49,14 +49,22 @@ type blob struct {
 	b []byte
 }
 
+type walkResult struct {
+	err error
+	stats Stats
+}
+
 // digester receives upload requests from multiple concurrent requesters.
 // For each request, a file system walk is started concurrently to digest and forward blobs to the dispatcher.
 // If the request is for an already digested blob, it is forwarded to the dispatcher.
 // The number of concurrent requests is limited to the number of concurrent file system walks.
-func (u *uploader) digester(ctx context.Context) {
+func (u *uploader) digestProcessor(ctx context.Context, in <-chan UploadRequest, out chan<- any) {
+	u.digestWorkerWg.Add(1)
+	defer u.digestWorkerWg.Done()
+
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.digester")
-	infof(ctx, 1, "start")
-	defer infof(ctx, 1, "stop")
+	infof(ctx, 4, "start")
+	defer infof(ctx, 4, "stop")
 
 	// The digester receives requests from a stream pipe, and sends digested blobs to the dispatcher.
 	//
@@ -65,42 +73,12 @@ func (u *uploader) digester(ctx context.Context) {
 	//
 	// Once the uploader's context is cancelled, the digester will terminate after all the pending walks are done (implies all requesters are notified).
 
-	defer func() {
-		u.walkerWg.Wait()
-		// Let the dispatcher know that the digester has terminated.
-		close(u.dispatcherReqCh)
-	}()
+	// Ensure all in-flight walks are done before returning.
+	walkerWg := sync.WaitGroup{}
+	defer func() { walkerWg.Wait() }()
 
-	requesterWalkWg := make(map[string]*sync.WaitGroup)
-	for req := range u.digesterCh {
+	for req := range in {
 		fctx := ctxWithValues(ctx, ctxKeyRtID, req.route, ctxKeySqID, req.id)
-		// If the requester will not be sending any further requests, wait for in-flight walks from previous requests
-		// then tell the dispatcher to forward the signal once all dispatched blobs are done.
-		if req.done {
-			infof(fctx, 2, "req.done")
-			wg := requesterWalkWg[req.route]
-			if wg == nil {
-				infof(fctx, 2, "req.done, no more pending walks")
-				startTime := time.Now()
-				// Let the dispatcher know that this requester is done.
-				u.dispatcherReqCh <- req
-				durationf(fctx, startTime, "digester->dispatcher.req")
-				continue
-			}
-			// Remove the wg to ensure a new one is used if the requester decides to send more requests.
-			// Otherwise, races on the wg might happen.
-			requesterWalkWg[req.route] = nil
-			u.workerWg.Add(1)
-			// Wait for the walkers to finish dispatching blobs then tell the dispatcher that no further blobs are expected from this requester.
-			go func(route string) {
-				defer u.workerWg.Done()
-				startTime := time.Now()
-				wg.Wait()
-				durationf(fctx, startTime, "walk.wait")
-				u.dispatcherReqCh <- UploadRequest{route: route, done: true}
-			}(req.route)
-			continue
-		}
 
 		// If it's a bytes request, do not traverse the path.
 		if req.Bytes != nil {
@@ -128,7 +106,7 @@ func (u *uploader) digester(ctx context.Context) {
 		if req.Digest.Hash != "" {
 			infof(fctx, 4, "req.digested", "path", req.Path, "fid", req.Exclude)
 			startTime := time.Now()
-			u.dispatcherReqCh <- req
+			out <- req
 			durationf(fctx, startTime, "digester->dispatcher.req")
 			continue
 		}
@@ -140,25 +118,18 @@ func (u *uploader) digester(ctx context.Context) {
 			continue
 		}
 		durationf(fctx, startTime, "sem.walk")
-		wg := requesterWalkWg[req.route]
-		if wg == nil {
-			wg = &sync.WaitGroup{}
-			requesterWalkWg[req.route] = wg
-		}
-		wg.Add(1)
-		u.walkerWg.Add(1)
+		walkerWg.Add(1)
 		go func(r UploadRequest) {
-			defer u.walkerWg.Done()
-			defer wg.Done()
+			defer walkerWg.Done()
 			defer u.walkThrottler.release(ctx)
-			u.digest(fctx, r) // uploader ctx, not req.ctx
+			u.walkDigest(fctx, r, out) // uploader ctx, not req.ctx
 		}(req)
 	}
 }
 
 // digest initiates a file system walk to digest files and dispatch them for uploading.
 // ctx is the uploader's ctx, not specific to req, which already has req.ctx.
-func (u *uploader) digest(ctx context.Context, req UploadRequest) {
+func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<- any) {
 	ctx = ctxWithValues(ctx, ctxKeyWalkID, uuid.New())
 	defer durationf(ctx, time.Now(), "walk", "path", req.Path)
 
@@ -222,7 +193,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 			switch node := node.(type) {
 			case *repb.FileNode:
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{
+				out <- UploadRequest{
 					Path:       realPath,
 					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
 					id:         req.id,
@@ -241,7 +212,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					return walker.SkipPath, false
 				}
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{
+				out <- UploadRequest{
 					Bytes:      b,
 					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
 					id:         req.id,
@@ -305,7 +276,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 				infof(ctx, 4, "visit.post.dir", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
 				u.dirChildren.append(parentKey, node)
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{
+				out <- UploadRequest{
 					Bytes:      b,
 					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
 					id:         req.id,
@@ -335,7 +306,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 					return true
 				}
 				startTime := time.Now()
-				u.dispatcherReqCh <- UploadRequest{
+				out <- UploadRequest{
 					Bytes:      blb.b,
 					reader:     blb.r,
 					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
@@ -406,17 +377,7 @@ func (u *uploader) digest(ctx context.Context, req UploadRequest) {
 		},
 	})
 
-	startTime := time.Now()
-	// Special case: this response didn't have a corresponding blob. The dispatcher should not decrement its counter.
-	// err includes any IO errors that happened during the walk.
-	u.dispatcherResCh <- UploadResponse{
-		endOfWalk: true,
-		routes:    []string{req.route},
-		reqs:      []string{req.id},
-		Stats:     stats,
-		Err:       err,
-	}
-	durationf(ctx, startTime, "walk->dispatcher.res", "path", req.Path)
+	out <- walkResult{err: err, stats: stats}
 }
 
 // digestSymlink follows the target and/or constructs a symlink node.

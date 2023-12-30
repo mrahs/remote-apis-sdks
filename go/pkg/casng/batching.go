@@ -23,7 +23,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// namedDigest is used to conveniently extract the base name and its digest from repb.FileNode, repb.DirectoryNode and repb.SymlinkNode.
+// namedDigest is used to conveniently extract the base name and its digest
+// from repb.FileNode, repb.DirectoryNode and repb.SymlinkNode.
 type namedDigest interface {
 	GetName() string
 	GetDigest() *repb.Digest
@@ -378,21 +379,27 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	}
 
 	infof(ctx, 1, "uploading", "count", len(reqs))
-	ch := make(chan UploadRequest)
-	resCh := u.streamPipe(ctx, ch)
+	in := make(chan UploadRequest)
+	out := make(chan UploadResponse)
+	u.uploadWorkerWg.Add(1)
+	go func(){
+		defer u.uploadWorkerWg.Done()
+		u.uploadProcessor(ctx, in, out)
+		close(out)
+	}()
 
 	c := 0
-	u.clientSenderWg.Add(1)
+	u.requestWorkerWg.Add(1)
 	go func() {
-		defer close(ch) // let the streamer terminate.
-		defer u.clientSenderWg.Done()
+		defer close(in) // let the streamer terminate.
+		defer u.requestWorkerWg.Done()
 
 		infof(ctx, 1, "sender.start")
 		defer infof(ctx, 1, "sender.stop")
 
 		for _, r := range reqs {
 			select {
-			case ch <- r:
+			case in <- r:
 				c++
 			case <-ctx.Done():
 				log.Errorf("cancelled: %v; %s", ctx.Err(), fmtCtx(ctx))
@@ -402,7 +409,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	}()
 
 	var uploaded []digest.Digest
-	for r := range resCh {
+	for r := range out {
 		if r.Err != nil {
 			err = errors.Join(r.Err, err)
 		}
@@ -423,26 +430,36 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute, slo symlinkopts.Options, exclude walker.Filter) (digest.Digest, Stats, error) {
 	ctx = ctxWithRqID(ctx)
 	ctx = ctxWithValues(ctx, ctxKeyModule, "digest.tree")
-	ch := make(chan UploadRequest)
-	resCh := u.streamPipe(ctx, ch)
+	in := make(chan UploadRequest)
+	out := make(chan any)
+	u.digestWorkerWg.Add(1)
+	go func(){
+		defer u.digestWorkerWg.Done()
+		u.digestProcessor(ctx, in, out)
+	}()
 
 	req := UploadRequest{Path: root, SymlinkOptions: slo, Exclude: exclude, ctx: ctx, digestOnly: true}
 	select {
 	// In both cases, the channel must be closed before proceeding beyond the select statement to ensure
 	// the proper closure of resCh.
-	case ch <- req:
-		close(ch)
+	case in <- req:
+		close(in)
 	case <-ctx.Done():
-		close(ch)
+		close(in)
 		return digest.Digest{}, Stats{}, ctx.Err()
 	}
 
 	var stats Stats
 	var err error
-	for r := range resCh {
-		stats.Add(r.Stats)
-		if r.Err != nil {
-			err = errors.Join(r.Err, err)
+	for dr := range out {
+		walkRes, ok := dr.(walkResult)
+		if !ok {
+			log.Errorf("unexpected message type from digester: %T", dr)
+			continue
+		}
+		stats.Add(walkRes.stats)
+		if walkRes.err != nil {
+			err = errors.Join(walkRes.err, err)
 		}
 	}
 	rootNode := u.Node(req)
