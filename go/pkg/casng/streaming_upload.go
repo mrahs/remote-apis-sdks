@@ -133,6 +133,20 @@ func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest)
 	return u.streamPipe(ctx, in)
 }
 
+func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest, out chan<- UploadResponse) {
+	// launch a digester
+	// launch a query processor
+	// launch a batcher
+	// launch a streamer
+
+	// in -> digester -> query
+	// query -> out
+	// query -> batcher -> out
+	// query -> streamer -> out
+
+	// close(in) -> close(digester) -> close(query) -> close(batcher, streamer) -> close(out)
+}
+
 // streamPipe is used by both the streaming and the batching interfaces.
 // Each request will be enriched with internal fields for control and logging purposes.
 func (u *uploader) streamPipe(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
