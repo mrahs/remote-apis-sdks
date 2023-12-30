@@ -64,8 +64,8 @@ def remote_apis_sdks_go_deps():
     go_repository(
         name = "com_github_golang_glog",
         importpath = "github.com/golang/glog",
-        sum = "h1:VKtxabqXZkF25pY9ekfRL6a582T4P37/31XEstQ5p58=",
-        version = "v0.0.0-20160126235308-23def4e6c14b",
+        sum = "h1:uCdmnmatrKCgMBlM4rMuJZWOkPDqdbZPnrMXDY4gI68=",
+        version = "v1.2.0",
     )
     go_repository(
         name = "com_github_golang_groupcache",
@@ -94,8 +94,8 @@ def remote_apis_sdks_go_deps():
     go_repository(
         name = "com_github_google_go_cmp",
         importpath = "github.com/google/go-cmp",
-        sum = "h1:O2Tfq5qg4qc4AmwVlvv0oLiVAGB7enBSJ2x2DqQFi38=",
-        version = "v0.5.9",
+        sum = "h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=",
+        version = "v0.6.0",
     )
     go_repository(
         name = "com_github_google_uuid",

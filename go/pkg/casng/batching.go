@@ -70,7 +70,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	if len(batches) == 0 {
 		return nil, nil
 	}
-	infof(ctx, 1, "deduped", "count", len(dgSet))
+	infof(ctx, 1, "deduped", "count", len(digests), "deduped", len(dgSet))
 
 	// Call remote.
 	missing := make([]digest.Digest, 0, len(dgSet))
