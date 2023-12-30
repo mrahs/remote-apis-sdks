@@ -249,7 +249,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 			ctx = ctxWithValues(ctx, ctxKeyRtID, req.meta.route, ctxKeySqID, req.meta.id)
 			infof(ctx, 4, "req", "digest", req.digest, "bundle_count", len(bundle))
 
-			if _, ok := u.casHasDigest.Load(req.digest); ok {
+			if _, ok := u.casPresenceCache.Load(req.digest); ok {
 				infof(ctx, 4, "cas cache hit", "digest", req.digest)
 				u.queryPubSub.pub(ctx, MissingBlobsResponse{Digest: req.digest, meta: req.meta}, req.meta.route)
 				durationf(ctx, startTime, "query->dispatcher.res.q")
@@ -335,7 +335,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBund
 	durationf(ctx, startTime, "query.grpc", "count", len(digests), "missing", len(missing), "err", err)
 
 	startTime = time.Now()
-	msgs, routes := unzipBundle(ctx, bundle, missing, err, &u.casHasDigest)
+	msgs, routes := unzipBundle(ctx, bundle, missing, err, &u.casPresenceCache)
 	_ = u.queryPubSub.pubZip(ctx, msgs, routes)
 	durationf(ctx, startTime, "query.grpc->dispatcher.res.q")
 }

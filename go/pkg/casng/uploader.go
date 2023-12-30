@@ -160,10 +160,12 @@ type StreamingUploader struct {
 
 // uploader represents the state of an uploader implementation.
 type uploader struct {
+	// gRPC Services.
 	cas          regrpc.ContentAddressableStorageClient
 	byteStream   bsgrpc.ByteStreamClient
-	instanceName string
 
+	// gRPC configs.
+	instanceName string
 	queryRPCCfg  GRPCConfig
 	batchRPCCfg  GRPCConfig
 	streamRPCCfg GRPCConfig
@@ -179,26 +181,34 @@ type uploader struct {
 	zstdEncoders     sync.Pool
 	walkThrottler    *throttler // Controls concurrent file system walks.
 	ioThrottler      *throttler // Controls total number of open files.
-	ioLargeThrottler *throttler // Controls total number of open large files.
-	// nodeCache allows digesting each path only once.
+	ioLargeThrottler *throttler // Controls total number of open large files (subset of open files).
+
+	// Caches.
+	// nodeCache synchronizes digesting a path.
 	// Concurrent walkers claim a path by storing a sync.WaitGroup reference, which allows other walkers to defer
-	// digesting that path until the first walker stores the digest once it's computed.
-	// The keys are unique per walk, which means two walkers with different filters may cache the same path twice, but each copy could
-	// have a different node associated with it.
-	// However, regular files will have duplicate nodes in this cache.
+	// digesting that path until the first successful walker stores the corresponding digest.
+	// The keys are unique per walk, which means two walkers with different filters may cache
+	// the same path twice, but each copy with a different node associated with it.
 	nodeCache sync.Map
-	// fileNodeCache is similar to nodeCache, but only holds file nodes. The keys are real paths and are not unique across walks.
-	// This cache ensures that regular files are only digested once, even across walks with different exclusion filters.
+
+	// fileNodeCache synchronizes digesting regular files.
+	// The keys are real paths without filters, which ensures that regular files are only digested once, even
+	// across walks with different exclusion filters.
 	// It also ensures that nodeCache does not have duplicate nodes for identical files.
-	// In other words, nodeCache might hold different views of the same directory node, but fileNodeCache will always hold the canonical file node for the corresponding real path.
+	// In other words, nodeCache might hold different views of the same directory node, but fileNodeCache
+	// will always hold the canonical file node for the corresponding real path.
 	// Since nodes are pointer-like references, the shared memory cost between the two caches is limited to keys and addresses.
 	fileNodeCache sync.Map
-	// dirChildren is shared between all callers. However, since a directory is owned by a single
+
+	// dirChildren is shared between all walkers. However, since a directory is owned by a single
 	// walker at a time, there is no concurrent read/write to this map, but there might be concurrent reads.
-	dirChildren               nodeSliceMap
-	// casHasDigest helps short-circuit querying the CAS. It maps a digest to a boolean.
+	dirChildren nodeSliceMap
+
+	// casPresenceCache helps short-circuit querying the CAS. It maps a digest to a boolean.
 	// If the digest was previously seen in the CAS, the boolean will be true.
-	casHasDigest sync.Map
+	casPresenceCache sync.Map
+
+	// Size padding values are used to improve the accuracy of estimating size limits for gRPC services.
 	queryRequestBaseSize      int
 	uploadRequestBaseSize     int
 	uploadRequestItemBaseSize int
@@ -211,6 +221,8 @@ type uploader struct {
 	receiverWg       sync.WaitGroup          // Consumers.
 	workerWg         sync.WaitGroup          // Short-lived intermediate producers/consumers.
 	walkerWg         sync.WaitGroup          // Tracks all walkers.
+
+	// Channels.
 	queryCh          chan missingBlobRequest // Fan-in channel for query requests.
 	digesterCh       chan UploadRequest      // Fan-in channel for upload requests.
 	dispatcherReqCh  chan UploadRequest      // Fan-in channel for dispatched requests.

@@ -55,7 +55,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			continue
 		}
 		dgSet[d] = struct{}{}
-		if _, ok := u.casHasDigest.Load(d); ok {
+		if _, ok := u.casPresenceCache.Load(d); ok {
 			continue
 		}
 		batch = append(batch, d.ToProto())
@@ -101,8 +101,9 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	}
 	infof(ctx, 1, "done", "missing", len(missing))
 
+	// Record cache hits.
 	for d := range dgSet {
-		u.casHasDigest.Store(d, true)
+		_, _ = u.casPresenceCache.LoadOrStore(d, true)
 	}
 
 	if err != nil {
