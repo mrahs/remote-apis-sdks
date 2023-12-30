@@ -2,18 +2,18 @@ package casng
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
+	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
-	// ErrNegativeLimit indicates an invalid value that is < 0.
-	ErrNegativeLimit = errors.New("limit value must be >= 0")
-
-	// ErrZeroOrNegativeLimit indicates an invalid value that is <= 0.
-	ErrZeroOrNegativeLimit = errors.New("limit value must be > 0")
+	ErrInvalidGRPCConfig = errors.New("invalid grpc config")
+	QueryRequestItemSize = proto.Size(&repb.Digest{Hash: "a6949c540d283821eaa28aef4929db7ee7a8e3e9d8b350e3a3de5abd9ee9f01e", SizeBytes: 11})
 )
 
 const (
@@ -59,6 +59,8 @@ const (
 
 // GRPCConfig specifies the configuration for a gRPC endpoint.
 type GRPCConfig struct {
+	InstanceName string
+
 	// ConcurrentCallsLimit sets the upper bound of concurrent calls.
 	// Must be > 0.
 	ConcurrentCallsLimit int
@@ -91,6 +93,14 @@ type GRPCConfig struct {
 
 	// RetryPredicate is called to determine if the error is retryable. If not set, nothing is retried.
 	RetryPredicate func(error) bool
+}
+
+func (c GRPCConfig) RequestMaxSize() int {
+	queryRequestBaseSize := proto.Size(&repb.FindMissingBlobsRequest{
+		InstanceName: c.InstanceName,
+		BlobDigests: []*repb.Digest{},
+	})
+	return QueryRequestItemSize * c.ItemsLimit + queryRequestBaseSize
 }
 
 // IOConfig specifies the configuration for IO operations.
@@ -264,17 +274,21 @@ func (s *Stats) ToCacheHit() Stats {
 
 func validateGrpcConfig(cfg *GRPCConfig) error {
 	if cfg.ConcurrentCallsLimit < 1 || cfg.ItemsLimit < 1 || cfg.BytesLimit < 1 {
-		return ErrZeroOrNegativeLimit
+		return fmt.Errorf("%w: negative limit", ErrInvalidGRPCConfig)
+	}
+	estimatedSize := cfg.RequestMaxSize()
+	if estimatedSize > cfg.BytesLimit {
+		return fmt.Errorf("%w: insufficient bytes limit %d for items limit %d with estimated size of %d", cfg.BytesLimit, cfg.ItemsLimit, estimatedSize)
 	}
 	return nil
 }
 
 func validateIOConfig(cfg *IOConfig) error {
 	if cfg.ConcurrentWalksLimit < 1 || cfg.OpenFilesLimit < 1 || cfg.OpenLargeFilesLimit < 1 || cfg.BufferSize < 1 {
-		return ErrZeroOrNegativeLimit
+		return fmt.Errorf("%w: zero limit", ErrInvalidGRPCConfig)
 	}
 	if cfg.SmallFileSizeThreshold < 0 || cfg.LargeFileSizeThreshold < 0 || cfg.CompressionSizeThreshold < 0 {
-		return ErrNegativeLimit
+		return fmt.Errorf("%w: negative limit", ErrInvalidGRPCConfig)
 	}
 	return nil
 }

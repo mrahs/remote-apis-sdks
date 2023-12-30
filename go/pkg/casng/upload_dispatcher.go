@@ -18,7 +18,7 @@ type routeCount struct {
 // dispatcher receives digested blobs and forwards them to the uploader or back to the requester in case of a cache hit or error.
 // A single upload request may generate multiple upload requests (file tree).
 // The dispatcher handles counting in-flight (sub-)requests per requester and notifying requesters when all of their requests are completed.
-func (u *uploader) dispatcher(ctx context.Context, queryCh chan<- missingBlobRequest, queryResCh <-chan MissingBlobsResponse) {
+func (u *uploader) dispatcher(ctx context.Context) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.dispatcher")
 	infof(ctx, 1, "start")
 	defer infof(ctx, 1, "stop")

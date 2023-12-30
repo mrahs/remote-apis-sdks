@@ -161,8 +161,8 @@ type StreamingUploader struct {
 // uploader represents the state of an uploader implementation.
 type uploader struct {
 	// gRPC Services.
-	cas          regrpc.ContentAddressableStorageClient
-	byteStream   bsgrpc.ByteStreamClient
+	cas        regrpc.ContentAddressableStorageClient
+	byteStream bsgrpc.ByteStreamClient
 
 	// gRPC configs.
 	instanceName string
@@ -209,28 +209,27 @@ type uploader struct {
 	casPresenceCache sync.Map
 
 	// Size padding values are used to improve the accuracy of estimating size limits for gRPC services.
-	queryRequestBaseSize      int
+	queryRequestMaxSize       int
 	uploadRequestBaseSize     int
 	uploadRequestItemBaseSize int
 
 	// Concurrency controls.
-	clientSenderWg   sync.WaitGroup          // Batching API producers.
-	querySenderWg    sync.WaitGroup          // Query streaming API producers.
-	uploadSenderWg   sync.WaitGroup          // Upload streaming API producers.
-	processorWg      sync.WaitGroup          // Internal routers.
-	receiverWg       sync.WaitGroup          // Consumers.
-	workerWg         sync.WaitGroup          // Short-lived intermediate producers/consumers.
-	walkerWg         sync.WaitGroup          // Tracks all walkers.
+	clientSenderWg sync.WaitGroup // Batching API producers.
+	querySenderWg  sync.WaitGroup // Query streaming API producers.
+	uploadSenderWg sync.WaitGroup // Upload streaming API producers.
+	processorWg    sync.WaitGroup // Internal routers.
+	receiverWg     sync.WaitGroup // Consumers.
+	workerWg       sync.WaitGroup // Short-lived intermediate producers/consumers.
+	walkerWg       sync.WaitGroup // Tracks all walkers.
 
 	// Channels.
-	queryCh          chan missingBlobRequest // Fan-in channel for query requests.
-	digesterCh       chan UploadRequest      // Fan-in channel for upload requests.
-	dispatcherReqCh  chan UploadRequest      // Fan-in channel for dispatched requests.
-	dispatcherResCh  chan UploadResponse     // Fan-in channel for responses.
-	batcherCh        chan UploadRequest      // Fan-in channel for unified requests to the batching API.
-	streamerCh       chan UploadRequest      // Fan-in channel for unified requests to the byte streaming API.
-	queryPubSub      *pubsub                 // Fan-out broker for query responses.
-	uploadPubSub     *pubsub                 // Fan-out broker for upload responses.
+	digesterCh      chan UploadRequest      // Fan-in channel for upload requests.
+	dispatcherReqCh chan UploadRequest      // Fan-in channel for dispatched requests.
+	dispatcherResCh chan UploadResponse     // Fan-in channel for responses.
+	batcherCh       chan UploadRequest      // Fan-in channel for unified requests to the batching API.
+	streamerCh      chan UploadRequest      // Fan-in channel for unified requests to the byte streaming API.
+	queryPubSub     *pubsub                 // Fan-out broker for query responses.
+	uploadPubSub    *pubsub                 // Fan-out broker for upload responses.
 
 	logBeatDoneCh chan struct{}
 	done          bool
@@ -347,16 +346,15 @@ func newUploader(
 		ioLargeThrottler: newThrottler(int64(ioCfg.OpenLargeFilesLimit)),
 		dirChildren:      nodeSliceMap{store: make(map[string][]proto.Message)},
 
-		queryCh:          make(chan missingBlobRequest, chBuffer),
-		queryPubSub:      newPubSub(),
-		digesterCh:       make(chan UploadRequest),
-		dispatcherReqCh:  make(chan UploadRequest, chBuffer),
-		dispatcherResCh:  make(chan UploadResponse, chBuffer),
-		batcherCh:        make(chan UploadRequest, chBuffer),
-		streamerCh:       make(chan UploadRequest, chBuffer),
-		uploadPubSub:     newPubSub(),
+		queryPubSub:     newPubSub(),
+		digesterCh:      make(chan UploadRequest),
+		dispatcherReqCh: make(chan UploadRequest, chBuffer),
+		dispatcherResCh: make(chan UploadResponse, chBuffer),
+		batcherCh:       make(chan UploadRequest, chBuffer),
+		streamerCh:      make(chan UploadRequest, chBuffer),
+		uploadPubSub:    newPubSub(),
 
-		queryRequestBaseSize:      proto.Size(&repb.FindMissingBlobsRequest{InstanceName: instanceName, BlobDigests: []*repb.Digest{}}),
+		queryRequestMaxSize:       queryCfg.RequestMaxSize(),
 		uploadRequestBaseSize:     proto.Size(&repb.BatchUpdateBlobsRequest{InstanceName: instanceName, Requests: []*repb.BatchUpdateBlobsRequest_Request{}}),
 		uploadRequestItemBaseSize: proto.Size(&repb.BatchUpdateBlobsRequest_Request{Digest: digest.NewFromBlob([]byte("abc")).ToProto(), Data: []byte{}}),
 
@@ -366,22 +364,13 @@ func newUploader(
 
 	u.processorWg.Add(1)
 	go func() {
-		u.queryProcessor(ctx)
-		u.processorWg.Done()
-	}()
-
-	u.processorWg.Add(1)
-	go func() {
 		u.digester(ctx)
 		u.processorWg.Done()
 	}()
 
-	// Initializing the query streamer here to ensure wait groups are initialized before returning from this constructor call.
-	queryCh := make(chan missingBlobRequest)
-	queryResCh := u.missingBlobsPipe(ctx, queryCh)
 	u.processorWg.Add(1)
 	go func() {
-		u.dispatcher(ctx, queryCh, queryResCh)
+		u.dispatcher(ctx)
 		u.processorWg.Done()
 	}()
 
@@ -428,7 +417,6 @@ func (u *uploader) close(ctx context.Context) {
 	// This propagates from the uploader's pipe, hence, the uploader must stop first.
 	infof(ctx, 1, "waiting for query senders")
 	u.querySenderWg.Wait()
-	close(u.queryCh) // Terminate the query processor.
 
 	// 4th, internal routres should flush all remaining requests.
 	infof(ctx, 1, "waiting for processors")
@@ -491,7 +479,6 @@ func (u *uploader) logBeat(ctx context.Context) {
 			"batching", u.uploadThrottler.len(),
 			"streaming", u.streamThrottle.len(),
 			"dispatcher.req", len(u.dispatcherReqCh),
-			"query", len(u.queryCh),
 			"batcher", len(u.batcherCh),
 			"streamer", len(u.streamerCh),
 			"dispatcher.res", len(u.dispatcherResCh),

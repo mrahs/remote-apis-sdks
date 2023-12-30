@@ -39,7 +39,6 @@ package casng
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
@@ -48,7 +47,6 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/pborman/uuid"
-	"google.golang.org/protobuf/proto"
 )
 
 type missingBlobRequestMeta struct {
@@ -76,7 +74,7 @@ type missingBlobRequest struct {
 
 // queryRequestBundle is used to bundle up (unify) concurrent requests for the same digest from different requesters (routes).
 // It's also used to associate digests with request IDs for logging purposes.
-type queryRequestBundle map[digest.Digest][]missingBlobRequestMeta
+type queryRequestBundle map[digest.Digest]int
 
 // MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
 //
@@ -97,7 +95,9 @@ type queryRequestBundle map[digest.Digest][]missingBlobRequestMeta
 func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	ctx = ctxWithRqID(ctx)
 	pipeIn := make(chan missingBlobRequest)
-	out := u.missingBlobsPipe(ctx, pipeIn)
+	out := make(chan MissingBlobsResponse)
+
+	// Convert digest to an internal request.
 	u.clientSenderWg.Add(1)
 	go func() {
 		defer u.clientSenderWg.Done()
@@ -106,120 +106,41 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 			pipeIn <- missingBlobRequest{digest: d, meta: missingBlobRequestMeta{ctx: ctx, id: uuid.New()}}
 		}
 	}()
+
+	// Launch the processor.
+	u.querySenderWg.Add(1)
+	go func(){
+		defer u.querySenderWg.Done()
+		u.queryProcessor(ctx, pipeIn, out)
+	}()
+
 	return out
 }
 
-// missingBlobsPipe is a shared implementation between batching and streaming interfaces.
-func (u *uploader) missingBlobsPipe(ctx context.Context, in <-chan missingBlobRequest) <-chan MissingBlobsResponse {
-	ctx = ctxWithValues(ctx, ctxKeyModule, "query.stream_pipe")
-	ch := make(chan MissingBlobsResponse)
-
-	// If this was called after the the uploader was terminated, short the circuit and return.
-	if u.done {
-		go func() {
-			defer close(ch)
-			res := MissingBlobsResponse{Err: ErrTerminatedUploader}
-			for req := range in {
-				res.Digest = req.digest
-				res.meta = req.meta
-				ch <- res
-			}
-		}()
-		return ch
-	}
-
-	route, resCh := u.queryPubSub.sub(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyRtID, route)
-	pendingCh := make(chan int)
-
-	// Sender. It terminates when in is closed, at which point it sends 0 as a termination signal to the counter.
-	u.querySenderWg.Add(1)
-	go func() {
-		defer u.querySenderWg.Done()
-
-		infof(ctx, 1, "sender.start")
-		defer infof(ctx, 1, "sender.stop")
-
-		for r := range in {
-			r.meta.route = route
-			u.queryCh <- r
-			pendingCh <- 1
-		}
-		pendingCh <- 0
-	}()
-
-	// Receiver. It terminates with resCh is closed, at which point it closes the returned channel.
-	u.receiverWg.Add(1)
-	go func() {
-		defer u.receiverWg.Done()
-		defer close(ch)
-
-		infof(ctx, 1, "receiver.start")
-		defer infof(ctx, 1, "receiver.stop")
-
-		// Continue to drain until the broker closes the channel.
-		for r := range resCh {
-			ch <- r.(MissingBlobsResponse)
-			pendingCh <- -1
-		}
-	}()
-
-	// Counter. It terminates when count hits 0 after receiving a done signal from the sender.
-	// Upon termination, it sends a signal to pubsub to terminate the subscription which closes resCh.
-	u.workerWg.Add(1)
-	go func() {
-		defer u.workerWg.Done()
-		defer u.queryPubSub.unsub(ctx, route)
-
-		infof(ctx, 1, "counter.start")
-		defer infof(ctx, 1, "counter.stop")
-
-		pending := 0
-		done := false
-		for {
-			// This channel is never closed because it has two senders.
-			x := <-pendingCh
-			if x == 0 {
-				done = true
-			}
-			pending += x
-			// If the sender is done and all the requests are done, let the receiver and the broker terminate.
-			if pending == 0 && done {
-				return
-			}
-		}
-	}()
-
-	return ch
-}
-
-// queryProcessor is the fan-in handler that manages the bundling and dispatching of incoming requests.
-func (u *uploader) queryProcessor(ctx context.Context) {
+func (u *uploader) queryProcessor(ctx context.Context, in <-chan missingBlobRequest, out chan<- MissingBlobsResponse) {
 	ctx = ctxWithValues(ctx, ctxKeyModule, "query.processor")
-	infof(ctx, 1, "start")
-	defer infof(ctx, 1, "stop")
+	infof(ctx, 4, "start")
+	defer infof(ctx, 4, "stop")
+	defer func(){ close(out) }()
 
 	bundle := make(queryRequestBundle, u.queryRPCCfg.ItemsLimit)
 	bundleCtx := ctx // context with unified metadata.
-	bundleSize := u.queryRequestBaseSize
-	maxSize := 0
 
 	handle := func() {
 		if len(bundle) == 0 {
 			return
 		}
-		if len(bundle) > maxSize {
-			maxSize = len(bundle)
-		}
-		// Block the entire processor if the concurrency limit is reached.
+
+		// Block the processor if the concurrency limit is reached.
 		startTime := time.Now()
 		if !u.queryThrottler.acquire(ctx) {
+			infof(ctx, 4, "cancel")
 			startTime = time.Now()
 			// Ensure responses are dispatched before aborting.
-			msgs, routes := unzipBundle(ctx, bundle, nil, ctx.Err(), nil)
-			_ = u.queryPubSub.pubZip(ctx, msgs, routes)
-			durationf(ctx, startTime, "query->dispatcher.res.q")
-			infof(ctx, 4, "cancel")
+			for d, c := range bundle {
+				pubQueryResponse(MissingBlobsResponse{Digest: d, Err: ctx.Err()}, c, out)
+			}
+			durationf(ctx, startTime, "query->out")
 			return
 		}
 		durationf(ctx, startTime, "sem.query")
@@ -228,11 +149,10 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 		go func(ctx context.Context, b queryRequestBundle) {
 			defer u.workerWg.Done()
 			defer u.queryThrottler.release(ctx)
-			u.callMissingBlobs(ctx, b)
+			u.callMissingBlobs(ctx, b, out)
 		}(bundleCtx, bundle)
 
 		bundle = make(queryRequestBundle, u.queryRPCCfg.ItemsLimit)
-		bundleSize = u.queryRequestBaseSize
 		bundleCtx = ctx
 	}
 
@@ -240,7 +160,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 	defer bundleTicker.Stop()
 	for {
 		select {
-		case req, ok := <-u.queryCh:
+		case req, ok := <-in:
 			if !ok {
 				return
 			}
@@ -251,39 +171,12 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 
 			if _, ok := u.casPresenceCache.Load(req.digest); ok {
 				infof(ctx, 4, "cas cache hit", "digest", req.digest)
-				u.queryPubSub.pub(ctx, MissingBlobsResponse{Digest: req.digest, meta: req.meta}, req.meta.route)
-				durationf(ctx, startTime, "query->dispatcher.res.q")
+				out <- MissingBlobsResponse{Digest: req.digest}
+				durationf(ctx, startTime, "query->out")
 				continue
 			}
 
-			dSize := proto.Size(req.digest.ToProto())
-
-			// Check oversized items.
-			if u.queryRequestBaseSize+dSize > u.queryRPCCfg.BytesLimit {
-				res := MissingBlobsResponse{
-					Digest: req.digest,
-					Err:    ErrOversizedItem,
-					meta:   req.meta,
-				}
-				u.queryPubSub.pub(ctx, res, req.meta.route)
-				durationf(ctx, startTime, "query->dispatcher.res.q")
-				continue
-			}
-
-			// Check size threshold.
-			if bundleSize+dSize >= u.queryRPCCfg.BytesLimit {
-				infof(ctx, 4, "bundle.size", "bytes", bundleSize, "excess", dSize)
-				handle()
-			}
-
-			// Duplicate routes are allowed to ensure the requester can match the number of responses to the number of requests.
-			metas, ok := bundle[req.digest]
-			if !ok {
-				metas = make([]missingBlobRequestMeta, 0, maxSize)
-			}
-			metas = append(metas, req.meta)
-			bundle[req.digest] = metas
-			bundleSize += dSize
+			bundle[req.digest]++
 			bundleCtx, _ = contextmd.FromContexts(bundleCtx, req.meta.ctx) // ignore non-essential error.
 
 			// Check length threshold.
@@ -291,7 +184,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 				infof(ctx, 4, "bundle.full", "count", len(bundle))
 				handle()
 			}
-			durationf(ctx, startTime, "query->bundle.append", "digest", req.digest, "count", len(bundle), "max", maxSize)
+			durationf(ctx, startTime, "query->bundle.append", "digest", req.digest, "count", len(bundle))
 		case <-bundleTicker.C:
 			startTime := time.Now()
 			l := len(bundle)
@@ -303,7 +196,7 @@ func (u *uploader) queryProcessor(ctx context.Context) {
 
 // callMissingBlobs calls the gRPC endpoint and notifies requesters of the results.
 // It assumes ownership of its arguments. digestRoutes is the primary one. digestReqs is used for logging purposes.
-func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBundle) {
+func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBundle, out chan<- MissingBlobsResponse) {
 	digests := make([]*repb.Digest, 0, len(bundle))
 	for d := range bundle {
 		digests = append(digests, d.ToProto())
@@ -335,41 +228,27 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBund
 	durationf(ctx, startTime, "query.grpc", "count", len(digests), "missing", len(missing), "err", err)
 
 	startTime = time.Now()
-	msgs, routes := unzipBundle(ctx, bundle, missing, err, &u.casPresenceCache)
-	_ = u.queryPubSub.pubZip(ctx, msgs, routes)
-	durationf(ctx, startTime, "query.grpc->dispatcher.res.q")
-}
-
-func unzipBundle(ctx context.Context, bundle queryRequestBundle, missing []*repb.Digest, err error, cache *sync.Map) ([]any, []string) {
-	defer durationf(ctx, time.Now(), "unzip", "count", len(bundle))
-	var msgs []any
-	var routes []string
 	for _, dg := range missing {
 		d := digest.NewFromProtoUnvalidated(dg)
-		for _, m := range bundle[d] {
-			msgs = append(msgs, MissingBlobsResponse{
-				Digest:  d,
-				Missing: err == nil, // Should be always false if there was an error.
-				Err:     err,
-				meta:    m,
-			})
-			routes = append(routes, m.route)
-		}
+		pubQueryResponse(MissingBlobsResponse{
+			Digest:  d,
+			Missing: err == nil, // Should be always false if there was an error.
+			Err:     err,
+		}, bundle[d], out)
 		delete(bundle, d)
 	}
-	for d, metas := range bundle {
-		for _, m := range metas {
-			msgs = append(msgs, MissingBlobsResponse{
-				Digest: d,
-				meta:   m,
-				Err:    err,
-			})
-			routes = append(routes, m.route)
-		}
-		if err != nil || cache == nil {
-			continue
-		}
-		_, _ = cache.LoadOrStore(d, true)
+	for d, c := range bundle {
+		pubQueryResponse(MissingBlobsResponse{
+			Digest:  d,
+			Err:     err,
+		}, c, out)
 	}
-	return msgs, routes
+	durationf(ctx, startTime, "query.grpc->out")
+}
+
+func pubQueryResponse(res MissingBlobsResponse, c int, out chan<- MissingBlobsResponse) {
+	// Match the number of responses to the number of requests.
+	for i := 0; i < c; i++ {
+		out <- res
+	}
 }
