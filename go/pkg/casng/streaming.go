@@ -48,7 +48,6 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
-	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
 	"github.com/pborman/uuid"
 )
@@ -192,16 +191,6 @@ type UploadResponse struct {
 	// endofWalk is used internally to signal that this response includes stats only for the associated routes.
 	endOfWalk bool
 }
-
-// uploadRequestBundleItem is a tuple of an upload request and a list of clients interested in the response.
-type uploadRequestBundleItem struct {
-	req    *repb.BatchUpdateBlobsRequest_Request
-	routes []string
-	reqs   []string
-}
-
-// uploadRequestBundle is used to aggregate (unify) requests by digest.
-type uploadRequestBundle = map[digest.Digest]uploadRequestBundleItem
 
 // Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
 //

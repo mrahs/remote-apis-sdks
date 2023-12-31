@@ -208,6 +208,12 @@ type uploader struct {
 	// If the digest was previously seen in the CAS, the boolean will be true.
 	casPresenceCache sync.Map
 
+	// batchCache synchronizes uploading files via the bather.
+	batchCache sync.Map
+
+	// streamCache synchronizes uploading files via the streamer.
+	streamCache sync.Map
+
 	// Size padding values are used to improve the accuracy of estimating size limits for gRPC services.
 	uploadBatchRequestItemBytesLimit int64
 	uploadBatchRequestItemBaseSize   int
@@ -223,11 +229,6 @@ type uploader struct {
 	workerWg        sync.WaitGroup
 
 	// Channels.
-	digesterCh      chan UploadRequest  // Fan-in channel for upload requests.
-	dispatcherReqCh chan UploadRequest  // Fan-in channel for dispatched requests.
-	dispatcherResCh chan UploadResponse // Fan-in channel for responses.
-	batcherCh       chan UploadRequest  // Fan-in channel for unified requests to the batching API.
-	streamerCh      chan UploadRequest  // Fan-in channel for unified requests to the byte streaming API.
 	queryPubSub     *pubsub             // Fan-out broker for query responses.
 	uploadPubSub    *pubsub             // Fan-out broker for upload responses.
 
@@ -292,6 +293,7 @@ func NewStreamingUploader(
 // TODO: support uploading repb.Tree.
 // TODO: support node properties as in https://github.com/bazelbuild/remote-apis-sdks/pull/475
 // TODO: review ctx used in semaphores: should it be req.ctx to stop waiting if the request is cancelled?
+// TODO: track unifications in processors to see how effective it is.
 func newUploader(
 	ctx context.Context, cas regrpc.ContentAddressableStorageClient, byteStream bsgrpc.ByteStreamClient, instanceName string,
 	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
@@ -332,7 +334,6 @@ func newUploader(
 	uploadBatchRequestItemBytesLimit := int64(uploadCfg.BytesLimit - uploadBatchRequestBaseSize - uploadBatchRequestItemBaseSize)
 
 	ctx = ctxWithValues(ctx, ctxKeyModule, "upload")
-	chBuffer := 500_000
 	u := &uploader{
 		cas:          cas,
 		byteStream:   byteStream,
@@ -366,11 +367,6 @@ func newUploader(
 		dirChildren:      nodeSliceMap{store: make(map[string][]proto.Message)},
 
 		queryPubSub:     newPubSub(),
-		digesterCh:      make(chan UploadRequest),
-		dispatcherReqCh: make(chan UploadRequest, chBuffer),
-		dispatcherResCh: make(chan UploadResponse, chBuffer),
-		batcherCh:       make(chan UploadRequest, chBuffer),
-		streamerCh:      make(chan UploadRequest, chBuffer),
 		uploadPubSub:    newPubSub(),
 
 		uploadBatchRequestBaseSize:       uploadBatchRequestBaseSize,
@@ -472,10 +468,6 @@ func (u *uploader) logBeat(ctx context.Context) {
 			"querying", u.queryThrottler.len(),
 			"batching", u.uploadThrottler.len(),
 			"streaming", u.streamThrottle.len(),
-			"dispatcher.req", len(u.dispatcherReqCh),
-			"batcher", len(u.batcherCh),
-			"streamer", len(u.streamerCh),
-			"dispatcher.res", len(u.dispatcherResCh),
 		)
 	}
 }

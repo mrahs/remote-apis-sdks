@@ -14,8 +14,9 @@ import (
 
 // queryRequestBundle is used to bundle up (unify) concurrent requests for the same digest from different requesters (routes).
 // It's also used to associate digests with request IDs for logging purposes.
-type queryRequestBundle map[digest.Digest]int
+type queryRequestBundle map[digest.Digest]struct{}
 
+// Number of messages sent out may be less than number of messages given due to deduplication.
 func (u *uploader) queryProcessor(ctx context.Context, in <-chan missingBlobRequest, out chan<- MissingBlobsResponse) {
 	u.queryWorkerWg.Add(1)
 	defer u.queryWorkerWg.Done()
@@ -42,8 +43,8 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan missingBlobRequ
 			infof(ctx, 4, "cancel")
 			startTime = time.Now()
 			// Ensure responses are dispatched before aborting.
-			for d, c := range bundle {
-				pubQueryResponse(MissingBlobsResponse{Digest: d, Err: ctx.Err()}, c, out)
+			for d := range bundle {
+				out <- MissingBlobsResponse{Digest: d, Err: ctx.Err()}
 			}
 			durationf(ctx, startTime, "query->out")
 			return
@@ -67,6 +68,7 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan missingBlobRequ
 		select {
 		case req, ok := <-in:
 			if !ok {
+				handle()
 				return
 			}
 			startTime := time.Now()
@@ -81,7 +83,7 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan missingBlobRequ
 				continue
 			}
 
-			bundle[req.digest]++
+			bundle[req.digest] = struct{}{}
 			bundleCtx, _ = contextmd.FromContexts(bundleCtx, req.meta.ctx) // ignore non-essential error.
 
 			// Check length threshold.
@@ -135,18 +137,18 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBund
 	startTime = time.Now()
 	for _, dg := range missing {
 		d := digest.NewFromProtoUnvalidated(dg)
-		pubQueryResponse(MissingBlobsResponse{
+		out <- MissingBlobsResponse{
 			Digest:  d,
 			Missing: err == nil, // Should be always false if there was an error.
 			Err:     err,
-		}, bundle[d], out)
+		}
 		delete(bundle, d)
 	}
-	for d, c := range bundle {
-		pubQueryResponse(MissingBlobsResponse{
+	for d := range bundle {
+		out <- MissingBlobsResponse{
 			Digest:  d,
 			Err:     err,
-		}, c, out)
+		}
 	}
 	durationf(ctx, startTime, "query.grpc->out")
 }
