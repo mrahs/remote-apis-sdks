@@ -72,8 +72,8 @@ func (u *uploader) digestProcessor(ctx context.Context, in <-chan UploadRequest,
 	// Once the uploader's context is cancelled, the digester will terminate after all the pending walks are done (implies all requesters are notified).
 
 	// Ensure all in-flight walks are done before returning.
-	walkerWg := sync.WaitGroup{}
-	defer func() { walkerWg.Wait() }()
+	// walkerWg := sync.WaitGroup{}
+	// defer func() { walkerWg.Wait() }()
 
 	for req := range in {
 		// If it's a bytes request, do not traverse the path.
@@ -108,11 +108,11 @@ func (u *uploader) digestProcessor(ctx context.Context, in <-chan UploadRequest,
 		}
 
 		infof(ctx, 4, "req.path", "path", req.Path, "fid", req.Exclude, "slo", req.SymlinkOptions)
-		walkerWg.Add(1)
-		go func(r UploadRequest) {
-			defer walkerWg.Done()
-			u.walkDigest(ctx, r, out)
-		}(req)
+		// walkerWg.Add(1)
+		// go func(req UploadRequest) {
+			// defer walkerWg.Done()
+			u.walkDigest(ctx, req, out)
+		// }(req)
 	}
 }
 
