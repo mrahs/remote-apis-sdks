@@ -49,7 +49,7 @@ type blob struct {
 }
 
 type walkResult struct {
-	err error
+	err   error
 	stats Stats
 }
 
@@ -187,8 +187,8 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 			case *repb.FileNode:
 				startTime := time.Now()
 				out <- UploadRequest{
-					Path:       realPath,
-					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
+					Path:   realPath,
+					Digest: digest.NewFromProtoUnvalidated(node.Digest),
 				}
 				durationf(ctx, startTime, "walk->out", "path", req.Path, "real_path", realPath)
 			case *repb.DirectoryNode:
@@ -202,8 +202,8 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 				}
 				startTime := time.Now()
 				out <- UploadRequest{
-					Bytes:      b,
-					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
+					Bytes:  b,
+					Digest: digest.NewFromProtoUnvalidated(node.Digest),
 				}
 				durationf(ctx, startTime, "walk->out", "path", req.Path, "real_path", realPath)
 			case *repb.SymlinkNode:
@@ -258,9 +258,9 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 				u.dirChildren.append(parentKey, node)
 				startTime := time.Now()
 				out <- UploadRequest{
-					Path: path,
-					Bytes:      b,
-					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
+					Path:   path,
+					Bytes:  b,
+					Digest: digest.NewFromProtoUnvalidated(node.Digest),
 				}
 				u.nodeCache.Store(key, node)
 				durationf(ctx, startTime, "walk->out", "path", req.Path, "real_path", realPath)
@@ -284,10 +284,10 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 				}
 				startTime := time.Now()
 				out <- UploadRequest{
-					Path: path,
-					Bytes:      blb.b,
-					reader:     blb.r,
-					Digest:     digest.NewFromProtoUnvalidated(node.Digest),
+					Path:   path,
+					Bytes:  blb.b,
+					reader: blb.r,
+					Digest: digest.NewFromProtoUnvalidated(node.Digest),
 				}
 				durationf(ctx, startTime, "walk->out", "path", req.Path, "real_path", realPath)
 				return true
@@ -316,7 +316,7 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 			// Capture it here before it's overwritten with the actual result.
 			wg, pathClaimed := u.nodeCache.Load(key)
 			if !pathClaimed {
-				err = errors.Join(serrorf(ctx, "attempted to post-access a non-claimed path", "path", path, ), err)
+				err = errors.Join(serrorf(ctx, "attempted to post-access a non-claimed path", "path", path), err)
 				return walker.SkipSymlink, false
 			}
 			defer func() {

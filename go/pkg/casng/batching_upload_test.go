@@ -487,9 +487,9 @@ func TestBatching_Upload(t *testing.T) {
 			wantStats: casng.Stats{
 				BytesRequested:     176,
 				TotalBytesMoved:    168,
-				LogicalBytesCached: 8,
-				CacheMissCount:     2,
-				CacheHitCount:      1,
+				LogicalBytesCached: 0,
+				CacheMissCount:     3,
+				CacheHitCount:      0,
 				BatchedCount:       2,
 				InputFileCount:     2,
 				InputDirCount:      1,

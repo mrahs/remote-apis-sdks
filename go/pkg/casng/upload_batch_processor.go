@@ -2,6 +2,7 @@ package casng
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -39,23 +40,18 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 	defer func() { callWg.Wait() }()
 
 	// Facilitates deferring requests while loading files from disk and waiting on other uploaders.
-	pipe := make(chan UploadRequest)
-	reqWg := sync.WaitGroup{}
+	pipe := make(chan any)
 
+	u.workerWg.Add(1)
 	go func() {
+		defer u.workerWg.Done()
 		infof(ctx, 4, "sender.start")
 		defer infof(ctx, 4, "sender.stop")
 
 		for req := range in {
-			reqWg.Add(1)
 			pipe <- req
 		}
-	}()
-
-	go func(){
-		// Adding one above allows calling wait here even though more may be added later.
-		reqWg.Wait()
-		close(pipe)
+		pipe <- true
 	}()
 
 	bundle := make(uploadBundle, u.batchRPCCfg.ItemsLimit)
@@ -98,16 +94,40 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 
 	bundleTicker := time.NewTicker(u.batchRPCCfg.BundleTimeout)
 	defer bundleTicker.Stop()
+	deferred := 0
+	done := false
 	for {
 		select {
-		case req, ok := <-pipe:
-			if !ok {
-				dispatch()
-				return
+		// pipe is never closed because it has multiple senders.
+		case pipedVal := <-pipe:
+			var req UploadRequest
+			switch r := pipedVal.(type) {
+			case bool:
+				infof(ctx, 4, "pipe.done", "deferred", deferred)
+				done = true
+				if deferred == 0 {
+					dispatch()
+					return
+				}
+				continue
+			case int:
+				// A deferred request was sent back.
+				deferred--
+				infof(ctx, 4, "pipe.dec", "deferred", deferred)
+				if done && deferred == 0 {
+					dispatch()
+					return
+				}
+				continue
+			case UploadRequest:
+				req = r
+				infof(ctx, 4, "req", "digest", req.Digest)
+			default:
+				errorf(ctx, fmt.Sprintf("unexpected message type: %T", r))
+				continue
 			}
-			startTime := time.Now()
 
-			infof(ctx, 4, "req", "digest", req.Digest)
+			startTime := time.Now()
 
 			// Unify.
 			item, ok := bundle[req.Digest]
@@ -115,14 +135,13 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 				item.copies++
 				bundle[req.Digest] = item
 				infof(ctx, 4, "unified", "digest", req.Digest, "bundle", item.copies+1)
-				reqWg.Done()
 				continue
 			}
 
 			// Claim the digest.
-			wg := &sync.WaitGroup{}
-			wg.Add(1)
-			cached, ok := u.batchCache.LoadOrStore(req.Digest, wg)
+			cachedWg := &sync.WaitGroup{}
+			cachedWg.Add(1)
+			cached, ok := u.batchCache.LoadOrStore(req.Digest, cachedWg)
 			if ok {
 				// Already claimed.
 				if _, ok := cached.(bool); ok {
@@ -135,43 +154,38 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 							CacheHitCount:      1,
 						},
 					}
-					reqWg.Done()
 					continue
 				}
 				infof(ctx, 4, "deferred.cache", "digest", req.Digest)
-				wg, ok := cached.(*sync.WaitGroup)
+				cachedWg, ok := cached.(*sync.WaitGroup)
 				if !ok {
 					log.Errorf("unexpected item type in batchCache: %T", cached)
-					reqWg.Done()
 					continue
 				}
+				deferred++
+				u.workerWg.Add(1)
 				go func() {
-					wg.Wait()
+					defer u.workerWg.Done()
+					cachedWg.Wait()
 					pipe <- req
+					pipe <- -1
 				}()
 				continue
 			}
 
 			// It's possible for files to be considered medium and large, but still fit into a batch request.
-			// Load the bytes without blocking the batcher by deferring the blob.
 			if len(req.Bytes) == 0 {
-				infof(ctx, 4, "deferred.load", "digest", req.Digest, "path", req.Path)
-				// The upper bound of these goroutines is controlled by uploadThrottler in handle.
-				go func(req UploadRequest, wg *sync.WaitGroup) {
-					bytes, err := u.loadRequestBytes(ctx, req)
-					if err != nil {
-						out <- UploadResponse{
-							Digest: req.Digest,
-							Err:    err,
-						}
-						wg.Done()
-						reqWg.Done()
-						return
+				infof(ctx, 4, "load", "digest", req.Digest)
+				bytes, err := u.loadRequestBytes(ctx, req)
+				if err != nil {
+					out <- UploadResponse{
+						Digest: req.Digest,
+						Err:    err,
 					}
-					req.Bytes = bytes
-					pipe <- req
-				}(req, wg)
-				continue
+					cachedWg.Done()
+					continue
+				}
+				req.Bytes = bytes
 			}
 
 			// If the blob doesn't fit in the current bundle, cycle it.
@@ -181,7 +195,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 				dispatch()
 			}
 
-			item.wg = wg
+			item.wg = cachedWg
 			item.req = &repb.BatchUpdateBlobsRequest_Request{
 				Digest: req.Digest.ToProto(),
 				Data:   req.Bytes, // TODO: add compression support as in https://github.com/bazelbuild/remote-apis-sdks/pull/443/files
@@ -289,11 +303,12 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 	// Report individually failed requests.
 	for d, dErr := range failed {
 		item := bundle[d]
+		c := int64(item.copies + 1)
 		s := Stats{
-			BytesRequested:    d.Size,
+			BytesRequested:    d.Size * c,
 			LogicalBytesMoved: d.Size,
 			TotalBytesMoved:   d.Size,
-			CacheMissCount:    1,
+			CacheMissCount:    c,
 			BatchedCount:      1,
 		}
 		if r := digestRetryCount[d]; r > 0 {
@@ -322,10 +337,11 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 
 	// Report failed requests due to call failure.
 	for d, item := range bundle {
+		c := int64(item.copies + 1)
 		s := Stats{
-			BytesRequested:  d.Size,
+			BytesRequested:  d.Size * c,
 			TotalBytesMoved: d.Size,
-			CacheMissCount:  1,
+			CacheMissCount:  c,
 			BatchedCount:    1,
 		}
 		if r := digestRetryCount[d]; r > 0 {

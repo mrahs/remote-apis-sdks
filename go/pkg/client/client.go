@@ -784,7 +784,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			log.Warningf("upload_buffer_size=%d > max_query_batch_digests=%d; using the latter instead.", client.UnifiedUploadBufferSize, client.MaxQueryBatchDigests)
 		}
 		queryCfg := casng.GRPCConfig{
-			InstanceName:		  instanceName,
+			InstanceName:         instanceName,
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			BytesLimit:           int(client.MaxBatchSize),
 			ItemsLimit:           queryItemsLimit,
@@ -800,7 +800,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			log.Warningf("upload_buffer_size=%d > max_batch_digests=%d; using the latter instead.", client.UnifiedUploadBufferSize, client.MaxBatchDigests)
 		}
 		batchCfg := casng.GRPCConfig{
-			InstanceName:		  instanceName,
+			InstanceName:         instanceName,
 			ConcurrentCallsLimit: int(client.casConcurrency),
 			BytesLimit:           int(client.MaxBatchSize),
 			ItemsLimit:           batchItemsLimit,
@@ -810,17 +810,17 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			RetryPredicate:       client.Retrier.ShouldRetry,
 		}
 		streamCfg := casng.GRPCConfig{
-			InstanceName:		  instanceName,
+			InstanceName:         instanceName,
 			ConcurrentCallsLimit: int(client.casConcurrency),
-			BytesLimit:           1,                // Unused.
-			ItemsLimit:           1,                // Unused.
-			BundleTimeout:        time.Second,      // Unused.
+			BytesLimit:           1,           // Unused.
+			ItemsLimit:           1,           // Unused.
+			BundleTimeout:        time.Second, // Unused.
 			Timeout:              DefaultRPCTimeouts["default"],
 			RetryPolicy:          client.Retrier.Backoff,
 			RetryPredicate:       client.Retrier.ShouldRetry,
 		}
 		ioCfg := casng.IOConfig{
-			ConcurrentWalksLimit:     10*int(client.casConcurrency),
+			ConcurrentWalksLimit:     10 * int(client.casConcurrency),
 			OpenFilesLimit:           casng.DefaultOpenFilesLimit,
 			OpenLargeFilesLimit:      casng.DefaultOpenLargeFilesLimit,
 			SmallFileSizeThreshold:   casng.DefaultSmallFileSizeThreshold,

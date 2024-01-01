@@ -3,6 +3,7 @@ package casng
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -23,6 +24,7 @@ type uploadStreamBundle map[digest.Digest]uploadStreamBundleItem
 // streamer handles files that do not fit into a batching request.
 // For files above the large threshold, this call assumes the io and large io holds are already acquired and will release them accordingly.
 // For other files, only an io hold is acquired and released in this call.
+// cancelling ctx does not cancel the processor. in must be closed to terminate this processor.
 func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest, out chan<- UploadResponse) {
 	u.streamWorkerWg.Add(1)
 	defer u.streamWorkerWg.Done()
@@ -36,48 +38,60 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 	defer func() { callWg.Wait() }()
 
 	// Facilitates deferring requests.
-	pipe := make(chan UploadRequest)
-	deferredWg := sync.WaitGroup{}
+	pipe := make(chan any)
 
-	// Add 1 for the sender.
-	deferredWg.Add(1)
-
-	// Launch this waiter first to ensure Wait is called before any other Done.
-	go func(){
-		// Adding one above allows calling wait here even though more may be added later.
-		deferredWg.Wait()
-		close(pipe)
-	}()
-
+	u.workerWg.Add(1)
 	go func() {
-		defer deferredWg.Done()
-
+		defer u.workerWg.Done()
 		infof(ctx, 4, "sender.start")
 		defer infof(ctx, 4, "sender.stop")
 
 		for req := range in {
 			pipe <- req
 		}
+		pipe <- true
 	}()
 
 	// Unify duplicate requests.
 	bundle := make(uploadStreamBundle)
 	streamResCh := make(chan UploadResponse)
 	pending := 0
+	deferred := 0
+	done := false
 	for {
 		select {
-		// The dispatcher closes this channel when it's done dispatching, which happens after the streamer
-		// had sent all pending responses.
-		case req, ok := <-pipe:
-			if !ok {
-				return
+		// pipe is never closed because it has multiple senders.
+		case pipedVal := <-pipe:
+			var req UploadRequest
+			switch r := pipedVal.(type) {
+			case bool:
+				// The sender is done.
+				done = true
+				if deferred == 0 && pending == 0 {
+					return
+				}
+				continue
+			case int:
+				// A deferred request was sent back.
+				deferred--
+				if done && deferred == 0 && pending == 0 {
+					return
+				}
+				continue
+			case UploadRequest:
+				req = r
+			default:
+				errorf(ctx, fmt.Sprintf("unexpected message type: %T", r))
+				continue
 			}
+
 			shouldReleaseIOTokens := req.reader != nil
 			infof(ctx, 4, "req", "digest", req.Digest, "large", shouldReleaseIOTokens, "pending", pending)
 
 			item, ok := bundle[req.Digest]
 			if ok {
 				item.copies++
+				bundle[req.Digest] = item
 				// Already in-flight. Release duplicate resources if it's a large file.
 				if shouldReleaseIOTokens {
 					u.ioThrottler.release(ctx)
@@ -88,9 +102,9 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 			}
 
 			// Claim the digest.
-			wg := &sync.WaitGroup{}
-			wg.Add(1)
-			cached, ok := u.streamCache.LoadOrStore(req.Digest, wg)
+			cachedWg := &sync.WaitGroup{}
+			cachedWg.Add(1)
+			cached, ok := u.streamCache.LoadOrStore(req.Digest, cachedWg)
 			if ok {
 				// Already claimed.
 				if _, ok := cached.(bool); ok {
@@ -106,21 +120,23 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 					continue
 				}
 				// Defer
-				wg, ok := cached.(*sync.WaitGroup)
+				cachedWg, ok := cached.(*sync.WaitGroup)
 				if !ok {
 					log.Errorf("unexpected item type in streamCache: %T", cached)
 					continue
 				}
+				deferred++
 				u.workerWg.Add(1)
 				go func() {
 					defer u.workerWg.Done()
-					wg.Wait()
+					cachedWg.Wait()
 					pipe <- req
+					pipe <- -1
 				}()
 				continue
 			}
 
-			item.wg = wg
+			item.wg = cachedWg
 			bundle[req.Digest] = item
 
 			var name string
@@ -131,25 +147,24 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 				name = MakeWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
 			}
 
-			pending++
 			// Block the streamer if the gRPC call is being throttled.
 			startTime := time.Now()
-			if !u.streamThrottle.acquire(ctx) { // TODO: should also cancel if req.ctx is cancelled.
+			if !u.streamThrottle.acquire(ctx) {
 				if shouldReleaseIOTokens {
 					u.ioThrottler.release(ctx)
 					u.ioLargeThrottler.release(ctx)
 				}
 				// Ensure the response is dispatched before aborting.
-				deferredWg.Add(1)
-				go func(req UploadRequest) {
-					defer deferredWg.Done()
-					startTime := time.Now()
-					streamResCh <- UploadResponse{Digest: req.Digest, Stats: Stats{BytesRequested: req.Digest.Size}, Err: ctx.Err()}
-					durationf(ctx, startTime, "stream.req->stream.res", "digest", req.Digest)
-				}(req)
+				out <- UploadResponse{
+					Digest: req.Digest,
+					Stats:  Stats{BytesRequested: req.Digest.Size},
+					Err:    ctx.Err(),
+				}
 				continue
 			}
 			durationf(ctx, startTime, "sem.stream")
+
+			pending++
 			u.workerWg.Add(1)
 			go func(req UploadRequest) {
 				defer u.workerWg.Done()
@@ -163,7 +178,14 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 		case r := <-streamResCh:
 			startTime := time.Now()
 			out <- r
-			c := int64(bundle[r.Digest].copies)
+			if r.Err == nil {
+				u.streamCache.Store(r.Digest, true)
+			} else {
+				u.streamCache.Delete(r.Digest)
+			}
+			item := bundle[r.Digest]
+			item.wg.Done()
+			c := int64(item.copies)
 			if c > 0 {
 				sCached := r.Stats.ToCacheHit()
 				sCached.CacheHitCount = c
@@ -176,6 +198,9 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 			delete(bundle, r.Digest)
 			pending--
 			durationf(ctx, startTime, "stream.res->out", "digest", r.Digest, "pending", pending)
+			if done && pending == 0 {
+				return
+			}
 		}
 	}
 }

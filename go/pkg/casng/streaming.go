@@ -113,7 +113,7 @@ type MissingBlobsResponse struct {
 	Digest  digest.Digest
 	Missing bool
 	Err     error
-	req UploadRequest
+	req     UploadRequest
 }
 
 // MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
@@ -132,6 +132,7 @@ type MissingBlobsResponse struct {
 // Slow consumption speed on the returned channel affects the consumption speed on in.
 //
 // This method must not be called after cancelling the uploader's context.
+// Cancelling ctx does not cancel this call. in must be closed to terminate this call.
 func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
 	ctx = ctxWithRqID(ctx)
 	pipeCh := make(chan UploadRequest)
@@ -141,12 +142,13 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 	go func() {
 		defer u.requestWorkerWg.Done()
 		defer close(pipeCh)
+
 		for d := range in {
 			pipeCh <- UploadRequest{Digest: d}
 		}
 	}()
 
-	go func(){
+	go func() {
 		u.queryProcessor(ctx, pipeCh, out)
 		close(out)
 	}()
@@ -191,7 +193,7 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 
 	digestOut := make(chan any)
 	wg.Add(1)
-	go func(){
+	go func() {
 		defer wg.Done()
 		u.digestProcessor(ctx, in, digestOut)
 		close(digestOut)
@@ -201,9 +203,9 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 	queryOut := make(chan MissingBlobsResponse)
 
 	wg.Add(1)
-	go func(){
+	go func() {
 		defer wg.Done()
-		defer func(){ close(queryIn) }()
+		defer func() { close(queryIn) }()
 
 		infof(ctx, 4, "pipe.digest_query.start")
 		defer infof(ctx, 4, "pipe.digest_query.stop")
@@ -230,9 +232,9 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 	}()
 
 	wg.Add(1)
-	go func(){
+	go func() {
 		defer wg.Done()
-		defer func(){ close(queryOut) }()
+		defer func() { close(queryOut) }()
 		u.queryProcessor(ctx, queryIn, queryOut)
 	}()
 
@@ -240,21 +242,21 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 	streamIn := make(chan UploadRequest)
 
 	wg.Add(1)
-	go func(){
+	go func() {
 		defer wg.Done()
 		u.batchProcessor(ctx, batchIn, out)
 	}()
 
 	wg.Add(1)
-	go func(){
+	go func() {
 		defer wg.Done()
 		u.streamProcessor(ctx, streamIn, out)
 	}()
 
 	wg.Add(1)
-	go func(){
+	go func() {
 		defer wg.Done()
-		defer func(){
+		defer func() {
 			close(batchIn)
 			close(streamIn)
 		}()

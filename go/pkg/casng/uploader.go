@@ -366,7 +366,7 @@ func newUploader(
 
 		logBeatDoneCh: make(chan struct{}),
 	}
-	log.V(1).Infof("new; cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v", queryCfg, uploadCfg, streamCfg, ioCfg) 
+	log.V(1).Infof("new; cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v", queryCfg, uploadCfg, streamCfg, ioCfg)
 
 	go u.close(ctx)
 	go u.logBeat(ctx)
