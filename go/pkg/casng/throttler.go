@@ -2,8 +2,6 @@ package casng
 
 import (
 	"context"
-
-	log "github.com/golang/glog"
 )
 
 // throttler provides a simple semaphore interface to limit in-flight goroutines.
@@ -32,7 +30,7 @@ func (t *throttler) release(ctx context.Context) {
 	case <-t.ch:
 		infof(ctxWithLogDepthInc(ctx), 4, "throttler.release")
 	default:
-		log.Errorf("throttler.release called before acquire; %s", fmtCtx(ctx))
+		errorf(ctx, "throttler.release called before acquire")
 	}
 }
 

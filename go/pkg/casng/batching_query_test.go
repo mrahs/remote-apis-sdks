@@ -16,7 +16,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-func TestQuery_Batching(t *testing.T) {
+func TestBatching_MissingBlobs(t *testing.T) {
 	errSend := fmt.Errorf("send error")
 	tests := []struct {
 		name        string

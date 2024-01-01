@@ -7,7 +7,7 @@ go_library(
         "config.go",
         "ctx_log.go",
         "node_slice_cache.go",
-        "pubsub.go",
+        "query_processor.go",
         "streaming.go",
         "throttler.go",
         "upload_batch_processor.go",

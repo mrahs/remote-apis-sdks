@@ -228,10 +228,6 @@ type uploader struct {
 	streamWorkerWg  sync.WaitGroup
 	workerWg        sync.WaitGroup
 
-	// Channels.
-	queryPubSub     *pubsub             // Fan-out broker for query responses.
-	uploadPubSub    *pubsub             // Fan-out broker for upload responses.
-
 	logBeatDoneCh chan struct{}
 	done          bool
 }
@@ -282,7 +278,6 @@ func NewStreamingUploader(
 	ctx context.Context, cas regrpc.ContentAddressableStorageClient, byteStream bsgrpc.ByteStreamClient, instanceName string,
 	queryCfg, batchCfg, streamCfg GRPCConfig, ioCfg IOConfig,
 ) (*StreamingUploader, error) {
-	ctx = ctxWithValues(ctx, ctxKeyModule, "uploader")
 	uploader, err := newUploader(ctx, cas, byteStream, instanceName, queryCfg, batchCfg, streamCfg, ioCfg)
 	if err != nil {
 		return nil, err
@@ -293,7 +288,7 @@ func NewStreamingUploader(
 // TODO: support uploading repb.Tree.
 // TODO: support node properties as in https://github.com/bazelbuild/remote-apis-sdks/pull/475
 // TODO: review ctx used in semaphores: should it be req.ctx to stop waiting if the request is cancelled?
-// TODO: track unifications in processors to see how effective it is.
+// TODO: track unifications in processors (and MissingBlobs) to see how effective it is.
 func newUploader(
 	ctx context.Context, cas regrpc.ContentAddressableStorageClient, byteStream bsgrpc.ByteStreamClient, instanceName string,
 	queryCfg, uploadCfg, streamCfg GRPCConfig, ioCfg IOConfig,
@@ -333,7 +328,6 @@ func newUploader(
 	uploadBatchRequestItemBaseSize := proto.Size(&repb.BatchUpdateBlobsRequest_Request{Digest: dgProtoSample, Data: []byte{}})
 	uploadBatchRequestItemBytesLimit := int64(uploadCfg.BytesLimit - uploadBatchRequestBaseSize - uploadBatchRequestItemBaseSize)
 
-	ctx = ctxWithValues(ctx, ctxKeyModule, "upload")
 	u := &uploader{
 		cas:          cas,
 		byteStream:   byteStream,
@@ -366,16 +360,13 @@ func newUploader(
 		ioLargeThrottler: newThrottler(int64(ioCfg.OpenLargeFilesLimit)),
 		dirChildren:      nodeSliceMap{store: make(map[string][]proto.Message)},
 
-		queryPubSub:     newPubSub(),
-		uploadPubSub:    newPubSub(),
-
 		uploadBatchRequestBaseSize:       uploadBatchRequestBaseSize,
 		uploadBatchRequestItemBaseSize:   uploadBatchRequestItemBaseSize,
 		uploadBatchRequestItemBytesLimit: uploadBatchRequestItemBytesLimit,
 
 		logBeatDoneCh: make(chan struct{}),
 	}
-	log.V(1).Infof("new; cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v, %s", queryCfg, uploadCfg, streamCfg, ioCfg, fmtCtx(ctx))
+	log.V(1).Infof("new; cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v", queryCfg, uploadCfg, streamCfg, ioCfg) 
 
 	go u.close(ctx)
 	go u.logBeat(ctx)
@@ -416,11 +407,6 @@ func (u *uploader) close(ctx context.Context) {
 	infof(ctx, 1, "waiting for stream workers")
 	u.streamWorkerWg.Wait()
 
-	// 5th, internal brokers should flush all remaining messages.
-	infof(ctx, 1, "waiting for brokers")
-	u.queryPubSub.wait()
-	u.uploadPubSub.wait()
-
 	// 7th, workers should have terminated by now.
 	infof(ctx, 1, "waiting for workers")
 	u.workerWg.Wait()
@@ -460,8 +446,6 @@ func (u *uploader) logBeat(ctx context.Context) {
 		i++
 		infof(ctx, 0, "beat",
 			"#", i,
-			"upload_subs", u.uploadPubSub.len(),
-			"query_subs", u.queryPubSub.len(),
 			"walkers", u.walkThrottler.len(),
 			"open_files", u.ioThrottler.len(),
 			"large_open_files", u.ioLargeThrottler.len(),

@@ -12,24 +12,23 @@ import (
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 )
 
-// queryRequestBundle is used to bundle up (unify) concurrent requests for the same digest from different requesters (routes).
-// It's also used to associate digests with request IDs for logging purposes.
-type queryRequestBundle map[digest.Digest]struct{}
+// queryBundle is used to bundle up (aggregate and deduplicate) concurrent requests for the same digest.
+type queryBundle map[digest.Digest][]UploadRequest
 
 // Number of messages sent out may be less than number of messages given due to deduplication.
-func (u *uploader) queryProcessor(ctx context.Context, in <-chan missingBlobRequest, out chan<- MissingBlobsResponse) {
+func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, out chan<- MissingBlobsResponse) {
 	u.queryWorkerWg.Add(1)
 	defer u.queryWorkerWg.Done()
 
-	ctx = ctxWithValues(ctx, ctxKeyModule, "query.processor")
+	ctx = ctxWithValues(ctx, ctxKeyModule, "query_processor")
 	infof(ctx, 4, "start")
 	defer infof(ctx, 4, "stop")
 
 	// Ensure all in-flight responses are sent before returning.
 	callWg := sync.WaitGroup{}
-	defer func(){ callWg.Wait() }()
+	defer func() { callWg.Wait() }()
 
-	bundle := make(queryRequestBundle, u.queryRPCCfg.ItemsLimit)
+	bundle := make(queryBundle, u.queryRPCCfg.ItemsLimit)
 	bundleCtx := ctx // context with unified metadata.
 
 	handle := func() {
@@ -43,8 +42,10 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan missingBlobRequ
 			infof(ctx, 4, "cancel")
 			startTime = time.Now()
 			// Ensure responses are dispatched before aborting.
-			for d := range bundle {
-				out <- MissingBlobsResponse{Digest: d, Err: ctx.Err()}
+			for d, reqs := range bundle {
+				for _, req := range reqs {
+					out <- MissingBlobsResponse{Digest: d, Err: ctx.Err(), req: req}
+				}
 			}
 			durationf(ctx, startTime, "query->out")
 			return
@@ -52,13 +53,13 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan missingBlobRequ
 		durationf(ctx, startTime, "sem.query")
 
 		callWg.Add(1)
-		go func(ctx context.Context, b queryRequestBundle) {
+		go func(ctx context.Context, b queryBundle) {
 			defer callWg.Done()
 			defer u.queryThrottler.release(ctx)
 			u.callMissingBlobs(ctx, b, out)
 		}(bundleCtx, bundle)
 
-		bundle = make(queryRequestBundle, u.queryRPCCfg.ItemsLimit)
+		bundle = make(queryBundle, u.queryRPCCfg.ItemsLimit)
 		bundleCtx = ctx
 	}
 
@@ -73,37 +74,36 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan missingBlobRequ
 			}
 			startTime := time.Now()
 
-			ctx = ctxWithValues(ctx, ctxKeyRtID, req.meta.route, ctxKeySqID, req.meta.id)
-			infof(ctx, 4, "req", "digest", req.digest, "bundle_count", len(bundle))
+			infof(ctx, 4, "req", "digest", req.Digest, "bundle_count", len(bundle))
 
-			if _, ok := u.casPresenceCache.Load(req.digest); ok {
-				infof(ctx, 4, "cas cache hit", "digest", req.digest)
-				out <- MissingBlobsResponse{Digest: req.digest}
+			if _, ok := u.casPresenceCache.Load(req.Digest); ok {
+				infof(ctx, 4, "req.cached", "digest", req.Digest)
+				out <- MissingBlobsResponse{Digest: req.Digest}
 				durationf(ctx, startTime, "query->out")
 				continue
 			}
 
-			bundle[req.digest] = struct{}{}
-			bundleCtx, _ = contextmd.FromContexts(bundleCtx, req.meta.ctx) // ignore non-essential error.
+			bundle[req.Digest] = append(bundle[req.Digest], req)
+			bundleCtx, _ = contextmd.FromContexts(bundleCtx, ctx) // ignore non-essential error.
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
 				infof(ctx, 4, "bundle.full", "count", len(bundle))
 				handle()
 			}
-			durationf(ctx, startTime, "query.bundle.append", "digest", req.digest, "count", len(bundle))
+			durationf(ctx, startTime, "bundle.append", "digest", req.Digest, "count", len(bundle))
 		case <-bundleTicker.C:
 			startTime := time.Now()
 			l := len(bundle)
 			handle()
-			durationf(ctx, startTime, "query.bundle.timeout", "count", l)
+			durationf(ctx, startTime, "bundle.timeout", "count", l)
 		}
 	}
 }
 
 // callMissingBlobs calls the gRPC endpoint and notifies requesters of the results.
 // It assumes ownership of its arguments. digestRoutes is the primary one. digestReqs is used for logging purposes.
-func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBundle, out chan<- MissingBlobsResponse) {
+func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryBundle, out chan<- MissingBlobsResponse) {
 	digests := make([]*repb.Digest, 0, len(bundle))
 	for d := range bundle {
 		digests = append(digests, d.ToProto())
@@ -137,25 +137,24 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryRequestBund
 	startTime = time.Now()
 	for _, dg := range missing {
 		d := digest.NewFromProtoUnvalidated(dg)
-		out <- MissingBlobsResponse{
-			Digest:  d,
-			Missing: err == nil, // Should be always false if there was an error.
-			Err:     err,
+		for _, req := range bundle[d] {
+			out <- MissingBlobsResponse{
+				Digest:  d,
+				Missing: err == nil, // Should be always false if there was an error.
+				Err:     err,
+				req:     req,
+			}
 		}
 		delete(bundle, d)
 	}
-	for d := range bundle {
-		out <- MissingBlobsResponse{
-			Digest:  d,
-			Err:     err,
+	for d, reqs := range bundle {
+		for _, req := range reqs {
+			out <- MissingBlobsResponse{
+				Digest: d,
+				Err:    err,
+				req:    req,
+			}
 		}
 	}
 	durationf(ctx, startTime, "query.grpc->out")
-}
-
-func pubQueryResponse(res MissingBlobsResponse, c int, out chan<- MissingBlobsResponse) {
-	// Match the number of responses to the number of requests.
-	for i := 0; i < c; i++ {
-		out <- res
-	}
 }

@@ -40,9 +40,10 @@ type namedDigest interface {
 // In other words, if an error is returned, any digest that is not in the returned slice is not missing.
 // If no error is returned, the returned slice contains all the missing digests.
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) ([]digest.Digest, error) {
-	ctx = ctxWithRqID(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyModule, "query.batch")
+	ctx = ctxWithRqID(ctx, ctxKeyModule, "missing_blobs")
+	infof(ctx, 4, "missing_blobs", "count", len(digests))
 	defer durationf(ctx, time.Now(), "missing_blobs", "count", len(digests))
+
 	if len(digests) == 0 {
 		return nil, nil
 	}
@@ -71,7 +72,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	if len(batches) == 0 {
 		return nil, nil
 	}
-	infof(ctx, 1, "deduped", "count", len(digests), "deduped", len(dgSet))
+	infof(ctx, 4, "deduped", "count", len(digests), "deduped", len(dgSet))
 
 	// Call remote.
 	missing := make([]digest.Digest, 0, len(dgSet))
@@ -100,7 +101,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			delete(dgSet, d)
 		}
 	}
-	infof(ctx, 1, "done", "missing", len(missing))
+	infof(ctx, 4, "done", "missing", len(missing))
 
 	// Record cache hits.
 	for d := range dgSet {
@@ -126,8 +127,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
 // If an error was returned, the returned stats may indicate that all the bytes were sent, but that does not guarantee that the server committed all of them.
 func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size, offset int64) (Stats, error) {
-	ctx = ctxWithRqID(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyModule, "write_bytes")
+	ctx = ctxWithRqID(ctx, ctxKeyModule, "write_bytes")
 
 	startTime := time.Now()
 	if !u.streamThrottle.acquire(ctx) {
@@ -141,8 +141,7 @@ func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Rea
 
 // WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
 func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size, offset int64) (Stats, error) {
-	ctx = ctxWithRqID(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyModule, "write_bytes")
+	ctx = ctxWithRqID(ctx, ctxKeyModule, "write_bytes")
 
 	startTime := time.Now()
 	if !u.streamThrottle.acquire(ctx) {
@@ -168,7 +167,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	var encWg sync.WaitGroup
 	var withCompression bool // Used later to ensure the pipe is closed.
 	if IsCompressedWriteResourceName(name) {
-		infof(ctx, 1, "compressing", "name", name, "size", size)
+		infof(ctx, 4, "compressing", "name", name, "size", size)
 		withCompression = true
 		pr, pw := io.Pipe()
 		// Closing pr always returns a nil error, but also sends ErrClosedPipe to pw.
@@ -308,7 +307,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 
 	// CommittedSize is based on the uncompressed size of the blob.
 	if !cacheHit && res.CommittedSize != size {
-		err = errors.Join(ErrGRPC, fmt.Errorf("committed size mismatch: got %d, want %d; %s", res.CommittedSize, size, fmtCtx(ctx)), err)
+		err = errors.Join(ErrGRPC, serrorf(ctx, "committed size mismatch", "committed", res.CommittedSize, "actual", size), err)
 	}
 
 	return stats, err
@@ -335,8 +334,8 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([]digest.Digest, Stats, error) {
-	ctx = ctxWithRqID(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.batch")
+	ctx = ctxWithRqID(ctx, ctxKeyModule, "upload")
+	infof(ctx, 4, "upload", "count", len(reqs))
 	defer durationf(ctx, time.Now(), "upload", "count", len(reqs))
 
 	var stats Stats
@@ -354,35 +353,35 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 			continue
 		}
 		digested[r.Digest] = r
+		stats.BytesRequested += r.Digest.Size
+		stats.DigestCount++
 		digests = append(digests, r.Digest)
 	}
 	missing, err := u.MissingBlobs(ctx, digests)
 	if err != nil {
 		return nil, stats, err
 	}
-	infof(ctx, 1, "query", "count", len(reqs), "missing", len(missing), "undigested", len(undigested))
+	infof(ctx, 4, "query.result", "count", len(reqs), "missing", len(missing), "undigested", len(undigested))
 
 	reqs = undigested
 	for _, d := range missing {
 		reqs = append(reqs, digested[d])
 		delete(digested, d)
+		stats.CacheMissCount++
 	}
 	for d := range digested {
-		stats.BytesRequested += d.Size
 		stats.LogicalBytesCached += d.Size
 		stats.CacheHitCount++
-		stats.DigestCount++
 	}
 	if len(reqs) == 0 {
-		infof(ctx, 1, "nothing is missing")
 		return nil, stats, nil
 	}
 
-	infof(ctx, 1, "uploading", "count", len(reqs))
+	infof(ctx, 4, "uploading", "count", len(reqs))
 	in := make(chan UploadRequest)
 	out := make(chan UploadResponse)
 	u.uploadWorkerWg.Add(1)
-	go func(){
+	go func() {
 		defer u.uploadWorkerWg.Done()
 		u.uploadProcessor(ctx, in, out)
 		close(out)
@@ -391,18 +390,18 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	c := 0
 	u.requestWorkerWg.Add(1)
 	go func() {
-		defer close(in) // let the streamer terminate.
+		defer close(in)
 		defer u.requestWorkerWg.Done()
 
-		infof(ctx, 1, "sender.start")
-		defer infof(ctx, 1, "sender.stop")
+		infof(ctx, 4, "sender.start")
+		defer infof(ctx, 4, "sender.stop")
 
 		for _, r := range reqs {
 			select {
 			case in <- r:
 				c++
 			case <-ctx.Done():
-				log.Errorf("cancelled: %v; %s", ctx.Err(), fmtCtx(ctx))
+				errorf(ctx, "cancelled", "err", ctx.Err())
 				return
 			}
 		}
@@ -421,24 +420,27 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) ([
 	}
 
 	if c < len(reqs) {
-		err = errors.Join(fmt.Errorf("incomplete request: %w; %s", ctx.Err(), fmtCtx(ctx, "sent", c, "count", len(reqs))), err)
+		err = errors.Join(serrorf(ctx, "incomplete request", "sent", c, "count", len(reqs)), ctx.Err(), err)
 	}
 	return uploaded, stats, err
 }
 
 // DigestTree returns the digest of the merkle tree for root.
 func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute, slo symlinkopts.Options, exclude walker.Filter) (digest.Digest, Stats, error) {
-	ctx = ctxWithRqID(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyModule, "digest.tree")
+	ctx = ctxWithRqID(ctx, ctxKeyModule, "digest_tree")
+	infof(ctx, 4, "digest_tree", "path", root, "slo", slo, "filter", exclude)
+
 	in := make(chan UploadRequest)
 	out := make(chan any)
+
 	u.digestWorkerWg.Add(1)
-	go func(){
+	go func() {
 		defer u.digestWorkerWg.Done()
 		u.digestProcessor(ctx, in, out)
+		close(out)
 	}()
 
-	req := UploadRequest{Path: root, SymlinkOptions: slo, Exclude: exclude, ctx: ctx, digestOnly: true}
+	req := UploadRequest{Path: root, SymlinkOptions: slo, Exclude: exclude}
 	select {
 	// In both cases, the channel must be closed before proceeding beyond the select statement to ensure
 	// the proper closure of resCh.
@@ -452,9 +454,18 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 	var stats Stats
 	var err error
 	for dr := range out {
+		if ur, ok := dr.(UploadRequest); ok {
+			infof(ctx, 4, "digest.tree.ignore", "path", ur.Path)
+			if ur.reader != nil {
+				u.ioThrottler.release(ctx)
+				u.ioLargeThrottler.release(ctx)
+			}
+			continue
+		}
+
 		walkRes, ok := dr.(walkResult)
 		if !ok {
-			log.Errorf("unexpected message type from digester: %T", dr)
+			errorf(ctx, fmt.Sprintf("unexpected message type from digester: %T", dr))
 			continue
 		}
 		stats.Add(walkRes.stats)
@@ -464,7 +475,7 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 	}
 	rootNode := u.Node(req)
 	if rootNode == nil {
-		err = errors.Join(fmt.Errorf("root node was not found; %s", fmtCtx(ctx, "path", root)), err)
+		err = errors.Join(serrorf(ctx, "root node was not found", "path", root), err)
 		return digest.Digest{}, stats, err
 	}
 	dg := digest.NewFromProtoUnvalidated(rootNode.(namedDigest).GetDigest())
@@ -478,8 +489,8 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 // All requests must share the same filter. Digest fields on the requests are ignored to ensure proper hierarchy caching via the internal digestion process.
 // remoteWorkingDir replaces workingDir inside the merkle tree such that the server is only aware of remoteWorkingDir.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
-	ctx = ctxWithRqID(ctx)
-	ctx = ctxWithValues(ctx, ctxKeyModule, "upload.tree")
+	ctx = ctxWithRqID(ctx, ctxKeyModule, "upload_tree")
+	infof(ctx, 4, "upload_tree", "count", len(reqs))
 	defer durationf(ctx, time.Now(), "upload_tree", "count", len(reqs))
 
 	if len(reqs) == 0 {
@@ -506,7 +517,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	startTime := time.Now()
 	for _, r := range reqs {
 		if r.Exclude.ID != filterID {
-			err = fmt.Errorf("cannot create a tree from requests with different exclusion filters: %q and %q; %s", filterID, r.Exclude.ID, fmtCtx(ctx))
+			err = serrorf(ctx, "cannot create a tree from requests with different exclusion filters", "f1", filterID, "f2", r.Exclude.ID)
 			return
 		}
 
@@ -538,18 +549,11 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		reqs[i] = r
 		i++
 	}
-	durationf(ctx, startTime, "filter_id", "fid", filterID)
+	durationf(ctx, startTime, "filter", "fid", filterID, "count", len(reqs), "filtered", i)
 
 	// Reslice to take included (shifted) requests only.
 	reqs = reqs[:i]
 	// paths is already sorted because reqs was sorted.
-	// TODO: the ID should not include every path from the request.
-	// filterID = digest.NewFromBlob([]byte(strings.Join(paths, ""))).String()
-	// for i := range reqs {
-	// 	r := &reqs[i]
-	// 	r.Exclude.ID = filterIDFunc
-	// }
-	infof(ctx, 1, "filter", "fid", filterID, "count", len(reqs), "filtered", i)
 
 	// 2nd, Upload the requests first to digest the files and cache the nodes.
 	startTime = time.Now()
@@ -570,7 +574,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		// Each request in reqs must correspond to a cached node.
 		node := u.Node(r)
 		if node == nil {
-			err = fmt.Errorf("cannot construct the merkle tree with a missing node for path %q; %s", r.Path, fmtCtx(ctx, "fid", filterID))
+			err = serrorf(ctx, "cannot construct the merkle tree with a missing node", "path", r.Path, "fid", filterID)
 			return
 		}
 
@@ -578,7 +582,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		// Start by swapping the working directory with the remote one.
 		rp, errIm := ReplaceWorkingDir(ctx, r.Path, execRoot, workingDir, remoteWorkingDir)
 		if errIm != nil {
-			err = errors.Join(fmt.Errorf("cannot construct the merkle tree with a path outside the root: %q; %s", r.Path, fmtCtx(ctx, "root", execRoot, "wd", workingDir, "rws", remoteWorkingDir)), errIm)
+			err = errors.Join(serrorf(ctx, "cannot construct the merkle tree with a path outside the root", "path", r.Path, "root", execRoot, "wd", workingDir, "rws", remoteWorkingDir), errIm)
 			return
 		}
 		parent := rp
@@ -663,7 +667,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	durationf(ctx, startTime, "fill_tree", "fid", filterID)
 
 	// Upload the blobs of the shared ancestors.
-	infof(ctx, 1, "upload dirs", "dirs", len(dirReqs), "fid", filterID)
+	infof(ctx, 4, "upload_dirs", "dirs", len(dirReqs), "fid", filterID)
 	startTime = time.Now()
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
 	durationf(ctx, startTime, "upload_dirs", "fid", filterID)
@@ -717,7 +721,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 // Example: path=/root/out/foo.c, root=/root, workdingDir=out/reclient, remoteWorkingDir=set_by_reclient/a, result=/root/set_by_reclient/foo.c
 func ReplaceWorkingDir(ctx context.Context, path, root impath.Absolute, workingDir, remoteWorkingDir impath.Relative) (impath.Absolute, error) {
 	if !strings.HasPrefix(path.String(), root.String()) {
-		return impath.Absolute{}, fmt.Errorf("cannot replace working dir for path %q because it is not prefixed by %q; %s", path, root, fmtCtx(ctx))
+		return impath.Absolute{}, serrorf(ctx, "cannot replace working dir", "path", path, "root", root)
 	}
 
 	p := strings.TrimPrefix(path.String(), root.String()) // if root == '/', p is now relative

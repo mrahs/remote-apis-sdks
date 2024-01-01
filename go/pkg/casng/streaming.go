@@ -39,6 +39,7 @@ package casng
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"sync"
@@ -48,70 +49,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
-	log "github.com/golang/glog"
-	"github.com/pborman/uuid"
 )
-
-type missingBlobRequestMeta struct {
-	ctx   context.Context
-	id    string
-	route string
-	ref   any
-}
-
-// MissingBlobsResponse represents a query result for a single digest.
-//
-// If Err is not nil, Missing is false.
-type MissingBlobsResponse struct {
-	Digest  digest.Digest
-	Missing bool
-	Err     error
-	meta    missingBlobRequestMeta
-}
-
-// missingBlobRequest associates a digest with its requester's context.
-type missingBlobRequest struct {
-	digest digest.Digest
-	meta   missingBlobRequestMeta
-}
-
-// MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
-//
-// This method is useful when digests are calculated and dispatched on the fly.
-// For a large list of known digests, consider using the batching uploader.
-//
-// To properly stop this call, close in and cancel ctx, then wait for the returned channel to close.
-// The channel in must be closed as a termination signal. Cancelling ctx is not enough.
-// The uploader's context is used to make remote calls using metadata from ctx.
-// Metadata unification assumes all requests share the same correlated invocation ID.
-//
-// The digests are unified (aggregated/bundled) based on ItemsLimit, BytesLimit and BundleTimeout of the gRPC config.
-// The returned channel is unbuffered and will be closed after the input channel is closed and all sent requests get their corresponding responses.
-// This could indicate completion or cancellation (in case the context was canceled).
-// Slow consumption speed on the returned channel affects the consumption speed on in.
-//
-// This method must not be called after cancelling the uploader's context.
-func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
-	ctx = ctxWithRqID(ctx)
-	pipeCh := make(chan missingBlobRequest)
-	out := make(chan MissingBlobsResponse)
-
-	u.requestWorkerWg.Add(1)
-	go func() {
-		defer u.requestWorkerWg.Done()
-		defer close(pipeCh)
-		for d := range in {
-			pipeCh <- missingBlobRequest{digest: d, meta: missingBlobRequestMeta{ctx: ctx, id: uuid.New()}}
-		}
-	}()
-
-	go func(){
-		u.queryProcessor(ctx, pipeCh, out)
-		close(out)
-	}()
-
-	return out
-}
 
 // UploadRequest represents a path to start uploading from.
 //
@@ -150,22 +88,8 @@ type UploadRequest struct {
 	// Using a different ID for effectively identical filters will reduce cache hit rates and increase digestion compute cost.
 	Exclude walker.Filter
 
-	// Internal fields.
-
-	// ctx is the requester's context which is used to extract metadata from and abort in-flight tasks for this request.
-	ctx context.Context
 	// reader is used to keep a large file open while being handed over between workers.
 	reader io.ReadSeekCloser
-	// id identifies this request internally for logging purposes.
-	id string
-	// route identifies the requester of this request.
-	route string
-	// done is used internally to signal that no further requests are expected for the associated route.
-	// This allows the processor to notify the client once all buffered sub-requests are processed.
-	// Once a route is associated with done=true, sending sub-sequent requests for that route might cause races.
-	done bool
-	// digsetOnly indicates that this request is for digestion only.
-	digestOnly bool
 }
 
 // UploadResponse represents an upload result for a single request (which may represent a tree of files).
@@ -181,15 +105,53 @@ type UploadResponse struct {
 	// Err indicates the error encountered while processing the request associated with Digest.
 	// If set, Stats should be ignored.
 	Err error
+}
 
-	// reqs is used internally to identify the requests that are related to this response.
-	reqs []string
-	// routes is used internally to identify the clients that are interested in this response.
-	routes []string
-	// done is used internally to signal that this is the last response for the associated routes.
-	done bool
-	// endofWalk is used internally to signal that this response includes stats only for the associated routes.
-	endOfWalk bool
+// MissingBlobsResponse represents a query result for a single digest.
+// If Err is not nil, Missing is false.
+type MissingBlobsResponse struct {
+	Digest  digest.Digest
+	Missing bool
+	Err     error
+	req UploadRequest
+}
+
+// MissingBlobs is a non-blocking call that queries the CAS for incoming digests.
+//
+// This method is useful when digests are calculated and dispatched on the fly.
+// For a large list of known digests, consider using the batching uploader.
+//
+// To properly stop this call, close in and cancel ctx, then wait for the returned channel to close.
+// The channel in must be closed as a termination signal. Cancelling ctx is not enough.
+// The uploader's context is used to make remote calls using metadata from ctx.
+// Metadata unification assumes all requests share the same correlated invocation ID.
+//
+// The digests are unified (aggregated/bundled) based on ItemsLimit, BytesLimit and BundleTimeout of the gRPC config.
+// The returned channel is unbuffered and will be closed after the input channel is closed and all sent requests get their corresponding responses.
+// This could indicate completion or cancellation (in case the context was canceled).
+// Slow consumption speed on the returned channel affects the consumption speed on in.
+//
+// This method must not be called after cancelling the uploader's context.
+func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
+	ctx = ctxWithRqID(ctx)
+	pipeCh := make(chan UploadRequest)
+	out := make(chan MissingBlobsResponse)
+
+	u.requestWorkerWg.Add(1)
+	go func() {
+		defer u.requestWorkerWg.Done()
+		defer close(pipeCh)
+		for d := range in {
+			pipeCh <- UploadRequest{Digest: d}
+		}
+	}()
+
+	go func(){
+		u.queryProcessor(ctx, pipeCh, out)
+		close(out)
+	}()
+
+	return out
 }
 
 // Upload is a non-blocking call that uploads incoming files to the CAS if necessary.
@@ -235,13 +197,16 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 		close(digestOut)
 	}()
 
-	queryIn := make(chan missingBlobRequest)
+	queryIn := make(chan UploadRequest)
 	queryOut := make(chan MissingBlobsResponse)
 
 	wg.Add(1)
 	go func(){
 		defer wg.Done()
 		defer func(){ close(queryIn) }()
+
+		infof(ctx, 4, "pipe.digest_query.start")
+		defer infof(ctx, 4, "pipe.digest_query.stop")
 
 		for dr := range digestOut {
 			if walkRes, ok := dr.(walkResult); ok {
@@ -250,23 +215,16 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 			}
 			req, ok := dr.(UploadRequest)
 			if !ok {
-				log.Errorf("unexpected message type from digester: %T", dr)
+				errorf(ctx, fmt.Sprintf("unexpected message type from digester: %T", dr))
+				continue
+			}
+			infof(ctx, 4, "digest.out", "digest", req.Digest, "bytes", len(req.Bytes))
+			if req.Digest.Hash == "" {
+				errorf(ctx, "ignoring a request without a digest")
 				continue
 			}
 			startTime := time.Now()
-			infof(ctx, 4, "digest.out", "digest", req.Digest, "bytes", len(req.Bytes))
-			if req.Digest.Hash == "" {
-				log.Errorf("ignoring a request without a digest; %s", fmtCtx(ctx))
-				continue
-			}
-			if req.digestOnly {
-				startTime := time.Now()
-				out <- UploadResponse{Digest: req.Digest, Stats: Stats{}, routes: []string{req.route}, reqs: []string{req.id}}
-				durationf(ctx, startTime, "digest.out->out")
-				continue
-			}
-			startTime = time.Now()
-			queryIn <- missingBlobRequest{req.Digest, missingBlobRequestMeta{ctx: req.ctx, id: req.id, ref: req}}
+			queryIn <- req
 			durationf(ctx, startTime, "digest.out->query")
 		}
 	}()
@@ -281,19 +239,15 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 	batchIn := make(chan UploadRequest)
 	streamIn := make(chan UploadRequest)
 
-	u.batchWorkerWg.Add(1)
 	wg.Add(1)
 	go func(){
 		defer wg.Done()
-		defer u.batchWorkerWg.Done()
 		u.batchProcessor(ctx, batchIn, out)
 	}()
 
-	u.streamWorkerWg.Add(1)
 	wg.Add(1)
 	go func(){
 		defer wg.Done()
-		defer u.streamWorkerWg.Done()
 		u.streamProcessor(ctx, streamIn, out)
 	}()
 
@@ -305,12 +259,14 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 			close(streamIn)
 		}()
 
+		infof(ctx, 4, "pipe.query_upload.start")
+		defer infof(ctx, 4, "pipe.query_upload.stop")
+
 		for qr := range queryOut {
 			startTime := time.Now()
 			infof(ctx, 4, "query.out", "digest", qr.Digest, "missing", qr.Missing, "err", qr.Err)
 
-			req := qr.meta.ref.(UploadRequest)
-			res := UploadResponse{Digest: qr.Digest, Err: qr.Err, reqs: []string{req.id}}
+			res := UploadResponse{Digest: qr.Digest, Err: qr.Err}
 
 			if !qr.Missing {
 				res.Stats = Stats{
@@ -322,7 +278,7 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 
 			if qr.Err != nil || !qr.Missing {
 				// Release associated IO holds before dispatching the result.
-				if req.reader != nil {
+				if qr.req.reader != nil {
 					u.ioThrottler.release(ctx)
 					u.ioLargeThrottler.release(ctx)
 				}
@@ -332,12 +288,12 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 				continue
 			}
 
-			if req.Digest.Size <= u.uploadBatchRequestItemBytesLimit {
-				batchIn <- req
+			if qr.Digest.Size <= u.uploadBatchRequestItemBytesLimit {
+				batchIn <- qr.req
 				durationf(ctx, startTime, "query.out->batcher")
 				continue
 			}
-			streamIn <- req
+			streamIn <- qr.req
 			durationf(ctx, startTime, "query.out->streamer")
 		}
 	}()

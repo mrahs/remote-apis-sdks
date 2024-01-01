@@ -27,7 +27,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestUpload_Batching(t *testing.T) {
+func TestBatching_Upload(t *testing.T) {
 	tests := []struct {
 		name         string
 		fs           map[string][]byte
@@ -90,7 +90,7 @@ func TestUpload_Batching(t *testing.T) {
 				ItemsLimit:           1,
 				BytesLimit:           1024,
 				Timeout:              time.Second,
-				BundleTimeout:        time.Millisecond,
+				BundleTimeout:        time.Second,
 				RetryPolicy:          retryNever,
 				RetryPredicate:       retry.TransientOnly,
 			},
@@ -556,16 +556,36 @@ func TestUpload_Batching(t *testing.T) {
 	}
 }
 
-func TestUpload_BatchingAbort(t *testing.T) {
+func TestBatching_UploadAbort(t *testing.T) {
 	ctx, ctxCancel := context.WithCancel(context.Background())
-	defer ctxCancel()
-	_, err := casng.NewBatchingUploader(ctx, &fakeCAS{}, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
+	ctxCancel()
+	cc := &fakeCAS{
+		findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
+			return &repb.FindMissingBlobsResponse{MissingBlobDigests: in.BlobDigests}, nil
+		},
+	}
+	u, err := casng.NewBatchingUploader(ctx, cc, &fakeByteStreamClient{}, "", defaultRPCCfg, defaultRPCCfg, defaultRPCCfg, defaultIOCfg)
 	if err != nil {
 		t.Fatalf("error creating batching uploader: %v", err)
 	}
+	uploaded, stats, err := u.Upload(ctx, casng.UploadRequest{Digest: digest.NewFromBlob([]byte("a"))})
+	if !errors.Is(err, ctx.Err()) {
+		t.Errorf("expected ctx error, but got: %v", err)
+	}
+	if len(uploaded) > 0 {
+		t.Errorf("expected nothing to be uploaded, but got %d", len(uploaded))
+	}
+	wantStats := casng.Stats{
+		BytesRequested: 1,
+		CacheMissCount: 1,
+		DigestCount:    1,
+	}
+	if diff := cmp.Diff(wantStats, stats); diff != "" {
+		t.Errorf("stats mismatch, (-want +got): %s", diff)
+	}
 }
 
-func TestUpload_BatchingTree(t *testing.T) {
+func TestBatching_UploadTree(t *testing.T) {
 	bsc := &fakeByteStreamClient{}
 	cc := &fakeCAS{
 		findMissingBlobs: func(ctx context.Context, in *repb.FindMissingBlobsRequest, opts ...grpc.CallOption) (*repb.FindMissingBlobsResponse, error) {
@@ -595,7 +615,7 @@ func TestUpload_BatchingTree(t *testing.T) {
 	}
 }
 
-func TestUpload_BatchingDigestTree(t *testing.T) {
+func TestBatching_DigestTree(t *testing.T) {
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	defer ctxCancel()
 
@@ -621,7 +641,7 @@ func TestUpload_BatchingDigestTree(t *testing.T) {
 	}
 }
 
-func TestUpload_ReplaceWorkingDir(t *testing.T) {
+func TestReplaceWorkingDir(t *testing.T) {
 	tests := []struct {
 		name     string
 		path     impath.Absolute

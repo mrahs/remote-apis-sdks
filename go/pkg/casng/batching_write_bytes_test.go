@@ -20,7 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestUpload_WriteBytes(t *testing.T) {
+func TestBatching_WriteBytes(t *testing.T) {
 	errWrite := fmt.Errorf("write error")
 	errClose := fmt.Errorf("close error")
 

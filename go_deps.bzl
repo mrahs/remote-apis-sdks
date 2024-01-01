@@ -62,12 +62,6 @@ def remote_apis_sdks_go_deps():
         version = "v0.1.0",
     )
     go_repository(
-        name = "com_github_golang_glog",
-        importpath = "github.com/golang/glog",
-        sum = "h1:uCdmnmatrKCgMBlM4rMuJZWOkPDqdbZPnrMXDY4gI68=",
-        version = "v1.2.0",
-    )
-    go_repository(
         name = "com_github_golang_groupcache",
         importpath = "github.com/golang/groupcache",
         sum = "h1:1r7pUrabqp18hOBcwBwiTsbnFeTZHV9eER/QT5JVZxY=",
