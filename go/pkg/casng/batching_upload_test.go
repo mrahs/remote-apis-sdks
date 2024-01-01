@@ -521,9 +521,6 @@ func TestBatching_Upload(t *testing.T) {
 			if test.batchRPCCfg == nil {
 				test.batchRPCCfg = &rpcCfg
 			}
-			if test.ioCfg.ConcurrentWalksLimit <= 0 {
-				test.ioCfg.ConcurrentWalksLimit = 1
-			}
 			if test.ioCfg.BufferSize <= 0 {
 				test.ioCfg.BufferSize = 1
 			}

@@ -34,7 +34,6 @@ var (
 		RetryPredicate:       retry.TransientOnly,
 	}
 	defaultIOCfg = casng.IOConfig{
-		ConcurrentWalksLimit:     1,
 		OpenFilesLimit:           1,
 		OpenLargeFilesLimit:      1,
 		SmallFileSizeThreshold:   1,

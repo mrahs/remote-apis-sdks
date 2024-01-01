@@ -179,7 +179,6 @@ type uploader struct {
 	ioCfg            IOConfig
 	buffers          sync.Pool
 	zstdEncoders     sync.Pool
-	walkThrottler    *throttler // Controls concurrent file system walks.
 	ioThrottler      *throttler // Controls total number of open files.
 	ioLargeThrottler *throttler // Controls total number of open large files (subset of open files).
 
@@ -355,7 +354,6 @@ func newUploader(
 				return enc
 			},
 		},
-		walkThrottler:    newThrottler(int64(ioCfg.ConcurrentWalksLimit)),
 		ioThrottler:      newThrottler(int64(ioCfg.OpenFilesLimit)),
 		ioLargeThrottler: newThrottler(int64(ioCfg.OpenLargeFilesLimit)),
 		dirChildren:      nodeSliceMap{store: make(map[string][]proto.Message)},
@@ -446,7 +444,6 @@ func (u *uploader) logBeat(ctx context.Context) {
 		i++
 		infof(ctx, 0, "beat",
 			"#", i,
-			"walkers", u.walkThrottler.len(),
 			"open_files", u.ioThrottler.len(),
 			"large_open_files", u.ioLargeThrottler.len(),
 			"querying", u.queryThrottler.len(),

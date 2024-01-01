@@ -37,7 +37,6 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/walker"
 	slo "github.com/bazelbuild/remote-apis-sdks/go/pkg/symlinkopts"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
-	"github.com/pborman/uuid"
 	"github.com/pkg/xattr"
 	"google.golang.org/protobuf/proto"
 )
@@ -109,16 +108,9 @@ func (u *uploader) digestProcessor(ctx context.Context, in <-chan UploadRequest,
 		}
 
 		infof(ctx, 4, "req.path", "path", req.Path, "fid", req.Exclude, "slo", req.SymlinkOptions)
-		// Wait if too many walks are in-flight.
-		startTime := time.Now()
-		if !u.walkThrottler.acquire(ctx) {
-			continue
-		}
-		durationf(ctx, startTime, "sem.walk")
 		walkerWg.Add(1)
 		go func(r UploadRequest) {
 			defer walkerWg.Done()
-			defer u.walkThrottler.release(ctx)
 			u.walkDigest(ctx, r, out)
 		}(req)
 	}
@@ -126,7 +118,7 @@ func (u *uploader) digestProcessor(ctx context.Context, in <-chan UploadRequest,
 
 // digest initiates a file system walk to digest files and dispatch them for uploading.
 func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<- any) {
-	ctx = ctxWithValues(ctx, ctxKeyWalkID, uuid.New())
+	// ctx = ctxWithValues(ctx, ctxKeyWalkID, uuid.New())
 	defer durationf(ctx, time.Now(), "walk", "path", req.Path)
 
 	stats := Stats{}

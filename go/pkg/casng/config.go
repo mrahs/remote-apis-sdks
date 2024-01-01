@@ -94,11 +94,6 @@ type GRPCConfig struct {
 
 // IOConfig specifies the configuration for IO operations.
 type IOConfig struct {
-	// ConcurrentWalksLimit sets the upper bound of concurrent filesystem tree traversals.
-	// This affects the number of concurrent upload requests for the uploader since each one requires a walk.
-	// Must be > 0.
-	ConcurrentWalksLimit int
-
 	// OpenFilesLimit sets the upper bound for the number of files being simultanuously processed.
 	// Must be > 0.
 	OpenFilesLimit int
@@ -269,7 +264,7 @@ func validateGrpcConfig(cfg *GRPCConfig) error {
 }
 
 func validateIOConfig(cfg *IOConfig) error {
-	if cfg.ConcurrentWalksLimit < 1 || cfg.OpenFilesLimit < 1 || cfg.OpenLargeFilesLimit < 1 || cfg.BufferSize < 1 {
+	if cfg.OpenFilesLimit < 1 || cfg.OpenLargeFilesLimit < 1 || cfg.BufferSize < 1 {
 		return fmt.Errorf("%w: zero limit", ErrInvalidGRPCConfig)
 	}
 	if cfg.SmallFileSizeThreshold < 0 || cfg.LargeFileSizeThreshold < 0 || cfg.CompressionSizeThreshold < 0 {

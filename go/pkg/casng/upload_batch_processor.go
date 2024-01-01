@@ -106,6 +106,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 				infof(ctx, 4, "pipe.done", "deferred", deferred)
 				done = true
 				if deferred == 0 {
+					infof(ctx, 4, "bundle.done", "count", len(bundle))
 					dispatch()
 					return
 				}
@@ -115,6 +116,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 				deferred--
 				infof(ctx, 4, "pipe.dec", "deferred", deferred)
 				if done && deferred == 0 {
+					infof(ctx, 4, "bundle.done", "count", len(bundle))
 					dispatch()
 					return
 				}
@@ -134,7 +136,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 			if ok {
 				item.copies++
 				bundle[req.Digest] = item
-				infof(ctx, 4, "unified", "digest", req.Digest, "bundle", item.copies+1)
+				infof(ctx, 4, "req.unified", "digest", req.Digest, "bundle", item.copies+1)
 				continue
 			}
 
@@ -145,7 +147,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 			if ok {
 				// Already claimed.
 				if _, ok := cached.(bool); ok {
-					infof(ctx, 4, "cached", "digest", req.Digest)
+					infof(ctx, 4, "req.cached", "digest", req.Digest)
 					out <- UploadResponse{
 						Digest: req.Digest,
 						Stats: Stats{
@@ -156,7 +158,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 					}
 					continue
 				}
-				infof(ctx, 4, "deferred.cache", "digest", req.Digest)
+				infof(ctx, 4, "req.deferred", "digest", req.Digest)
 				cachedWg, ok := cached.(*sync.WaitGroup)
 				if !ok {
 					log.Errorf("unexpected item type in batchCache: %T", cached)
@@ -175,7 +177,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 
 			// It's possible for files to be considered medium and large, but still fit into a batch request.
 			if len(req.Bytes) == 0 {
-				infof(ctx, 4, "load", "digest", req.Digest)
+				infof(ctx, 4, "req.load", "digest", req.Digest)
 				bytes, err := u.loadRequestBytes(ctx, req)
 				if err != nil {
 					out <- UploadResponse{

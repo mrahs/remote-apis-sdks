@@ -31,7 +31,7 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 	bundle := make(queryBundle, u.queryRPCCfg.ItemsLimit)
 	bundleCtx := ctx // context with unified metadata.
 
-	handle := func() {
+	dispatch := func() {
 		if len(bundle) == 0 {
 			return
 		}
@@ -69,7 +69,8 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 		select {
 		case req, ok := <-in:
 			if !ok {
-				handle()
+				infof(ctx, 4, "bundle.done", "count", len(bundle))
+				dispatch()
 				return
 			}
 			startTime := time.Now()
@@ -89,13 +90,13 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 			// Check length threshold.
 			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
 				infof(ctx, 4, "bundle.full", "count", len(bundle))
-				handle()
+				dispatch()
 			}
 			durationf(ctx, startTime, "bundle.append", "digest", req.Digest, "count", len(bundle))
 		case <-bundleTicker.C:
 			startTime := time.Now()
 			l := len(bundle)
-			handle()
+			dispatch()
 			durationf(ctx, startTime, "bundle.timeout", "count", l)
 		}
 	}

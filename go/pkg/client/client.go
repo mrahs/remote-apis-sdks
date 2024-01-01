@@ -820,9 +820,8 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 			RetryPredicate:       client.Retrier.ShouldRetry,
 		}
 		ioCfg := casng.IOConfig{
-			ConcurrentWalksLimit:     10 * int(client.casConcurrency),
-			OpenFilesLimit:           casng.DefaultOpenFilesLimit,
-			OpenLargeFilesLimit:      casng.DefaultOpenLargeFilesLimit,
+			OpenFilesLimit:           200, // casng.DefaultOpenFilesLimit,
+			OpenLargeFilesLimit:      10, // casng.DefaultOpenLargeFilesLimit,
 			SmallFileSizeThreshold:   casng.DefaultSmallFileSizeThreshold,
 			LargeFileSizeThreshold:   casng.DefaultLargeFileSizeThreshold,
 			CompressionSizeThreshold: int64(client.CompressedBytestreamThreshold),
