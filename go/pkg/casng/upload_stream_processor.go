@@ -30,8 +30,8 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 	defer u.streamWorkerWg.Done()
 
 	ctx = ctxWithValues(ctx, ctxKeyModule, "stream_processor")
-	infof(ctx, 4, "start")
-	defer infof(ctx, 4, "stop")
+	debugf(ctx, "start")
+	defer debugf(ctx, "stop")
 
 	// Ensure all in-flight responses are sent before returning.
 	callWg := sync.WaitGroup{}
@@ -43,8 +43,8 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 	u.workerWg.Add(1)
 	go func() {
 		defer u.workerWg.Done()
-		infof(ctx, 4, "sender.start")
-		defer infof(ctx, 4, "sender.stop")
+		debugf(ctx, "sender.start")
+		defer debugf(ctx, "sender.stop")
 
 		for req := range in {
 			pipe <- req
@@ -86,7 +86,7 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 			}
 
 			shouldReleaseIOTokens := req.reader != nil
-			infof(ctx, 4, "req", "digest", req.Digest, "large", shouldReleaseIOTokens, "pending", pending)
+			debugf(ctx, "req", "digest", req.Digest, "large", shouldReleaseIOTokens, "pending", pending)
 
 			item, ok := bundle[req.Digest]
 			if ok {
@@ -97,7 +97,7 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 					u.ioThrottler.release(ctx)
 					u.ioLargeThrottler.release(ctx)
 				}
-				infof(ctx, 4, "unified", "digest", req.Digest, "count", item.copies+1)
+				debugf(ctx, "unified", "digest", req.Digest, "count", item.copies+1)
 				continue
 			}
 
@@ -141,7 +141,7 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 
 			var name string
 			if req.Digest.Size >= u.ioCfg.CompressionSizeThreshold {
-				infof(ctx, 4, "compressed", "digest", req.Digest)
+				debugf(ctx, "compressed", "digest", req.Digest)
 				name = MakeCompressedWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
 			} else {
 				name = MakeWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)

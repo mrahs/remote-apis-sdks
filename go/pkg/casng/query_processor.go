@@ -21,8 +21,8 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 	defer u.queryWorkerWg.Done()
 
 	ctx = ctxWithValues(ctx, ctxKeyModule, "query_processor")
-	infof(ctx, 4, "start")
-	defer infof(ctx, 4, "stop")
+	debugf(ctx, "start")
+	defer debugf(ctx, "stop")
 
 	// Ensure all in-flight responses are sent before returning.
 	callWg := sync.WaitGroup{}
@@ -39,7 +39,7 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 		// Block the processor if the concurrency limit is reached.
 		startTime := time.Now()
 		if !u.queryThrottler.acquire(ctx) {
-			infof(ctx, 4, "cancel")
+			debugf(ctx, "cancel")
 			startTime = time.Now()
 			// Ensure responses are dispatched before aborting.
 			for d, reqs := range bundle {
@@ -69,27 +69,29 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 		select {
 		case req, ok := <-in:
 			if !ok {
-				infof(ctx, 4, "bundle.done", "count", len(bundle))
+				debugf(ctx, "bundle.done", "count", len(bundle))
 				dispatch()
 				return
 			}
 			startTime := time.Now()
 
-			infof(ctx, 4, "req", "digest", req.Digest, "bundle_count", len(bundle))
+			debugf(ctx, "req", "digest", req.Digest, "bundle_count", len(bundle))
 
 			if _, ok := u.casPresenceCache.Load(req.Digest); ok {
-				infof(ctx, 4, "req.cached", "digest", req.Digest)
+				debugf(ctx, "req.cached", "digest", req.Digest)
 				out <- MissingBlobsResponse{Digest: req.Digest}
 				durationf(ctx, startTime, "query->out")
 				continue
 			}
 
 			bundle[req.Digest] = append(bundle[req.Digest], req)
-			bundleCtx, _ = contextmd.FromContexts(bundleCtx, ctx) // ignore non-essential error.
+			if verbose {
+				bundleCtx, _ = contextmd.FromContexts(bundleCtx, ctx) // ignore non-essential error.
+			}
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
-				infof(ctx, 4, "bundle.full", "count", len(bundle))
+				debugf(ctx, "bundle.full", "count", len(bundle))
 				dispatch()
 			}
 			durationf(ctx, startTime, "bundle.append", "digest", req.Digest, "count", len(bundle))

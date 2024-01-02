@@ -16,7 +16,7 @@ func (t *throttler) acquire(ctx context.Context) bool {
 	for {
 		select {
 		case t.ch <- struct{}{}:
-			infof(ctxWithLogDepthInc(ctx), 4, "throttler.acquire")
+			debugf(ctxWithLogDepthInc(ctx), "throttler.acquire")
 			return true
 		case <-ctx.Done():
 			return false
@@ -28,7 +28,7 @@ func (t *throttler) acquire(ctx context.Context) bool {
 func (t *throttler) release(ctx context.Context) {
 	select {
 	case <-t.ch:
-		infof(ctxWithLogDepthInc(ctx), 4, "throttler.release")
+		debugf(ctxWithLogDepthInc(ctx), "throttler.release")
 	default:
 		errorf(ctx, "throttler.release called before acquire")
 	}

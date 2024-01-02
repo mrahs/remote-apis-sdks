@@ -207,8 +207,8 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 		defer wg.Done()
 		defer func() { close(queryIn) }()
 
-		infof(ctx, 4, "pipe.digest_query.start")
-		defer infof(ctx, 4, "pipe.digest_query.stop")
+		debugf(ctx, "pipe.digest_query.start")
+		defer debugf(ctx, "pipe.digest_query.stop")
 
 		for dr := range digestOut {
 			if walkRes, ok := dr.(walkResult); ok {
@@ -220,7 +220,7 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 				errorf(ctx, fmt.Sprintf("unexpected message type from digester: %T", dr))
 				continue
 			}
-			infof(ctx, 4, "digest.out", "digest", req.Digest, "bytes", len(req.Bytes))
+			debugf(ctx, "digest.out", "digest", req.Digest, "bytes", len(req.Bytes))
 			if req.Digest.Hash == "" {
 				errorf(ctx, "ignoring a request without a digest")
 				continue
@@ -261,12 +261,12 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 			close(streamIn)
 		}()
 
-		infof(ctx, 4, "pipe.query_upload.start")
-		defer infof(ctx, 4, "pipe.query_upload.stop")
+		debugf(ctx, "pipe.query_upload.start")
+		defer debugf(ctx, "pipe.query_upload.stop")
 
 		for qr := range queryOut {
 			startTime := time.Now()
-			infof(ctx, 4, "query.out", "digest", qr.Digest, "missing", qr.Missing, "err", qr.Err)
+			debugf(ctx, "query.out", "digest", qr.Digest, "missing", qr.Missing, "err", qr.Err)
 
 			res := UploadResponse{Digest: qr.Digest, Err: qr.Err}
 

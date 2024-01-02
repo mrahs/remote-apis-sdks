@@ -12,9 +12,16 @@ import (
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 )
 
+// Much cheaper than log.V
+var verbose bool = bool(log.V(4))
+
 // Public stuff that can be used outside this file.
-func infof(ctx context.Context, level log.Level, msg string, kv ...any) {
-	if !log.VDepth(1, level) {
+func fmtKv(kv ...any) string {
+	return strings.Join(fmtMergeKv(make([]string, 0, len(kv)/2), kv...), ", ")
+}
+
+func debugf(ctx context.Context, msg string, kv ...any) {
+	if !verbose {
 		return
 	}
 	depth := depthFromCtx(ctx)
@@ -31,7 +38,7 @@ func errorf(ctx context.Context, msg string, kv ...any) {
 }
 
 func durationf(ctx context.Context, startTime time.Time, op string, kv ...any) {
-	if !log.VDepth(1, 3) {
+	if !verbose {
 		return
 	}
 	endTime := time.Now()
@@ -41,7 +48,7 @@ func durationf(ctx context.Context, startTime time.Time, op string, kv ...any) {
 }
 
 func ctxWithValues(ctx context.Context, kv ...any) context.Context {
-	if !log.VDepth(1, 4) {
+	if !verbose {
 		return ctx
 	}
 	m := metaFromCtx(ctx)
@@ -57,7 +64,7 @@ func ctxWithValues(ctx context.Context, kv ...any) context.Context {
 }
 
 func ctxWithRqID(ctx context.Context, kv ...any) context.Context {
-	if !log.VDepth(1, 4) {
+	if !verbose {
 		return ctx
 	}
 	if id := valFromCtx(ctx, CtxKeyRqID); id == nil {
@@ -67,7 +74,7 @@ func ctxWithRqID(ctx context.Context, kv ...any) context.Context {
 }
 
 func ctxWithLogDepthInc(ctx context.Context) context.Context {
-	if !log.VDepth(1, 4) {
+	if !verbose {
 		return ctx
 	}
 	d := depthFromCtx(ctx)
@@ -141,35 +148,9 @@ func depthFromCtx(ctx context.Context) int {
 }
 
 func fmtCtx(ctx context.Context, kv ...any) string {
-	s := make([]string, 0, 6+len(kv)/2)
+	s := fmtMergeKv(make([]string, 0, 6+len(kv)/2), kv...)
 
-	var k any
-	var p string
-	for i := 0; i < len(kv); i++ {
-		if i%2 == 0 {
-			k = kv[i]
-			continue
-		}
-
-		v := kv[i]
-		if d, ok := v.(*repb.Digest); ok {
-			s = append(s, fmt.Sprintf("%s=%s/%d", k, d.GetHash(), d.GetSizeBytes()))
-			continue
-		}
-
-		if k == "path" {
-			if str, ok := v.(fmt.Stringer); ok {
-				p = str.String()
-			}
-		} else if k == "real_path" {
-			if str, ok := v.(fmt.Stringer); ok && str.String() == p {
-				continue
-			}
-		}
-		s = append(s, fmt.Sprintf("%s=%v", k, v))
-	}
-
-	if !log.VDepth(1, 4) {
+	if !verbose {
 		return strings.Join(s, ", ")
 	}
 
@@ -204,4 +185,33 @@ func fmtCtx(ctx context.Context, kv ...any) string {
 	}
 
 	return strings.Join(s, ", ")
+}
+
+func fmtMergeKv(out []string, kv ...any) []string {
+	var k any
+	var p string
+	for i := 0; i < len(kv); i++ {
+		if i%2 == 0 {
+			k = kv[i]
+			continue
+		}
+
+		v := kv[i]
+		if d, ok := v.(*repb.Digest); ok {
+			out = append(out, fmt.Sprintf("%s=%s/%d", k, d.GetHash(), d.GetSizeBytes()))
+			continue
+		}
+
+		if k == "path" {
+			if str, ok := v.(fmt.Stringer); ok {
+				p = str.String()
+			}
+		} else if k == "real_path" {
+			if str, ok := v.(fmt.Stringer); ok && str.String() == p {
+				continue
+			}
+		}
+		out = append(out, fmt.Sprintf("%s=%v", k, v))
+	}
+	return out
 }

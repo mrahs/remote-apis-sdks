@@ -821,7 +821,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 		}
 		ioCfg := casng.IOConfig{
 			OpenFilesLimit:           200, // casng.DefaultOpenFilesLimit,
-			OpenLargeFilesLimit:      10, // casng.DefaultOpenLargeFilesLimit,
+			OpenLargeFilesLimit:      10,  // casng.DefaultOpenLargeFilesLimit,
 			SmallFileSizeThreshold:   casng.DefaultSmallFileSizeThreshold,
 			LargeFileSizeThreshold:   casng.DefaultLargeFileSizeThreshold,
 			CompressionSizeThreshold: int64(client.CompressedBytestreamThreshold),

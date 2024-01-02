@@ -384,33 +384,33 @@ func (u *uploader) close(ctx context.Context) {
 
 	// 1st, batching API senders should stop producing requests.
 	// These senders are terminated by the user.
-	infof(ctx, 1, "waiting for request workers")
+	debugf(ctx, "waiting for request workers")
 	u.requestWorkerWg.Wait()
 
 	// 2nd, streaming API upload senders should stop producing queries and requests.
 	// These senders are terminated by the user.
-	infof(ctx, 1, "waiting for digest workers")
+	debugf(ctx, "waiting for digest workers")
 	u.digestWorkerWg.Wait()
 
 	// 3rd, streaming API query senders should stop producing queries.
 	// This propagates from the uploader's pipe, hence, the uploader must stop first.
-	infof(ctx, 1, "waiting for query workers")
+	debugf(ctx, "waiting for query workers")
 	u.queryWorkerWg.Wait()
 
-	infof(ctx, 1, "waiting for upload workers")
+	debugf(ctx, "waiting for upload workers")
 	u.uploadWorkerWg.Wait()
 
-	infof(ctx, 1, "waiting for batch workers")
+	debugf(ctx, "waiting for batch workers")
 	u.batchWorkerWg.Wait()
-	infof(ctx, 1, "waiting for stream workers")
+	debugf(ctx, "waiting for stream workers")
 	u.streamWorkerWg.Wait()
 
 	// 7th, workers should have terminated by now.
-	infof(ctx, 1, "waiting for workers")
+	debugf(ctx, "waiting for workers")
 	u.workerWg.Wait()
 
 	close(u.logBeatDoneCh)
-	infof(ctx, 1, "done")
+	debugf(ctx, "done")
 }
 
 // Done returns a channel that is closed when the the uploader is done.
@@ -419,18 +419,13 @@ func (u *uploader) Done() chan struct{} {
 }
 
 func (u *uploader) logBeat(ctx context.Context) {
-	var interval time.Duration
+	interval := time.Minute
 	if log.V(3) {
 		interval = time.Second
 	} else if log.V(2) {
 		interval = 30 * time.Second
-	} else if log.V(1) {
-		interval = time.Minute
-	} else {
-		return
 	}
 
-	infof(ctx, 1, "beat.start", "interval", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	i := 0
@@ -442,14 +437,14 @@ func (u *uploader) logBeat(ctx context.Context) {
 		}
 
 		i++
-		infof(ctx, 0, "beat",
+		log.Infof("beat; %s", fmtKv(
 			"#", i,
 			"open_files", u.ioThrottler.len(),
 			"large_open_files", u.ioLargeThrottler.len(),
 			"querying", u.queryThrottler.len(),
 			"batching", u.uploadThrottler.len(),
 			"streaming", u.streamThrottle.len(),
-		)
+		))
 	}
 }
 
