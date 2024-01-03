@@ -30,7 +30,7 @@ func (t *throttler) release(ctx context.Context) {
 	case <-t.ch:
 		debugf(ctxWithLogDepthInc(ctx), "throttler.release")
 	default:
-		errorf(ctx, "throttler.release called before acquire")
+		errorf(ctx, "no token to release")
 	}
 }
 

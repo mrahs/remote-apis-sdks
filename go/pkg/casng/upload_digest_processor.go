@@ -28,7 +28,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
@@ -60,9 +59,8 @@ func (u *uploader) digestProcessor(ctx context.Context, in <-chan UploadRequest,
 	u.digestWorkerWg.Add(1)
 	defer u.digestWorkerWg.Done()
 
-	ctx = ctxWithValues(ctx, ctxKeyModule, "digest_processor")
-	debugf(ctx, "start")
-	defer debugf(ctx, "stop")
+	ctx = traceStart(ctx, "digest_processor")
+	defer traceEnd(ctx)
 
 	// The digester receives requests from a stream pipe, and sends digested blobs to the dispatcher.
 	//
@@ -76,6 +74,7 @@ func (u *uploader) digestProcessor(ctx context.Context, in <-chan UploadRequest,
 	// defer func() { walkerWg.Wait() }()
 
 	for req := range in {
+		ctx = traceStart(ctx, "req", "path", req.Path, "fid", req.Exclude)
 		// If it's a bytes request, do not traverse the path.
 		if req.Bytes != nil {
 			if req.Digest.Hash == "" {
@@ -96,30 +95,24 @@ func (u *uploader) digestProcessor(ctx context.Context, in <-chan UploadRequest,
 				// This node cannot be added to the u.dirChildren cache because the cache is owned by the walker callback.
 				// Parent nodes may have already been generated and cached in u.nodeCache; updating the u.dirChildren cache will not regenerate them.
 			}
-			debugf(ctx, "req.bytes", "bytes", len(req.Bytes), "path", req.Path, "fid", req.Exclude)
+			traceTag(ctx, "type", "bytes", "size", len(req.Bytes))
 		}
 
 		if req.Digest.Hash != "" {
-			debugf(ctx, "req.digested", "path", req.Path, "fid", req.Exclude)
-			startTime := time.Now()
 			out <- req
-			durationf(ctx, startTime, "digester->out")
+			ctx = traceEnd(ctx, "dst", "out", "reason", "digested", "digest", req.Digest)
 			continue
 		}
 
-		debugf(ctx, "req.path", "path", req.Path, "fid", req.Exclude, "slo", req.SymlinkOptions)
-		// walkerWg.Add(1)
-		// go func(req UploadRequest) {
-		// defer walkerWg.Done()
 		u.walkDigest(ctx, req, out)
-		// }(req)
+		ctx = traceEnd(ctx)
 	}
 }
 
 // digest initiates a file system walk to digest files and dispatch them for uploading.
 func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<- any) {
-	// ctx = ctxWithValues(ctx, ctxKeyWalkID, uuid.New())
-	defer durationf(ctx, time.Now(), "walk", "path", req.Path)
+	ctx = traceStart(ctx, "walk")
+	defer traceEnd(ctx)
 
 	stats := Stats{}
 	var err error
@@ -163,10 +156,9 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 					debugf(ctx, "visit.defer", "path", path, "real_path", realPath)
 					return walker.Defer, true
 				}
-				debugf(ctx, "visit.wait", "path", path, "real_path", realPath)
-				startTime := time.Now()
+				ctx = traceStart(ctx, "visit.wait", "path", path, "real_path", realPath)
 				wg.Wait()
-				durationf(ctx, startTime, "visit.wait", "path", req.Path, "real_path", realPath)
+				ctx = traceEnd(ctx)
 				delete(deferredWg, key)
 				return walker.Defer, true
 			}
@@ -177,12 +169,12 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 			// Forward it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
 			switch node := node.(type) {
 			case *repb.FileNode:
-				startTime := time.Now()
+				ctx = traceStart(ctx, "walk->out","path", req.Path, "real_path", realPath)
 				out <- UploadRequest{
 					Path:   realPath,
 					Digest: digest.NewFromProtoUnvalidated(node.Digest),
 				}
-				durationf(ctx, startTime, "walk->out", "path", req.Path, "real_path", realPath)
+				ctx = traceEnd(ctx)
 			case *repb.DirectoryNode:
 				// The blob of the directory node is the bytes of a repb.Directory message.
 				// Generate and forward it. If it was uploaded before, it'll be reported as a cache hit.
@@ -192,12 +184,12 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 					err = errors.Join(errDigest, err)
 					return walker.SkipPath, false
 				}
-				startTime := time.Now()
+				ctx = traceStart(ctx, "walk->out", "path", req.Path, "real_path", realPath)
 				out <- UploadRequest{
 					Bytes:  b,
 					Digest: digest.NewFromProtoUnvalidated(node.Digest),
 				}
-				durationf(ctx, startTime, "walk->out", "path", req.Path, "real_path", realPath)
+				ctx = traceEnd(ctx)
 			case *repb.SymlinkNode:
 				// It was already appended as a child to its parent. Nothing to forward.
 			default:
@@ -248,14 +240,14 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 				}
 				debugf(ctx, "visit.post.dir", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
 				u.dirChildren.append(parentKey, node)
-				startTime := time.Now()
+				ctx = traceStart(ctx, "walk->out", "path", req.Path, "real_path", realPath)
 				out <- UploadRequest{
 					Path:   path,
 					Bytes:  b,
 					Digest: digest.NewFromProtoUnvalidated(node.Digest),
 				}
 				u.nodeCache.Store(key, node)
-				durationf(ctx, startTime, "walk->out", "path", req.Path, "real_path", realPath)
+				ctx = traceEnd(ctx)
 				return true
 
 			case info.Mode().IsRegular():
@@ -274,14 +266,14 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 					debugf(ctx, "visit.post.file.cached", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
 					return true
 				}
-				startTime := time.Now()
+				ctx = traceStart(ctx, "walk->out", "path", req.Path, "real_path", realPath)
 				out <- UploadRequest{
 					Path:   path,
 					Bytes:  blb.b,
 					reader: blb.r,
 					Digest: digest.NewFromProtoUnvalidated(node.Digest),
 				}
-				durationf(ctx, startTime, "walk->out", "path", req.Path, "real_path", realPath)
+				ctx = traceEnd(ctx)
 				return true
 
 			default:
@@ -349,7 +341,8 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 // Note that the target includes hierarchy information, without specific names.
 // Another example: if the root is /a, the symilnk is b/c and the target is foo, the name will be c, and the target will be foo.
 func digestSymlink(ctx context.Context, root impath.Absolute, path impath.Absolute, slo slo.Options) (*repb.SymlinkNode, walker.SymlinkAction, error) {
-	defer durationf(ctx, time.Now(), "digest.symlink")
+	ctx = traceStart(ctx, "digest_link")
+	defer traceEnd(ctx)
 
 	if slo.Skip() {
 		return nil, walker.SkipSymlink, nil
@@ -414,7 +407,8 @@ func digestSymlink(ctx context.Context, root impath.Absolute, path impath.Absolu
 // No syscalls are made in this method.
 // Only the base of path is used. No ancenstory information is included in the returned node.
 func digestDirectory(ctx context.Context, path impath.Absolute, children []proto.Message) (*repb.DirectoryNode, []byte, error) {
-	defer durationf(ctx, time.Now(), "digest.dir")
+	ctx = traceStart(ctx, "digest_dir")
+	defer traceEnd(ctx)
 
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
@@ -457,7 +451,8 @@ func digestDirectory(ctx context.Context, path impath.Absolute, children []proto
 //
 // If the returned err is not nil, both tokens are released before returning.
 func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo) (node *repb.FileNode, blb *blob, err error) {
-	defer durationf(ctx, time.Now(), "digest.file")
+	ctx = traceStart(ctx, "digest_file")
+	defer traceEnd(ctx)
 
 	// Always return a clone to ensure the cached version remains owned by the cache.
 	defer func() {
@@ -528,11 +523,12 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 	// This avoids consuming too many tokens from ioThrottler only to get blocked waiting for ioLargeThrottler which would starve non-large files.
 	// This assumes ioThrottler has more tokens than ioLargeThrottler.
 	if info.Size() > u.ioCfg.LargeFileSizeThreshold {
-		startTime := time.Now()
+		ctx = traceStart(ctx, "sem.io.large")
 		if !u.ioLargeThrottler.acquire(ctx) {
+			ctx = traceEnd(ctx, "err", ctx.Err())
 			return nil, nil, ctx.Err()
 		}
-		durationf(ctx, startTime, "sem.io.large")
+		ctx = traceEnd(ctx)
 		defer func() {
 			// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 			if blb == nil || blb.r == nil {
@@ -541,11 +537,12 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 		}()
 	}
 
-	startTime := time.Now()
+	ctx = traceStart(ctx, "sem.io")
 	if !u.ioThrottler.acquire(ctx) {
+		ctx = traceEnd(ctx, "err", ctx.Err())
 		return nil, nil, ctx.Err()
 	}
-	durationf(ctx, startTime, "sem.io")
+	ctx = traceEnd(ctx, "err", ctx.Err())
 	defer func() {
 		// Only release if the file was closed. Otherwise, the caller assumes ownership of the token.
 		if blb == nil || blb.r == nil {

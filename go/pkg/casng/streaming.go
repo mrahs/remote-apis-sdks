@@ -43,7 +43,6 @@ import (
 	"io"
 	"io/fs"
 	"sync"
-	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/io/impath"
@@ -134,7 +133,9 @@ type MissingBlobsResponse struct {
 // This method must not be called after cancelling the uploader's context.
 // Cancelling ctx does not cancel this call. in must be closed to terminate this call.
 func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
-	ctx = ctxWithRqID(ctx)
+	ctx = traceStart(ctxWithRqID(ctx), "missing_blobs")
+	defer traceEnd(ctx)
+
 	pipeCh := make(chan UploadRequest)
 	out := make(chan MissingBlobsResponse)
 
@@ -142,6 +143,9 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 	go func() {
 		defer u.requestWorkerWg.Done()
 		defer close(pipeCh)
+
+		debugf(ctx, "sender.start")
+		defer debugf(ctx, "sender.stop")
 
 		for d := range in {
 			pipeCh <- UploadRequest{Digest: d}
@@ -176,7 +180,9 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 // This method must not be called after cancelling the uploader's context.
 // Response may contain only stats and error.
 func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
-	ctx = ctxWithRqID(ctx)
+	ctx = traceStart(ctxWithRqID(ctx), "upload")
+	defer traceEnd(ctx)
+
 	out := make(chan UploadResponse)
 
 	u.requestWorkerWg.Add(1)
@@ -189,6 +195,9 @@ func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest)
 }
 
 func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest, out chan<- UploadResponse) {
+	ctx = traceStart(ctx, "upload_processor")
+	defer traceEnd(ctx)
+
 	wg := sync.WaitGroup{}
 
 	digestOut := make(chan any)
@@ -211,23 +220,26 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 		defer debugf(ctx, "pipe.digest_query.stop")
 
 		for dr := range digestOut {
+			ctx = traceStart(ctx, "digest.out")
 			if walkRes, ok := dr.(walkResult); ok {
 				out <- UploadResponse{Stats: walkRes.stats, Err: walkRes.err}
+				ctx = traceEnd(ctx, "type", "walk_result")
 				continue
 			}
 			req, ok := dr.(UploadRequest)
 			if !ok {
 				errorf(ctx, fmt.Sprintf("unexpected message type from digester: %T", dr))
+				traceEnd(ctx, "err", "unexpected message type")
 				continue
 			}
-			debugf(ctx, "digest.out", "digest", req.Digest, "bytes", len(req.Bytes))
+			traceTag(ctx, "type", "upload_request", "digest", req.Digest, "byte", len(req.Bytes))
 			if req.Digest.Hash == "" {
 				errorf(ctx, "ignoring a request without a digest")
+				traceEnd(ctx, "err", "upload request without digest")
 				continue
 			}
-			startTime := time.Now()
 			queryIn <- req
-			durationf(ctx, startTime, "digest.out->query")
+			ctx = traceEnd(ctx)
 		}
 	}()
 
@@ -265,8 +277,7 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 		defer debugf(ctx, "pipe.query_upload.stop")
 
 		for qr := range queryOut {
-			startTime := time.Now()
-			debugf(ctx, "query.out", "digest", qr.Digest, "missing", qr.Missing, "err", qr.Err)
+			ctx = traceStart(ctx, "query_out", "digest", qr.Digest, "missing", qr.Missing, "err", qr.Err)
 
 			res := UploadResponse{Digest: qr.Digest, Err: qr.Err}
 
@@ -286,17 +297,17 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 				}
 
 				out <- res
-				durationf(ctx, startTime, "query.out->out")
+				ctx = traceEnd(ctx, "dst", "out")
 				continue
 			}
 
 			if qr.Digest.Size <= u.uploadBatchRequestItemBytesLimit {
 				batchIn <- qr.req
-				durationf(ctx, startTime, "query.out->batcher")
+				ctx = traceEnd(ctx, "dst", "batcher")
 				continue
 			}
 			streamIn <- qr.req
-			durationf(ctx, startTime, "query.out->streamer")
+			ctx = traceEnd(ctx, "dst", "streamer")
 		}
 	}()
 

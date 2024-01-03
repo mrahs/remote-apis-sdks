@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
@@ -29,9 +28,8 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 	u.streamWorkerWg.Add(1)
 	defer u.streamWorkerWg.Done()
 
-	ctx = ctxWithValues(ctx, ctxKeyModule, "stream_processor")
-	debugf(ctx, "start")
-	defer debugf(ctx, "stop")
+	ctx = traceStart(ctx, "stream_processor")
+	defer traceEnd(ctx)
 
 	// Ensure all in-flight responses are sent before returning.
 	callWg := sync.WaitGroup{}
@@ -43,8 +41,6 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 	u.workerWg.Add(1)
 	go func() {
 		defer u.workerWg.Done()
-		debugf(ctx, "sender.start")
-		defer debugf(ctx, "sender.stop")
 
 		for req := range in {
 			pipe <- req
@@ -84,9 +80,8 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 				errorf(ctx, fmt.Sprintf("unexpected message type: %T", r))
 				continue
 			}
-
+			ctx = traceStart(ctx, "bundle.append", "digest", req.Digest, "start_count", len(bundle))
 			shouldReleaseIOTokens := req.reader != nil
-			debugf(ctx, "req", "digest", req.Digest, "large", shouldReleaseIOTokens, "pending", pending)
 
 			item, ok := bundle[req.Digest]
 			if ok {
@@ -97,7 +92,7 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 					u.ioThrottler.release(ctx)
 					u.ioLargeThrottler.release(ctx)
 				}
-				debugf(ctx, "unified", "digest", req.Digest, "count", item.copies+1)
+				ctx = traceEnd(ctx, "dst", "unified", "copies", item.copies+1)
 				continue
 			}
 
@@ -117,12 +112,14 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 							CacheHitCount:      1,
 						},
 					}
+					ctx = traceEnd(ctx, "dst", "cached")
 					continue
 				}
 				// Defer
 				cachedWg, ok := cached.(*sync.WaitGroup)
 				if !ok {
 					log.Errorf("unexpected item type in streamCache: %T", cached)
+					ctx = traceEnd(ctx, "err", "unexpected message type")
 					continue
 				}
 				deferred++
@@ -133,6 +130,7 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 					pipe <- req
 					pipe <- -1
 				}()
+				ctx = traceEnd(ctx, "dst", "deferred")
 				continue
 			}
 
@@ -148,7 +146,7 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 			}
 
 			// Block the streamer if the gRPC call is being throttled.
-			startTime := time.Now()
+			ctx = traceStart(ctx, "sem.stream")
 			if !u.streamThrottle.acquire(ctx) {
 				if shouldReleaseIOTokens {
 					u.ioThrottler.release(ctx)
@@ -160,23 +158,24 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 					Stats:  Stats{BytesRequested: req.Digest.Size},
 					Err:    ctx.Err(),
 				}
+				ctx = traceEnd(ctx, "err", ctx.Err())
 				continue
 			}
-			durationf(ctx, startTime, "sem.stream")
+			ctx = traceEnd(ctx)
 
 			pending++
 			u.workerWg.Add(1)
 			go func(req UploadRequest) {
 				defer u.workerWg.Done()
 				s, err := u.callStream(ctx, name, req)
-				startTime := time.Now()
+				ctx = traceStart(ctx, "stream.grpc->stream.res")
 				// Release before sending on the channel to avoid blocking without actually using the gRPC resources.
 				u.streamThrottle.release(ctx)
 				streamResCh <- UploadResponse{Digest: req.Digest, Stats: s, Err: err}
-				durationf(ctx, startTime, "stream.grpc->stream.res", "digest", req.Digest)
+				ctx = traceEnd(ctx)
 			}(req)
 		case r := <-streamResCh:
-			startTime := time.Now()
+			ctx = traceStart(ctx, "stream.res->out")
 			out <- r
 			if r.Err == nil {
 				u.streamCache.Store(r.Digest, true)
@@ -197,7 +196,7 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 			}
 			delete(bundle, r.Digest)
 			pending--
-			durationf(ctx, startTime, "stream.res->out", "digest", r.Digest, "pending", pending)
+			ctx = traceEnd(ctx, "digest", r.Digest, "pending", pending)
 			if done && pending == 0 {
 				return
 			}
@@ -229,11 +228,12 @@ func (u *uploader) callStream(ctx context.Context, name string, req UploadReques
 
 	// Medium file.
 	default:
-		startTime := time.Now()
+		ctx = traceStart(ctx, "sem.io")
 		if !u.ioThrottler.acquire(ctx) {
+			ctx = traceEnd(ctx, "err", ctx.Err())
 			return Stats{BytesRequested: req.Digest.Size}, context.Canceled
 		}
-		durationf(ctx, startTime, "sem.io")
+		ctx = traceEnd(ctx)
 		defer u.ioThrottler.release(ctx)
 
 		f, errOpen := os.Open(req.Path.String())

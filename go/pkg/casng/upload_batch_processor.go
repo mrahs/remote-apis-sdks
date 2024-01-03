@@ -31,9 +31,8 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 	u.batchWorkerWg.Add(1)
 	defer u.batchWorkerWg.Done()
 
-	ctx = ctxWithValues(ctx, ctxKeyModule, "batch_processor")
-	debugf(ctx, "start")
-	defer debugf(ctx, "stop")
+	ctx = traceStart(ctx, "batch_processor")
+	defer traceEnd(ctx)
 
 	// Ensure all in-flight responses are sent before returning.
 	callWg := sync.WaitGroup{}
@@ -45,8 +44,6 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 	u.workerWg.Add(1)
 	go func() {
 		defer u.workerWg.Done()
-		debugf(ctx, "sender.start")
-		defer debugf(ctx, "sender.stop")
 
 		for req := range in {
 			pipe <- req
@@ -65,9 +62,10 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 			return
 		}
 		// Block the batcher if the concurrency limit is reached.
-		startTime := time.Now()
+		ctx = traceStart(ctx, "sem.upload")
 		if !u.uploadThrottler.acquire(ctx) {
-			startTime = time.Now()
+			ctx = traceEnd(ctx)
+			ctx = traceStart(ctx, "dispatch", "dst", "out", "err", ctx.Err())
 			// Ensure responses are dispatched before aborting.
 			for d := range bundle {
 				out <- UploadResponse{
@@ -76,10 +74,10 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 					Err:    context.Canceled,
 				}
 			}
-			durationf(ctx, startTime, "batch->out")
+			ctx = traceEnd(ctx)
 			return
 		}
-		durationf(ctx, startTime, "sem.upload")
+		ctx = traceEnd(ctx)
 
 		callWg.Add(1)
 		go func(ctx context.Context, b uploadBundle) {
@@ -103,7 +101,6 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 			var req UploadRequest
 			switch r := pipedVal.(type) {
 			case bool:
-				debugf(ctx, "pipe.done", "deferred", deferred)
 				done = true
 				if deferred == 0 {
 					debugf(ctx, "bundle.done", "count", len(bundle))
@@ -114,7 +111,6 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 			case int:
 				// A deferred request was sent back.
 				deferred--
-				debugf(ctx, "pipe.dec", "deferred", deferred)
 				if done && deferred == 0 {
 					debugf(ctx, "bundle.done", "count", len(bundle))
 					dispatch()
@@ -123,20 +119,18 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 				continue
 			case UploadRequest:
 				req = r
-				debugf(ctx, "req", "digest", req.Digest)
 			default:
 				errorf(ctx, fmt.Sprintf("unexpected message type: %T", r))
 				continue
 			}
-
-			startTime := time.Now()
+			ctx = traceStart(ctx, "bundle.append", "digest", req.Digest, "start_count", len(bundle))
 
 			// Unify.
 			item, ok := bundle[req.Digest]
 			if ok {
 				item.copies++
 				bundle[req.Digest] = item
-				debugf(ctx, "req.unified", "digest", req.Digest, "bundle", item.copies+1)
+				ctx = traceEnd(ctx, "dst", "unified", "copies", item.copies+1)
 				continue
 			}
 
@@ -156,12 +150,13 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 							CacheHitCount:      1,
 						},
 					}
+					ctx = traceEnd(ctx, "dst", "cached")
 					continue
 				}
-				debugf(ctx, "req.deferred", "digest", req.Digest)
 				cachedWg, ok := cached.(*sync.WaitGroup)
 				if !ok {
 					log.Errorf("unexpected item type in batchCache: %T", cached)
+					ctx = traceEnd(ctx, "err", "unexpected message type")
 					continue
 				}
 				deferred++
@@ -172,12 +167,12 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 					pipe <- req
 					pipe <- -1
 				}()
+				ctx = traceEnd(ctx, "dst", "deferred")
 				continue
 			}
 
 			// It's possible for files to be considered medium and large, but still fit into a batch request.
 			if len(req.Bytes) == 0 {
-				debugf(ctx, "req.load", "digest", req.Digest)
 				bytes, err := u.loadRequestBytes(ctx, req)
 				if err != nil {
 					out <- UploadResponse{
@@ -185,6 +180,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 						Err:    err,
 					}
 					cachedWg.Done()
+					ctx = traceEnd(ctx, "dst", "out", "err", err)
 					continue
 				}
 				req.Bytes = bytes
@@ -210,12 +206,10 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 				debugf(ctx, "bundle.full", "count", len(bundle))
 				dispatch()
 			}
-			durationf(ctx, startTime, "bundle.append", "digest", req.Digest, "count", len(bundle))
+			ctx = traceEnd(ctx, "end_count", len(bundle))
 		case <-bundleTicker.C:
-			startTime := time.Now()
-			l := len(bundle)
+			debugf(ctx, "bundle.timeout", "count", len(bundle))
 			dispatch()
-			durationf(ctx, startTime, "bundle.timeout", "count", l)
 		}
 	}
 }
@@ -231,7 +225,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 	failed := make(map[digest.Digest]error)
 	digestRetryCount := make(map[digest.Digest]int64)
 
-	startTime := time.Now()
+	ctx = traceStart(ctx, "grpc")
 	err := retry.WithPolicy(ctx, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
 		// This call can have partial failures. Only retry retryable failed requests.
 		ctx, ctxCancel := context.WithTimeout(ctx, u.batchRPCCfg.Timeout)
@@ -262,11 +256,11 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 		}
 		return reqErr
 	})
-	durationf(ctx, startTime, "batch.grpc",
+	ctx = traceEnd(ctx,
 		"count", len(bundle), "uploaded", len(uploaded), "failed", len(failed),
 		"req_failed", len(bundle)-len(uploaded)-len(failed))
 
-	startTime = time.Now()
+	ctx = traceStart(ctx, "grpc->out")
 	// Report uploaded.
 	for _, d := range uploaded {
 		item := bundle[d]
@@ -328,12 +322,13 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 	}
 
 	if len(bundle) == 0 {
-		durationf(ctx, startTime, "batch.grpc->out")
+		ctx = traceEnd(ctx)
 		return
 	}
 
 	if err == nil {
 		err = serrorf(ctx, "server did not return a response for some requests", "count", len(bundle))
+		traceTag(ctx, "err", "incomplete response")
 	}
 	err = errors.Join(ErrGRPC, err)
 
@@ -358,18 +353,18 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 		u.batchCache.Delete(d)
 		item.wg.Done()
 	}
-	durationf(ctx, startTime, "batch.grpc->out")
+	traceEnd(ctx)
 }
 
 func (u *uploader) loadRequestBytes(ctx context.Context, req UploadRequest) (bytes []byte, err error) {
 	r := req.reader
 	if r == nil {
-		startTime := time.Now()
+		ctx = traceStart(ctx, "sem.io")
 		if !u.ioThrottler.acquire(ctx) {
 			return nil, ctx.Err()
 		}
 		defer u.ioThrottler.release(ctx)
-		durationf(ctx, startTime, "sem.io")
+		ctx = traceEnd(ctx)
 		f, err := os.Open(req.Path.String())
 		if err != nil {
 			return nil, errors.Join(ErrIO, err)

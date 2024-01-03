@@ -73,20 +73,8 @@ package casng
 //       this ensures the whole pipeline is drained properly.
 //
 // Logging:
-//  Level 1 is used for top-level functions, typically called once during the lifetime of the process or initiated by the user.
-//  Level 2 is used for internal functions that may be called per request.
-//  Level 3 is used for durations.
-//  Level 4 is used for internal functions that may be called multiple times per request.
-//  Level 5 is used for messages with large objects or messages that require extra compute.
-//
-// Log messages are formatted to be grep-friendly. You can do things like:
-//   grep info.log -e 'upload.digester'
-//   grep info.log -e 'tid=trace_id' | tr -s ' ' | sort -k2 | less
-//   grep info.log -e 'tag=route_id'
-//   grep info.log -e 'rid=request_id'
-//
-// To get a csv file of durations, enable verbosity level 3 and use the command:
-//  grep 'duration\..*;' | tr -s ' ' | sort -k2 | cut -d ' ' -f 5- | sed -e 's/; start=/,/' -e 's/, end=/,/' >/tmp/duration.csv
+//  Level 4 turns on verbose logging.
+//  Level 5 turns on merkle tree comparison with the client pkg.
 
 import (
 	"context"
@@ -226,9 +214,10 @@ type uploader struct {
 	batchWorkerWg   sync.WaitGroup
 	streamWorkerWg  sync.WaitGroup
 	workerWg        sync.WaitGroup
+	cleanupWg       sync.WaitGroup
 
-	logBeatDoneCh chan struct{}
-	done          bool
+	closeCh chan struct{}
+	done    bool
 }
 
 // Node looks up a node from the node cache which is populated during digestion.
@@ -308,6 +297,8 @@ func newUploader(
 		return nil, err
 	}
 
+	verbose = bool(log.V(4))
+
 	queryRequestBaseSize := proto.Size(&repb.FindMissingBlobsRequest{
 		InstanceName: instanceName,
 		BlobDigests:  []*repb.Digest{},
@@ -362,12 +353,24 @@ func newUploader(
 		uploadBatchRequestItemBaseSize:   uploadBatchRequestItemBaseSize,
 		uploadBatchRequestItemBytesLimit: uploadBatchRequestItemBytesLimit,
 
-		logBeatDoneCh: make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 	log.V(1).Infof("new; cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v", queryCfg, uploadCfg, streamCfg, ioCfg)
 
 	go u.close(ctx)
-	go u.logBeat(ctx)
+
+	u.cleanupWg.Add(1)
+	go func(){
+		u.logBeat()
+		u.cleanupWg.Done()
+	}()
+
+	u.cleanupWg.Add(1)
+	go func(){
+		runTraceCollector()
+		u.cleanupWg.Done()
+	}()
+
 	return u, nil
 }
 
@@ -380,7 +383,8 @@ func (u *uploader) close(ctx context.Context) {
 	// all producers are terminated before releasing resources.
 	u.done = true
 
-	defer durationf(ctx, time.Now(), "close")
+	ctx = traceStart(ctx, "close")
+	defer traceEnd(ctx)
 
 	// 1st, batching API senders should stop producing requests.
 	// These senders are terminated by the user.
@@ -409,16 +413,25 @@ func (u *uploader) close(ctx context.Context) {
 	debugf(ctx, "waiting for workers")
 	u.workerWg.Wait()
 
-	close(u.logBeatDoneCh)
+	debugf(ctx, "waiting for trace collectors")
+	traceWg.Wait()
+	traceWg.Add(1)
+	close(traceCh)
+	traceWg.Wait()
+
+	close(u.closeCh)
+	debugf(ctx, "waiting for cleanup")
+	u.cleanupWg.Wait()
+
 	debugf(ctx, "done")
 }
 
 // Done returns a channel that is closed when the the uploader is done.
 func (u *uploader) Done() chan struct{} {
-	return u.logBeatDoneCh
+	return u.closeCh
 }
 
-func (u *uploader) logBeat(ctx context.Context) {
+func (u *uploader) logBeat() {
 	interval := time.Minute
 	if log.V(3) {
 		interval = time.Second
@@ -431,7 +444,7 @@ func (u *uploader) logBeat(ctx context.Context) {
 	i := 0
 	for {
 		select {
-		case <-u.logBeatDoneCh:
+		case <-u.closeCh:
 			return
 		case <-ticker.C:
 		}
