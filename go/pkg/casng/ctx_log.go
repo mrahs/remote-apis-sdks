@@ -156,9 +156,9 @@ func traceEnd(ctx context.Context, kv ...any) context.Context {
 		return trace.parentCtx
 	}
 
-	// if trace.hasErr {
-	log.InfoDepth(1, fmtTrace(trace))
-	// }
+	if trace.hasErr {
+		log.InfoDepth(1, fmtTrace(trace))
+	}
 
 	go func() {
 		collectTrace(trace)
