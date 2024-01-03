@@ -216,8 +216,8 @@ type uploader struct {
 	workerWg        sync.WaitGroup
 	cleanupWg       sync.WaitGroup
 
-	closeCh chan struct{}
-	done    bool
+	logBeatCloseCh chan struct{}
+	closeCh        chan struct{}
 }
 
 // Node looks up a node from the node cache which is populated during digestion.
@@ -353,21 +353,22 @@ func newUploader(
 		uploadBatchRequestItemBaseSize:   uploadBatchRequestItemBaseSize,
 		uploadBatchRequestItemBytesLimit: uploadBatchRequestItemBytesLimit,
 
-		closeCh: make(chan struct{}),
+		logBeatCloseCh: make(chan struct{}),
+		closeCh:        make(chan struct{}),
 	}
 	log.V(1).Infof("new; cfg_query=%+v, cfg_batch=%+v, cfg_stream=%+v, cfg_io=%+v", queryCfg, uploadCfg, streamCfg, ioCfg)
 
 	go u.close(ctx)
 
 	u.cleanupWg.Add(1)
-	go func(){
+	go func() {
 		u.logBeat()
 		u.cleanupWg.Done()
 	}()
 
 	u.cleanupWg.Add(1)
-	go func(){
-		runTraceCollector()
+	go func() {
+		runMetricsCollector()
 		u.cleanupWg.Done()
 	}()
 
@@ -377,53 +378,38 @@ func newUploader(
 func (u *uploader) close(ctx context.Context) {
 	// The context must be cancelled first.
 	<-ctx.Done()
-	// It's possible for a client to make a call between receiving the context cancellation
-	// signal and storing the done boolean value. Races are also possible.
-	// However, this is not a problem because the termination sequence below ensures
-	// all producers are terminated before releasing resources.
-	u.done = true
 
-	ctx = traceStart(ctx, "close")
-	defer traceEnd(ctx)
-
-	// 1st, batching API senders should stop producing requests.
-	// These senders are terminated by the user.
-	debugf(ctx, "waiting for request workers")
+	log.Info("waiting for request workers")
 	u.requestWorkerWg.Wait()
 
-	// 2nd, streaming API upload senders should stop producing queries and requests.
-	// These senders are terminated by the user.
-	debugf(ctx, "waiting for digest workers")
+	log.Info("waiting for digest workers")
 	u.digestWorkerWg.Wait()
 
-	// 3rd, streaming API query senders should stop producing queries.
-	// This propagates from the uploader's pipe, hence, the uploader must stop first.
-	debugf(ctx, "waiting for query workers")
+	log.Info("waiting for query workers")
 	u.queryWorkerWg.Wait()
 
-	debugf(ctx, "waiting for upload workers")
+	log.Info("waiting for upload workers")
 	u.uploadWorkerWg.Wait()
 
-	debugf(ctx, "waiting for batch workers")
+	log.Info("waiting for batch workers")
 	u.batchWorkerWg.Wait()
-	debugf(ctx, "waiting for stream workers")
+
+	log.Info("waiting for stream workers")
 	u.streamWorkerWg.Wait()
 
-	// 7th, workers should have terminated by now.
-	debugf(ctx, "waiting for workers")
+	log.Info("waiting for other workers")
 	u.workerWg.Wait()
 
-	debugf(ctx, "waiting for trace collectors")
-	traceWg.Wait()
-	traceWg.Add(1)
-	close(traceCh)
+	log.Info("waiting for trace collectors")
 	traceWg.Wait()
 
-	close(u.closeCh)
-	debugf(ctx, "waiting for cleanup")
+	log.Info("waiting for cleanup")
+	close(metricsCh)
+	close(u.logBeatCloseCh)
 	u.cleanupWg.Wait()
 
-	debugf(ctx, "done")
+	log.Info("casng uploader done")
+	close(u.closeCh)
 }
 
 // Done returns a channel that is closed when the the uploader is done.
@@ -444,7 +430,7 @@ func (u *uploader) logBeat() {
 	i := 0
 	for {
 		select {
-		case <-u.closeCh:
+		case <-u.logBeatCloseCh:
 			return
 		case <-ticker.C:
 		}

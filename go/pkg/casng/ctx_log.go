@@ -40,15 +40,15 @@ func errorf(ctx context.Context, msg string, kv ...any) {
 	log.ErrorDepthf(depth+1, "%s; %s", msg, fmtCtx(ctx, kv...))
 }
 
-func durationf(ctx context.Context, startTime time.Time, op string, kv ...any) {
-	if !verbose {
-		return
-	}
-	endTime := time.Now()
-	depth := depthFromCtx(ctx)
-	log.InfoDepthf(depth+1, "duration.%s; start=%d, end=%d, d=%s, %s",
-		op, startTime.UnixNano(), endTime.UnixNano(), endTime.Sub(startTime), fmtCtx(ctx, kv...))
-}
+// func durationf(ctx context.Context, startTime time.Time, op string, kv ...any) {
+// 	if !verbose {
+// 		return
+// 	}
+// 	endTime := time.Now()
+// 	depth := depthFromCtx(ctx)
+// 	log.InfoDepthf(depth+1, "duration.%s; start=%d, end=%d, d=%s, %s",
+// 		op, startTime.UnixNano(), endTime.UnixNano(), endTime.Sub(startTime), fmtCtx(ctx, kv...))
+// }
 
 func ctxWithValues(ctx context.Context, kv ...any) context.Context {
 	if !verbose {
@@ -89,14 +89,24 @@ func traceStart(ctx context.Context, module string, kv ...any) context.Context {
 	if !verbose {
 		return ctx
 	}
-	return context.WithValue(ctx, ctxKeyTrace, &ctxTrace{
+	traceWg.Add(1)
+	trace := &ctxTrace{
 		parentCtx: ctx,
 		region:    module,
-		kv:        kvMergeMap(make(map[any]any, len(kv)/2), kv...),
+		labels:    kvMergeMap(make(map[any]any, len(kv)/2), kv...),
 		start:     time.Now(),
-	})
+	}
+	if parentTrace := traceFromCtx(ctx); parentTrace != nil {
+		trace.id = parentTrace.id
+	}
+	if trace.id == "" {
+		trace.id = uuid.New()
+	}
+	trace.metrics = mergeMetricsFromKv(trace.metrics, kv...)
+	return context.WithValue(ctx, ctxKeyTrace, trace)
 }
 
+// also add numeric labels to metrics.
 func traceTag(ctx context.Context, kv ...any) {
 	if !verbose {
 		return
@@ -106,20 +116,35 @@ func traceTag(ctx context.Context, kv ...any) {
 		log.InfoDepth(1, "no trace to tag")
 		return
 	}
-	trace.kv = kvMergeMap(trace.kv, kv...)
+	trace.labels = kvMergeMap(trace.labels, kv...)
+	trace.metrics = mergeMetricsFromKv(trace.metrics, kv...)
+}
+
+func traceMetric(ctx context.Context, kv ...any) {
+	if !verbose {
+		return
+	}
+	trace := traceFromCtx(ctx)
+	if trace == nil {
+		log.InfoDepth(1, "no trace to add metrics to")
+		return
+	}
+	trace.metrics = mergeMetricsFromKv(trace.metrics, kv...)
 }
 
 func traceEnd(ctx context.Context, kv ...any) context.Context {
 	if !verbose {
 		return ctx
 	}
+
 	trace := traceFromCtx(ctx)
 	if trace == nil {
 		log.InfoDepth(1, "no trace to end")
+		traceWg.Done()
 		return ctx
 	}
-	trace.kv = kvMergeMap(trace.kv, kv...)
-	if err, ok := trace.kv["err"]; ok && err != nil {
+	trace.labels = kvMergeMap(trace.labels, kv...)
+	if err, ok := trace.labels["err"]; ok && err != nil {
 		trace.hasErr = true
 	}
 	trace.end = time.Now()
@@ -127,16 +152,14 @@ func traceEnd(ctx context.Context, kv ...any) context.Context {
 	if parentTrace != nil {
 		parentTrace.children = append(parentTrace.children, trace)
 		parentTrace.hasErr = trace.hasErr
+		traceWg.Done()
 		return trace.parentCtx
 	}
 
-	if trace.hasErr {
-		log.InfoDepth(1, fmtTrace(trace))
-	}
-	if traceCh == nil {
-		return trace.parentCtx
-	}
-	traceWg.Add(1)
+	// if trace.hasErr {
+	log.InfoDepth(1, fmtTrace(trace))
+	// }
+
 	go func() {
 		collectTrace(trace)
 		traceWg.Done()
@@ -186,18 +209,67 @@ type ctxMeta map[any]any
 
 type ctxTrace struct {
 	parentCtx context.Context
-	children  []*ctxTrace
+	id        string
 	region    string
-	kv        map[any]any
 	start     time.Time
 	end       time.Time
 	hasErr    bool
+	labels    map[any]any
+	metrics   map[string]metricGauge
+	children  []*ctxTrace
+}
+
+type metricGauge struct {
+	name  string
+	count int64
+	max   int64
+	sum   int64
+}
+
+type metricDuration struct {
+	name     string
+	duration time.Duration
 }
 
 var (
-	traceCh chan *ctxTrace
-	traceWg sync.WaitGroup
+	metricsCh = make(chan any)
+	traceWg   sync.WaitGroup
 )
+
+func mergeMetricsFromKv(metrics map[string]metricGauge, kv ...any) map[string]metricGauge {
+	if len(kv) == 0 {
+		return metrics
+	}
+	if metrics == nil {
+		metrics = make(map[string]metricGauge)
+	}
+	var k any
+	for i := 0; i < len(kv); i++ {
+		if i%2 == 0 {
+			k = kv[i]
+			continue
+		}
+		name, ok := k.(string)
+		if !ok {
+			continue
+		}
+
+		v, ok := kv[i].(int)
+		if !ok {
+			continue
+		}
+		value := int64(v)
+
+		m := metrics[name]
+		m.count++
+		m.sum += value
+		if value > m.max {
+			m.max = value
+		}
+		metrics[name] = m
+	}
+	return metrics
+}
 
 func traceFromCtx(ctx context.Context) *ctxTrace {
 	if ctx == nil {
@@ -235,6 +307,7 @@ func depthFromCtx(ctx context.Context) int {
 	return 0
 }
 
+// TODO: use ctxTrace instead of ctxMeta
 func fmtCtx(ctx context.Context, kv ...any) string {
 	s := fmtMergeKv(make([]string, 0, 6+len(kv)/2), kv...)
 
@@ -311,6 +384,10 @@ func kvMergeMap(m map[any]any, kv ...any) map[any]any {
 			k = kv[i]
 			continue
 		}
+		if kv[i] == nil {
+			continue
+		}
+
 		m[k] = kv[i]
 	}
 	return m
@@ -328,40 +405,98 @@ func fmtMap(m map[any]any) string {
 }
 
 func fmtTrace(trace *ctxTrace) string {
+	return fmtTraceDeep(0, trace)
+}
+
+func fmtTraceDeep(level int, trace *ctxTrace) string {
+	indent := strings.Repeat(" ", level*2)
 	sb := strings.Builder{}
-	sb.WriteString(fmt.Sprintf("trace.start;\n%s, %s, %s", trace.region, trace.end.Sub(trace.start), fmtMap(trace.kv)))
-	for _, child := range trace.children {
-		sb.WriteString(fmt.Sprintf("\n%s.%s", trace.region, fmtTrace(child)))
+	if level == 0 {
+		sb.WriteString(fmt.Sprintf("trace.start %s\n", trace.id))
 	}
-	sb.WriteString("\ntrace.end;")
+	sb.WriteString(fmt.Sprintf("%s, %s, %s", trace.region, trace.end.Sub(trace.start), fmtMap(trace.labels)))
+	for n, m := range trace.metrics {
+		sb.WriteString(fmt.Sprintf("\n%s  metric: %s, c=%d, avg=%.2f, max=%d", indent, n, m.count, float64(m.sum)/float64(m.count), m.max))
+	}
+	for _, child := range trace.children {
+		sb.WriteString(fmt.Sprintf("\n%s  %s", indent, fmtTraceDeep(level+1, child)))
+	}
+	if level == 0 {
+		sb.WriteString("\ntrace.end")
+	}
 	return sb.String()
 }
 
 func collectTrace(trace *ctxTrace) {
-	traceCh <- trace
+	collectTraceDeep("", trace)
+}
+
+func collectTraceDeep(parentRegion string, trace *ctxTrace) {
+	region := trace.region
+	if parentRegion != "" {
+		region = fmt.Sprintf("%s.%s", parentRegion, trace.region)
+	}
+
+	metricsCh <- metricDuration{
+		name:     region,
+		duration: trace.end.Sub(trace.start),
+	}
+	for name, m := range trace.metrics {
+		m.name = fmt.Sprintf("%s.%s", region, name)
+		metricsCh <- m
+	}
 	for _, t := range trace.children {
-		collectTrace(t)
+		collectTraceDeep(region, t)
 	}
 }
 
-func runTraceCollector() {
+func runMetricsCollector() {
 	if !verbose {
 		return
 	}
-	defer traceWg.Done()
-	traceCh = make(chan *ctxTrace)
 
-	durations := make(map[string]time.Duration)
-	for trace := range traceCh {
-		durations[trace.region] += trace.end.Sub(trace.start)
+	durations := make(map[string]metricDuration)
+	gauges := make(map[string]metricGauge)
+	counts := make(map[string]int64)
+	for mRaw := range metricsCh {
+		if m, ok := mRaw.(metricDuration); ok {
+			md := durations[m.name]
+			md.duration += m.duration
+			counts[m.name]++
+			durations[m.name] = md
+			continue
+		}
+
+		m, ok := mRaw.(metricGauge)
+		if !ok {
+			log.Infof("unexpected message type: %T", mRaw)
+			continue
+		}
+		counts[m.name]++
+		mg := gauges[m.name]
+		mg.count++
+		mg.sum += m.sum
+		if m.max > mg.max {
+			mg.max = m.max
+		}
+		gauges[m.name] = mg
 	}
-	log.Infof("waiting for trace aggregator: count=%d", len(durations))
-	regionNames := make([]string, 0, len(durations))
-	for r := range durations {
-		regionNames = append(regionNames, r)
+	log.Infof("summarizing %d metrics", len(counts))
+	names := make([]string, 0, len(counts))
+	for r := range counts {
+		names = append(names, r)
 	}
-	sort.Strings(regionNames)
-	for _, r := range regionNames {
-		log.Infof("trace.duration.%s, %s", r, durations[r])
+	sort.Strings(names)
+	for _, n := range names {
+		sb := strings.Builder{}
+		if m, ok := durations[n]; ok {
+			sb.WriteString(fmt.Sprintf("metric.%s, c=%d, d=%s", n, counts[n], m.duration))
+		} else if m, ok := gauges[n]; ok {
+			sb.WriteString(fmt.Sprintf("metric.%s, c=%d, avg=%.2f, max=%d", n, m.count, float64(m.sum)/float64(m.count), m.max))
+		} else {
+			log.Infof("unexpected metric name: %s", n)
+			continue
+		}
+		log.Info(sb.String())
 	}
 }

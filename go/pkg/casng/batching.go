@@ -40,7 +40,7 @@ type namedDigest interface {
 // In other words, if an error is returned, any digest that is not in the returned slice is not missing.
 // If no error is returned, the returned slice contains all the missing digests.
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) (missing []digest.Digest, err error) {
-	ctx = traceStart(ctxWithRqID(ctx), "missing_blobs", "count", len(digests))
+	ctx = traceStart(ctx, "missing_blobs", "count", len(digests))
 	defer traceEnd(ctx, "err", err)
 
 	if len(digests) == 0 {
@@ -125,30 +125,26 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 // The errors returned are either from the context, ErrGRPC, ErrIO, or ErrCompression. More errors may be wrapped inside.
 // If an error was returned, the returned stats may indicate that all the bytes were sent, but that does not guarantee that the server committed all of them.
 func (u *BatchingUploader) WriteBytes(ctx context.Context, name string, r io.Reader, size, offset int64) (stats Stats, err error) {
-	ctx = traceStart(ctxWithRqID(ctx), "write_bytes")
+	ctx = traceStart(ctx, "write_bytes")
 	defer traceEnd(ctx, "err", err)
 
-	ctx = traceStart(ctx, "sem.stream")
 	if !u.streamThrottle.acquire(ctx) {
 		return Stats{}, ctx.Err()
 	}
 	defer u.streamThrottle.release(ctx)
-	ctx = traceEnd(ctx)
 
 	return u.writeBytes(ctx, name, r, size, offset, true)
 }
 
 // WriteBytesPartial is the same as WriteBytes, but does not notify the server to finalize the resource name.
 func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r io.Reader, size, offset int64) (stats Stats, err error) {
-	ctx = traceStart(ctxWithRqID(ctx), "write_bytes")
+	ctx = traceStart(ctx, "write_bytes")
 	defer traceEnd(ctx, "err", err)
 
-	ctx = traceStart(ctx, "sem.stream")
 	if !u.streamThrottle.acquire(ctx) {
 		return Stats{}, ctx.Err()
 	}
 	defer u.streamThrottle.release(ctx)
-	ctx = traceEnd(ctx)
 
 	return u.writeBytes(ctx, name, r, size, offset, false)
 }
@@ -332,7 +328,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) (uploaded []digest.Digest, stats Stats, err error) {
-	ctx = traceStart(ctxWithRqID(ctx), "upload", "count", len(reqs))
+	ctx = traceStart(ctx, "upload", "count", len(reqs))
 	defer traceEnd(ctx, "err", err)
 
 	if len(reqs) == 0 {
@@ -387,15 +383,11 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) (u
 		defer close(in)
 		defer u.requestWorkerWg.Done()
 
-		debugf(ctx, "sender.start")
-		defer debugf(ctx, "sender.stop")
-
 		for _, r := range reqs {
 			select {
 			case in <- r:
 				c++
 			case <-ctx.Done():
-				errorf(ctx, "cancelled", "err", ctx.Err())
 				return
 			}
 		}
@@ -420,7 +412,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) (u
 
 // DigestTree returns the digest of the merkle tree for root.
 func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute, slo symlinkopts.Options, exclude walker.Filter) (rootDg digest.Digest, stats Stats, err error) {
-	ctx = traceStart(ctxWithRqID(ctx), "digest_tree", "path", root, "slo", slo, "filter", exclude)
+	ctx = traceStart(ctx, "digest_tree", "path", root, "slo", slo, "filter", exclude)
 	defer traceEnd(ctx, "err", err)
 
 	in := make(chan UploadRequest)
@@ -480,7 +472,7 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 // All requests must share the same filter. Digest fields on the requests are ignored to ensure proper hierarchy caching via the internal digestion process.
 // remoteWorkingDir replaces workingDir inside the merkle tree such that the server is only aware of remoteWorkingDir.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
-	ctx = traceStart(ctxWithRqID(ctx), "upload_tree", "count", len(reqs))
+	ctx = traceStart(ctx, "upload_tree", "count", len(reqs))
 	defer traceEnd(ctx, "err", err)
 
 	if len(reqs) == 0 {
@@ -547,9 +539,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// paths is already sorted because reqs was sorted.
 
 	// 2nd, Upload the requests first to digest the files and cache the nodes.
-	ctx = traceStart(ctx, "upload_inputs", "count", len(reqs))
 	uploaded, stats, err = u.Upload(ctx, reqs...)
-	ctx = traceEnd(ctx)
 	if err != nil {
 		return
 	}
@@ -566,6 +556,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		node := u.Node(r)
 		if node == nil {
 			err = serrorf(ctx, "cannot construct the merkle tree with a missing node", "path", r.Path, "fid", filterID)
+			traceEnd(ctx, "err", "missing node")
 			return
 		}
 
@@ -574,6 +565,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		rp, errIm := ReplaceWorkingDir(ctx, r.Path, execRoot, workingDir, remoteWorkingDir)
 		if errIm != nil {
 			err = errors.Join(serrorf(ctx, "cannot construct the merkle tree with a path outside the root", "path", r.Path, "root", execRoot, "wd", workingDir, "rws", remoteWorkingDir), errIm)
+			traceEnd(ctx, "err", "path outside root")
 			return
 		}
 		parent := rp
@@ -642,6 +634,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		node, b, errDigest := digestDirectory(ctx, dir, childrenNodes)
 		if errDigest != nil {
 			err = errDigest
+			traceEnd(ctx, "err", "digest failed")
 			return
 		}
 		dirReqs = append(dirReqs, UploadRequest{Bytes: b, Digest: digest.NewFromProtoUnvalidated(node.Digest)})
@@ -658,14 +651,12 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	ctx = traceEnd(ctx)
 
 	// Upload the blobs of the shared ancestors.
-	ctx = traceStart(ctx, "upload_dirs")
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
 	if moreErr != nil {
 		err = moreErr
 	}
 	stats.Add(moreStats)
 	uploaded = append(uploaded, moreUploaded...)
-	ctx = traceEnd(ctx)
 
 	// b/291294771: remove after deprecation.
 	if log.V(5) {

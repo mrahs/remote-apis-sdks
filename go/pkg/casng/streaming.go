@@ -133,7 +133,7 @@ type MissingBlobsResponse struct {
 // This method must not be called after cancelling the uploader's context.
 // Cancelling ctx does not cancel this call. in must be closed to terminate this call.
 func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.Digest) <-chan MissingBlobsResponse {
-	ctx = traceStart(ctxWithRqID(ctx), "missing_blobs")
+	ctx = traceStart(ctx, "missing_blobs")
 	defer traceEnd(ctx)
 
 	pipeCh := make(chan UploadRequest)
@@ -143,9 +143,6 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 	go func() {
 		defer u.requestWorkerWg.Done()
 		defer close(pipeCh)
-
-		debugf(ctx, "sender.start")
-		defer debugf(ctx, "sender.stop")
 
 		for d := range in {
 			pipeCh <- UploadRequest{Digest: d}
@@ -180,7 +177,7 @@ func (u *StreamingUploader) MissingBlobs(ctx context.Context, in <-chan digest.D
 // This method must not be called after cancelling the uploader's context.
 // Response may contain only stats and error.
 func (u *StreamingUploader) Upload(ctx context.Context, in <-chan UploadRequest) <-chan UploadResponse {
-	ctx = traceStart(ctxWithRqID(ctx), "upload")
+	ctx = traceStart(ctx, "upload")
 	defer traceEnd(ctx)
 
 	out := make(chan UploadResponse)
@@ -216,14 +213,12 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 		defer wg.Done()
 		defer func() { close(queryIn) }()
 
-		debugf(ctx, "pipe.digest_query.start")
-		defer debugf(ctx, "pipe.digest_query.stop")
-
 		for dr := range digestOut {
-			ctx = traceStart(ctx, "digest.out")
+			// new ctx to avoid races with sibling workers.
+			ctx := traceStart(ctx, "digest_out")
 			if walkRes, ok := dr.(walkResult); ok {
 				out <- UploadResponse{Stats: walkRes.stats, Err: walkRes.err}
-				ctx = traceEnd(ctx, "type", "walk_result")
+				traceEnd(ctx, "type", "walk_result")
 				continue
 			}
 			req, ok := dr.(UploadRequest)
@@ -239,7 +234,7 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 				continue
 			}
 			queryIn <- req
-			ctx = traceEnd(ctx)
+			traceEnd(ctx)
 		}
 	}()
 
@@ -273,11 +268,9 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 			close(streamIn)
 		}()
 
-		debugf(ctx, "pipe.query_upload.start")
-		defer debugf(ctx, "pipe.query_upload.stop")
-
 		for qr := range queryOut {
-			ctx = traceStart(ctx, "query_out", "digest", qr.Digest, "missing", qr.Missing, "err", qr.Err)
+			// new ctx to avoid races with sibling workers.
+			ctx := traceStart(ctx, "query_out", "digest", qr.Digest, "missing", qr.Missing, "err", qr.Err)
 
 			res := UploadResponse{Digest: qr.Digest, Err: qr.Err}
 
@@ -297,17 +290,17 @@ func (u *uploader) uploadProcessor(ctx context.Context, in <-chan UploadRequest,
 				}
 
 				out <- res
-				ctx = traceEnd(ctx, "dst", "out")
+				traceEnd(ctx, "dst", "out")
 				continue
 			}
 
 			if qr.Digest.Size <= u.uploadBatchRequestItemBytesLimit {
 				batchIn <- qr.req
-				ctx = traceEnd(ctx, "dst", "batcher")
+				traceEnd(ctx, "dst", "batcher")
 				continue
 			}
 			streamIn <- qr.req
-			ctx = traceEnd(ctx, "dst", "streamer")
+			traceEnd(ctx, "dst", "streamer")
 		}
 	}()
 

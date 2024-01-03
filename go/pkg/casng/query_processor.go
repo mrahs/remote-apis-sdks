@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/errors"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/retry"
@@ -28,17 +27,14 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 	defer func() { callWg.Wait() }()
 
 	bundle := make(queryBundle, u.queryRPCCfg.ItemsLimit)
-	bundleCtx := ctx // context with unified metadata.
-
 	dispatch := func() {
 		if len(bundle) == 0 {
 			return
 		}
 
 		// Block the processor if the concurrency limit is reached.
-		ctx = traceStart(ctx, "query->out")
 		if !u.queryThrottler.acquire(ctx) {
-			debugf(ctx, "cancel")
+			ctx = traceStart(ctx, "query->out")
 			// Ensure responses are dispatched before aborting.
 			for d, reqs := range bundle {
 				for _, req := range reqs {
@@ -48,17 +44,15 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 			ctx = traceEnd(ctx)
 			return
 		}
-		ctx = traceEnd(ctx)
 
 		callWg.Add(1)
 		go func(ctx context.Context, b queryBundle) {
 			defer callWg.Done()
 			defer u.queryThrottler.release(ctx)
 			u.callMissingBlobs(ctx, b, out)
-		}(bundleCtx, bundle)
+		}(ctx, bundle)
 
 		bundle = make(queryBundle, u.queryRPCCfg.ItemsLimit)
-		bundleCtx = ctx
 	}
 
 	bundleTicker := time.NewTicker(u.queryRPCCfg.BundleTimeout)
@@ -67,32 +61,28 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 		select {
 		case req, ok := <-in:
 			if !ok {
-				debugf(ctx, "bundle.done", "count", len(bundle))
+				traceMetric(ctx, "bundle.done", len(bundle))
 				dispatch()
 				return
 			}
-			ctx = traceStart(ctx, "bundle.append", "digest", req.Digest, "start_count", len(bundle))
+			ctx = traceStart(ctx, "bundle.append", "digest", req.Digest)
 
 			if _, ok := u.casPresenceCache.Load(req.Digest); ok {
-				traceTag(ctx, "req.cached", true)
 				out <- MissingBlobsResponse{Digest: req.Digest}
-				ctx = traceEnd(ctx)
+				ctx = traceEnd(ctx, "dst", "cached")
 				continue
 			}
 
 			bundle[req.Digest] = append(bundle[req.Digest], req)
-			if verbose {
-				bundleCtx, _ = contextmd.FromContexts(bundleCtx, ctx) // ignore non-essential error.
-			}
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
-				debugf(ctx, "bundle.full", "count", len(bundle))
+				traceMetric(ctx, "bundle.full", len(bundle))
 				dispatch()
 			}
-			ctx = traceEnd(ctx, "end_count", len(bundle))
+			ctx = traceEnd(ctx)
 		case <-bundleTicker.C:
-			debugf(ctx, "bundle.timeout", "count", len(bundle))
+			traceMetric(ctx, "bundle.timeout", len(bundle))
 			dispatch()
 		}
 	}

@@ -64,6 +64,7 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 				// The sender is done.
 				done = true
 				if deferred == 0 && pending == 0 {
+					traceTag(ctx, "bundle.done", len(bundle))
 					return
 				}
 				continue
@@ -71,6 +72,7 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 				// A deferred request was sent back.
 				deferred--
 				if done && deferred == 0 && pending == 0 {
+					traceTag(ctx, "bundle.done", len(bundle))
 					return
 				}
 				continue
@@ -80,7 +82,7 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 				errorf(ctx, fmt.Sprintf("unexpected message type: %T", r))
 				continue
 			}
-			ctx = traceStart(ctx, "bundle.append", "digest", req.Digest, "start_count", len(bundle))
+			ctx = traceStart(ctx, "bundle.append", "digest", req.Digest)
 			shouldReleaseIOTokens := req.reader != nil
 
 			item, ok := bundle[req.Digest]
@@ -139,15 +141,15 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 
 			var name string
 			if req.Digest.Size >= u.ioCfg.CompressionSizeThreshold {
-				debugf(ctx, "compressed", "digest", req.Digest)
+				traceTag(ctx, "compressed", true)
 				name = MakeCompressedWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
 			} else {
 				name = MakeWriteResourceName(u.instanceName, req.Digest.Hash, req.Digest.Size)
 			}
 
 			// Block the streamer if the gRPC call is being throttled.
-			ctx = traceStart(ctx, "sem.stream")
 			if !u.streamThrottle.acquire(ctx) {
+				ctx = traceStart(ctx, "dispatch", "dst", "out", "err", ctx.Err())
 				if shouldReleaseIOTokens {
 					u.ioThrottler.release(ctx)
 					u.ioLargeThrottler.release(ctx)
@@ -158,10 +160,9 @@ func (u *uploader) streamProcessor(ctx context.Context, in <-chan UploadRequest,
 					Stats:  Stats{BytesRequested: req.Digest.Size},
 					Err:    ctx.Err(),
 				}
-				ctx = traceEnd(ctx, "err", ctx.Err())
+				ctx = traceEnd(ctx)
 				continue
 			}
-			ctx = traceEnd(ctx)
 
 			pending++
 			u.workerWg.Add(1)
@@ -228,12 +229,9 @@ func (u *uploader) callStream(ctx context.Context, name string, req UploadReques
 
 	// Medium file.
 	default:
-		ctx = traceStart(ctx, "sem.io")
 		if !u.ioThrottler.acquire(ctx) {
-			ctx = traceEnd(ctx, "err", ctx.Err())
 			return Stats{BytesRequested: req.Digest.Size}, context.Canceled
 		}
-		ctx = traceEnd(ctx)
 		defer u.ioThrottler.release(ctx)
 
 		f, errOpen := os.Open(req.Path.String())
