@@ -290,7 +290,7 @@ func (ec *Context) ngUploadInputs() error {
 		if p.Path == "" {
 			return fmt.Errorf("empty virtual path; m=ng.upload, cmd_id=%s, exec_id=%s", cmdID, executionID)
 		}
-		// If execRoot is a virtual path, ignore it.
+		// If the virtual path points to the execRoot, ignore it.
 		if p.Path == "." {
 			continue
 		}
@@ -303,6 +303,8 @@ func (ec *Context) ngUploadInputs() error {
 		if pathSeen[absPath] {
 			continue
 		}
+		// Mark ancestors as seen to skip them if also included as virtual inputs.
+        // This is required to avoid caching an acenstor before processing its descendants.
 		parent := absPath.Dir()
 		for !pathSeen[parent] && parent.String() != execRoot.String() {
 			pathSeen[parent] = true
@@ -322,8 +324,7 @@ func (ec *Context) ngUploadInputs() error {
 		reqs = append(reqs, r)
 	}
 	log.V(1).Infof("uploading inputs; m=ng.upload, count=%d, cmd_id=%s, exec_id=%s", len(reqs), cmdID, executionID)
-	ctx := context.WithValue(ec.ctx, casng.CtxKeyInvID, executionID)
-	ctx = context.WithValue(ctx, casng.CtxKeyCmdID, cmdID)
+	ctx := ec.ctx
 	var ngTree, clTree *string
 	if log.V(5) {
 		ngTree = new(string)
@@ -460,21 +461,25 @@ func exclusionsFilter(es []*command.InputExclusion) (walker.Filter, error) {
 	}
 	id := idBuilder.String()
 
-	filter.Path = func(path string) bool {
-		for _, re := range pathRegexes {
-			if re.MatchString(path) {
-				return true
+	if len(pathRegexes) > 0 {
+		filter.Path = func(path string) bool {
+			for _, re := range pathRegexes {
+				if re.MatchString(path) {
+					return true
+				}
 			}
+			return false
 		}
-		return false
 	}
-	filter.File = func(path string, mode fs.FileMode) bool {
-		for i, re := range fileRegexes {
-			if (fileModes[i] == 0 && mode.IsRegular() || fileModes[i]&mode != 0) && re.MatchString(path) {
-				return true
+	if len(fileRegexes) > 0 {
+		filter.File = func(path string, mode fs.FileMode) bool {
+			for i, re := range fileRegexes {
+				if (fileModes[i] == 0 && mode.IsRegular() || fileModes[i]&mode != 0) && re.MatchString(path) {
+					return true
+				}
 			}
+			return false
 		}
-		return false
 	}
 	filter.ID = id
 	return filter, nil

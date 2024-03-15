@@ -14,21 +14,16 @@ import (
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 )
 
-// Much cheaper than log.V
 // This should be set after parsing flags (not in init or variable init).
 var verbose bool
 
-// Public stuff that can be used outside this file.
-func fmtKv(kv ...any) string {
-	return strings.Join(fmtMergeKv(make([]string, 0, len(kv)/2), kv...), ", ")
-}
+// Stuff that can be used outside this file.
 
 func debugf(ctx context.Context, msg string, kv ...any) {
 	if !verbose {
 		return
 	}
-	depth := depthFromCtx(ctx)
-	log.InfoDepthf(depth+1, "%s; %s", msg, fmtCtx(ctx, kv...))
+	log.InfoDepthf(1, "%s; %s", msg, fmtCtx(ctx, kv...))
 }
 
 func serrorf(ctx context.Context, msg string, kv ...any) error {
@@ -36,73 +31,32 @@ func serrorf(ctx context.Context, msg string, kv ...any) error {
 }
 
 func errorf(ctx context.Context, msg string, kv ...any) {
-	depth := depthFromCtx(ctx)
-	log.ErrorDepthf(depth+1, "%s; %s", msg, fmtCtx(ctx, kv...))
+	log.ErrorDepthf(1, "%s; %s", msg, fmtCtx(ctx, kv...))
 }
 
-// func durationf(ctx context.Context, startTime time.Time, op string, kv ...any) {
-// 	if !verbose {
-// 		return
-// 	}
-// 	endTime := time.Now()
-// 	depth := depthFromCtx(ctx)
-// 	log.InfoDepthf(depth+1, "duration.%s; start=%d, end=%d, d=%s, %s",
-// 		op, startTime.UnixNano(), endTime.UnixNano(), endTime.Sub(startTime), fmtCtx(ctx, kv...))
-// }
-
-func ctxWithValues(ctx context.Context, kv ...any) context.Context {
+func traceStart(ctx context.Context, region string, kv ...any) context.Context {
 	if !verbose {
 		return ctx
 	}
-	m := metaFromCtx(ctx)
-	var k any
-	for i := 0; i < len(kv); i++ {
-		if i%2 == 0 {
-			k = kv[i]
-			continue
-		}
-		m[k] = kv[i]
-	}
-	return context.WithValue(ctx, ctxKeyMeta, m)
-}
 
-func ctxWithRqID(ctx context.Context, kv ...any) context.Context {
-	if !verbose {
-		return ctx
-	}
-	if id := valFromCtx(ctx, CtxKeyRqID); id == nil {
-		kv = append(kv, CtxKeyRqID, uuid.New())
-	}
-	return ctxWithValues(ctx, kv...)
-}
-
-func ctxWithLogDepthInc(ctx context.Context) context.Context {
-	if !verbose {
-		return ctx
-	}
-	d := depthFromCtx(ctx)
-	d++
-	return ctxWithValues(ctx, ctxKeyLogDepth, d)
-}
-
-func traceStart(ctx context.Context, module string, kv ...any) context.Context {
-	if !verbose {
-		return ctx
-	}
+	traceCountCh <- 1
 	traceWg.Add(1)
+
 	trace := &ctxTrace{
-		parentCtx: ctx,
-		region:    module,
-		labels:    kvMergeMap(make(map[any]any, len(kv)/2), kv...),
+		id:        uuid.New(),
+		region:    region,
 		start:     time.Now(),
+		labels:    mergeKv(nil, kv...),
+		metrics:   mergeKvMetrics(nil, kv...),
+		parentCtx: ctx,
 	}
 	if parentTrace := traceFromCtx(ctx); parentTrace != nil {
-		trace.id = parentTrace.id
+		prefix := ""
+		if parentTrace.prefix != "" {
+			prefix = "." + parentTrace.prefix
+		}
+		trace.prefix = prefix + parentTrace.region
 	}
-	if trace.id == "" {
-		trace.id = uuid.New()
-	}
-	trace.metrics = mergeMetricsFromKv(trace.metrics, kv...)
 	return context.WithValue(ctx, ctxKeyTrace, trace)
 }
 
@@ -111,25 +65,14 @@ func traceTag(ctx context.Context, kv ...any) {
 	if !verbose {
 		return
 	}
-	trace := traceFromCtx(ctx)
-	if trace == nil {
-		log.InfoDepth(1, "no trace to tag")
-		return
-	}
-	trace.labels = kvMergeMap(trace.labels, kv...)
-	trace.metrics = mergeMetricsFromKv(trace.metrics, kv...)
-}
 
-func traceMetric(ctx context.Context, kv ...any) {
-	if !verbose {
-		return
-	}
 	trace := traceFromCtx(ctx)
 	if trace == nil {
-		log.InfoDepth(1, "no trace to add metrics to")
+		log.WarningDepth(1, "no trace to tag")
 		return
 	}
-	trace.metrics = mergeMetricsFromKv(trace.metrics, kv...)
+	trace.labels = mergeKv(trace.labels, kv...)
+	trace.metrics = mergeKvMetrics(trace.metrics, kv...)
 }
 
 func traceEnd(ctx context.Context, kv ...any) context.Context {
@@ -139,29 +82,22 @@ func traceEnd(ctx context.Context, kv ...any) context.Context {
 
 	trace := traceFromCtx(ctx)
 	if trace == nil {
-		log.InfoDepth(1, "no trace to end")
-		traceWg.Done()
+		log.WarningDepth(1, "no trace to end")
 		return ctx
 	}
-	trace.labels = kvMergeMap(trace.labels, kv...)
-	if err, ok := trace.labels["err"]; ok && err != nil {
-		trace.hasErr = true
-	}
-	trace.end = time.Now()
-	parentTrace := traceFromCtx(trace.parentCtx)
-	if parentTrace != nil {
-		parentTrace.children = append(parentTrace.children, trace)
-		parentTrace.hasErr = trace.hasErr
-		traceWg.Done()
-		return trace.parentCtx
-	}
 
-	if trace.hasErr {
-		log.InfoDepth(1, fmtTrace(trace))
+	traceCountCh <- -1
+
+	trace.labels = mergeKv(trace.labels, kv...)
+	trace.metrics = mergeKvMetrics(trace.metrics, kv...)
+	trace.end = time.Now()
+
+	if trace.labels["err"] != nil {
+		log.ErrorDepth(1, fmtTrace(trace))
 	}
 
 	go func() {
-		collectTrace(trace)
+		collectTraceMetrics(trace)
 		traceWg.Done()
 	}()
 
@@ -173,50 +109,22 @@ func traceEnd(ctx context.Context, kv ...any) context.Context {
 type ctxKey int
 
 const (
-	// Context key for invocation ID.
-	CtxKeyInvID ctxKey = iota
-
-	// Context key for command ID.
-	CtxKeyCmdID
-
-	// Context key for request ID
-	CtxKeyRqID
-
-	// Context key for route ID.
-	ctxKeyRtID
-
-	// Context key sub-request ID.
-	ctxKeySqID
-
-	// Context key for module.
-	ctxKeyModule
-
-	// Context key for adjusting log depth for glog.
-	ctxKeyLogDepth
-
-	// Context key for meta data.
-	ctxKeyMeta
-
-	// Context key for tracing.
-	ctxKeyTrace
+	ctxKeyTrace ctxKey = iota
 
 	// Temporary keys for debugging purposes.
 	CtxKeyNGTree
 	CtxKeyClientTree
 )
 
-type ctxMeta map[any]any
-
 type ctxTrace struct {
-	parentCtx context.Context
 	id        string
 	region    string
+	prefix    string
 	start     time.Time
 	end       time.Time
-	hasErr    bool
 	labels    map[any]any
 	metrics   map[string]metricGauge
-	children  []*ctxTrace
+	parentCtx context.Context
 }
 
 type metricGauge struct {
@@ -232,11 +140,90 @@ type metricDuration struct {
 }
 
 var (
-	metricsCh = make(chan any)
-	traceWg   sync.WaitGroup
+	metricsCh    = make(chan any)
+	traceWg      sync.WaitGroup
+	traceCountCh = make(chan int)
+	traceCount   = 0
 )
 
-func mergeMetricsFromKv(metrics map[string]metricGauge, kv ...any) map[string]metricGauge {
+func traceFromCtx(ctx context.Context) *ctxTrace {
+	if ctx == nil {
+		return nil
+	}
+	if tRaw := ctx.Value(ctxKeyTrace); tRaw != nil {
+		return tRaw.(*ctxTrace)
+	}
+	return nil
+}
+
+// fixKv unifies digest formats and removes redundant real_path labels.
+func fixKv(kv ...any) []any {
+	var k any
+	var p string
+	j := 0
+	for i := 0; i < len(kv); i++ {
+		if i%2 == 0 {
+			k = kv[i]
+			kv[j] = k
+			j++
+			continue
+		}
+
+		v := kv[i]
+		if d, ok := v.(*repb.Digest); ok {
+			kv[j] = fmt.Sprintf("%s/%d", d.GetHash(), d.GetSizeBytes())
+			j++
+			continue
+		}
+
+		// This assumes "path" always comes before "real_path"
+		if k == "path" {
+			switch str := v.(type) {
+			case string:
+				p = str
+			case fmt.Stringer:
+				p = str.String()
+			}
+		} else if k == "real_path" {
+			var rp string
+			switch str := v.(type) {
+			case string:
+				rp = str
+			case fmt.Stringer:
+				rp = str.String()
+			}
+			if rp == p {
+				j--
+				continue
+			}
+		}
+		kv[j] = v
+		j++
+	}
+	return kv[:j]
+}
+
+func mergeKv(m map[any]any, kv ...any) map[any]any {
+	kv = fixKv(kv...)
+	if m == nil {
+		m = make(map[any]any, len(kv)/2)
+	}
+	var k any
+	for i := 0; i < len(kv); i++ {
+		if i%2 == 0 {
+			k = kv[i]
+			continue
+		}
+		if kv[i] == nil {
+			continue
+		}
+
+		m[k] = kv[i]
+	}
+	return m
+}
+
+func mergeKvMetrics(metrics map[string]metricGauge, kv ...any) map[string]metricGauge {
 	if len(kv) == 0 {
 		return metrics
 	}
@@ -271,182 +258,79 @@ func mergeMetricsFromKv(metrics map[string]metricGauge, kv ...any) map[string]me
 	return metrics
 }
 
-func traceFromCtx(ctx context.Context) *ctxTrace {
-	if ctx == nil {
-		return nil
-	}
-	if tRaw := ctx.Value(ctxKeyTrace); tRaw != nil {
-		return tRaw.(*ctxTrace)
-	}
-	return nil
-}
-
-func metaFromCtx(ctx context.Context) ctxMeta {
-	m := make(ctxMeta)
-	if mRaw := ctx.Value(ctxKeyMeta); mRaw != nil {
-		for k, v := range mRaw.(ctxMeta) {
-			m[k] = v
-		}
-	}
-	return m
-}
-
-func valFromCtx(ctx context.Context, key any) any {
-	var val any
-	if mRaw := ctx.Value(ctxKeyMeta); mRaw != nil {
-		m := mRaw.(ctxMeta)
-		val = m[key]
-	}
-	return val
-}
-
-func depthFromCtx(ctx context.Context) int {
-	if dRaw := valFromCtx(ctx, ctxKeyLogDepth); dRaw != nil {
-		return dRaw.(int)
-	}
-	return 0
-}
-
-// TODO: use ctxTrace instead of ctxMeta
 func fmtCtx(ctx context.Context, kv ...any) string {
-	s := fmtMergeKv(make([]string, 0, 6+len(kv)/2), kv...)
-
-	if !verbose {
-		return strings.Join(s, ", ")
+	kv = fixKv(kv...)
+	labelCount := len(kv) / 2
+	trace := traceFromCtx(ctx)
+	if trace != nil {
+		labelCount += 1 // for region
+		labelCount += len(trace.labels)
+	}
+	if labelCount == 0 {
+		return ""
 	}
 
-	rawModule := valFromCtx(ctx, ctxKeyModule)
-	if module, ok := rawModule.(string); ok {
-		s = append(s, "m="+module)
-	}
+	labels := make([]string, 0, labelCount)
 
-	rawInvID := valFromCtx(ctx, CtxKeyInvID)
-	if invID, ok := rawInvID.(string); ok {
-		s = append(s, "inv="+invID)
-	}
-
-	rawCmdID := valFromCtx(ctx, CtxKeyCmdID)
-	if cmdID, ok := rawCmdID.(string); ok {
-		s = append(s, "cmd="+cmdID)
-	}
-
-	rawRqID := valFromCtx(ctx, CtxKeyRqID)
-	if rqID, ok := rawRqID.(string); ok {
-		s = append(s, "rqid="+rqID)
-	}
-
-	rawRtID := valFromCtx(ctx, ctxKeyRtID)
-	if rtID, ok := rawRtID.(string); ok {
-		s = append(s, "rtid="+rtID)
-	}
-
-	rawSqID := valFromCtx(ctx, ctxKeySqID)
-	if sqID, ok := rawSqID.(string); ok {
-		s = append(s, "sqid="+sqID)
-	}
-
-	return strings.Join(s, ", ")
-}
-
-func fmtMergeKv(out []string, kv ...any) []string {
-	var k any
-	var p string
-	for i := 0; i < len(kv); i++ {
-		if i%2 == 0 {
-			k = kv[i]
-			continue
-		}
-
-		v := kv[i]
-		if d, ok := v.(*repb.Digest); ok {
-			out = append(out, fmt.Sprintf("%s=%s/%d", k, d.GetHash(), d.GetSizeBytes()))
-			continue
-		}
-
-		if k == "path" {
-			if str, ok := v.(fmt.Stringer); ok {
-				p = str.String()
-			}
-		} else if k == "real_path" {
-			if str, ok := v.(fmt.Stringer); ok && str.String() == p {
-				continue
-			}
-		}
-		out = append(out, fmt.Sprintf("%s=%v", k, v))
-	}
-	return out
-}
-
-func kvMergeMap(m map[any]any, kv ...any) map[any]any {
 	var k any
 	for i := 0; i < len(kv); i++ {
 		if i%2 == 0 {
 			k = kv[i]
 			continue
 		}
-		if kv[i] == nil {
-			continue
-		}
-
-		m[k] = kv[i]
+		labels = append(labels, fmt.Sprintf("%s=%v", k, kv[i]))
 	}
-	return m
-}
 
-func fmtMap(m map[any]any) string {
-	sb := strings.Builder{}
-	for k, v := range m {
-		if sb.Len() > 0 {
-			sb.WriteString(", ")
+	if trace != nil {
+		labels = append(labels, "region="+trace.region)
+		for k, v := range trace.labels {
+			labels = append(labels, fmt.Sprintf("%s=%v", k, v))
 		}
-		sb.WriteString(fmt.Sprintf("%v=%v", k, v))
 	}
-	return sb.String()
+
+	return strings.Join(labels, ", ")
 }
 
 func fmtTrace(trace *ctxTrace) string {
-	return fmtTraceDeep(0, trace)
-}
-
-func fmtTraceDeep(level int, trace *ctxTrace) string {
-	indent := strings.Repeat(" ", level*2)
+    if trace == nil {
+        return ""
+    }
 	sb := strings.Builder{}
-	if level == 0 {
-		sb.WriteString(fmt.Sprintf("trace.start %s\n", trace.id))
+	sb.WriteString(fmt.Sprintf("%s, %s", trace.region, trace.end.Sub(trace.start)))
+	if len(trace.labels) > 0 {
+		for k, v := range trace.labels {
+            sb.WriteString(", ")
+			sb.WriteString(fmt.Sprintf("%s=%v", k, v))
+		}
 	}
-	sb.WriteString(fmt.Sprintf("%s, %s, %s", trace.region, trace.end.Sub(trace.start), fmtMap(trace.labels)))
-	for n, m := range trace.metrics {
-		sb.WriteString(fmt.Sprintf("\n%s  metric: %s, c=%d, avg=%.2f, max=%d", indent, n, m.count, float64(m.sum)/float64(m.count), m.max))
+	for name, m := range trace.metrics {
+		sb.WriteString(fmt.Sprintf("\n    metric: %s, c=%d, avg=%.2f, max=%d", name, m.count, float64(m.sum)/float64(m.count), m.max))
 	}
-	for _, child := range trace.children {
-		sb.WriteString(fmt.Sprintf("\n%s  %s", indent, fmtTraceDeep(level+1, child)))
+	if trace.parentCtx == nil {
+		return sb.String()
 	}
-	if level == 0 {
-		sb.WriteString("\ntrace.end")
+	parentTrace := traceFromCtx(trace.parentCtx)
+	if parentTrace == nil {
+		return sb.String()
 	}
+	sb.WriteRune('\n')
+	sb.WriteString(fmtTrace(parentTrace))
 	return sb.String()
 }
 
-func collectTrace(trace *ctxTrace) {
-	collectTraceDeep("", trace)
-}
-
-func collectTraceDeep(parentRegion string, trace *ctxTrace) {
-	region := trace.region
-	if parentRegion != "" {
-		region = fmt.Sprintf("%s.%s", parentRegion, trace.region)
+func collectTraceMetrics(trace *ctxTrace) {
+	fqName := trace.region
+	if trace.prefix != "" {
+		fqName = trace.prefix + "." + trace.region
 	}
 
 	metricsCh <- metricDuration{
-		name:     region,
+		name:     fqName,
 		duration: trace.end.Sub(trace.start),
 	}
 	for name, m := range trace.metrics {
-		m.name = fmt.Sprintf("%s.%s", region, name)
+		m.name = fmt.Sprintf("%s.%s", fqName, name)
 		metricsCh <- m
-	}
-	for _, t := range trace.children {
-		collectTraceDeep(region, t)
 	}
 }
 

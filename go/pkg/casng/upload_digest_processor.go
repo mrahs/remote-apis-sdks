@@ -74,7 +74,8 @@ func (u *uploader) digestProcessor(ctx context.Context, in <-chan UploadRequest,
 	// defer func() { walkerWg.Wait() }()
 
 	for req := range in {
-		// ctx = traceStart(ctx, "req", "path", req.Path, "fid", req.Exclude)
+		// new ctx for current req
+		// ctx := traceStart(ctx, "digest_in", "path", req.Path, "fid", req.Exclude)
 		// If it's a bytes request, do not traverse the path.
 		if req.Bytes != nil {
 			if req.Digest.Hash == "" {
@@ -95,17 +96,17 @@ func (u *uploader) digestProcessor(ctx context.Context, in <-chan UploadRequest,
 				// This node cannot be added to the u.dirChildren cache because the cache is owned by the walker callback.
 				// Parent nodes may have already been generated and cached in u.nodeCache; updating the u.dirChildren cache will not regenerate them.
 			}
-			// traceTag(ctx, "type", "bytes", "size", len(req.Bytes))
+			// traceTag(ctx, "bytes", 1)
 		}
 
 		if req.Digest.Hash != "" {
 			out <- req
-			// ctx = traceEnd(ctx, "dst", "out", "reason", "digested", "digest", req.Digest)
+			// traceEnd(ctx, "dst", "out", "digested", 1, "digest", req.Digest, "size", len(req.Bytes))
 			continue
 		}
 
 		u.walkDigest(ctx, req, out)
-		// ctx = traceEnd(ctx)
+		// traceEnd(ctx, "undigested", 1)
 	}
 }
 
@@ -119,20 +120,20 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 	deferredWg := make(map[string]*sync.WaitGroup)
 	walker.DepthFirst(req.Path, req.Exclude, walker.Callback{
 		Err: func(path impath.Absolute, realPath impath.Absolute, errVisit error) bool {
-			debugf(ctx, "visit.err", "path", path, "real_path", realPath, "err", errVisit)
 			err = errors.Join(errVisit, err)
+			// traceTag(ctx, "err", errVisit)
 			return false
 		},
 
 		Pre: func(path impath.Absolute, realPath impath.Absolute) (walker.PreAction, bool) {
-			debugf(ctx, "visit.pre", "path", path, "real_path", realPath, "fid", req.Exclude)
-
 			select {
 			case <-ctx.Done():
-				debugf(ctx, "cancel.ctx")
+				// traceTag(ctx, "canceled", 1)
 				return walker.SkipPath, false
 			default:
 			}
+
+			// traceTag(ctx, "path", path, "real_path", realPath, "fid", req.Exclude)
 
 			// A cache hit here indicates a cyclic symlink with the same requester or multiple requesters attempting to upload the exact same path with an identical filter.
 			// In both cases, deferring is the right call. Once the request is processed, all requestters will revisit the path to get the digestion result.
@@ -145,7 +146,7 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 			m, ok := u.nodeCache.LoadOrStore(key, wg)
 			if !ok {
 				// Claimed. Access it.
-				debugf(ctx, "visit.claimed", "path", path, "real_path", realPath, "fid", req.Exclude)
+				// traceTag(ctx, "claimed", 1)
 				return walker.Access, true
 			}
 
@@ -153,23 +154,22 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 			if wg, ok := m.(*sync.WaitGroup); ok {
 				if deferredWg[key] == nil {
 					deferredWg[key] = wg
-					debugf(ctx, "visit.defer", "path", path, "real_path", realPath)
+					// traceTag(ctx, "defered", 1)
 					return walker.Defer, true
 				}
-				// ctx = traceStart(ctx, "visit.wait", "path", path, "real_path", realPath)
 				wg.Wait()
-				// ctx = traceEnd(ctx)
 				delete(deferredWg, key)
+				// traceTag(ctx, "blocked", 1)
 				return walker.Defer, true
 			}
 
 			node := m.(proto.Message) // Guaranteed assertion because the cache is an internal field.
-			debugf(ctx, "visit.cached", "path", path, "real_path", realPath, "fid", req.Exclude)
+			// traceTag(ctx, "cached", 1)
 
 			// Forward it to correctly account for a cache hit or upload if the original blob is blocked elsewhere.
 			switch node := node.(type) {
 			case *repb.FileNode:
-				// ctx = traceStart(ctx, "walk->out","path", req.Path, "real_path", realPath)
+				// ctx = traceStart(ctx, "walk->out", "file", 1)
 				out <- UploadRequest{
 					Path:   realPath,
 					Digest: digest.NewFromProtoUnvalidated(node.Digest),
@@ -182,9 +182,10 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 				node, b, errDigest := digestDirectory(ctx, path, u.dirChildren.load(key))
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
+					// traceTag(ctx, "err", errDigest)
 					return walker.SkipPath, false
 				}
-				// ctx = traceStart(ctx, "walk->out", "path", req.Path, "real_path", realPath)
+				// ctx = traceStart(ctx, "walk->out", "dir", 1)
 				out <- UploadRequest{
 					Bytes:  b,
 					Digest: digest.NewFromProtoUnvalidated(node.Digest),
@@ -194,18 +195,16 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 				// It was already appended as a child to its parent. Nothing to forward.
 			default:
 				errorf(ctx, fmt.Sprintf("cached node has unexpected type %T", node))
+				// traceTag(ctx, "err", "cached node has unexpected type")
 				return walker.SkipPath, false
 			}
-
 			return walker.SkipPath, true
 		},
 
 		Post: func(path impath.Absolute, realPath impath.Absolute, info fs.FileInfo) (ok bool) {
-			debugf(ctx, "visit.post", "path", path, "real_path", realPath, "fid", req.Exclude)
-
 			select {
 			case <-ctx.Done():
-				debugf(ctx, "cancel")
+				// traceTag(ctx, "canceled", 1)
 				return false
 			default:
 			}
@@ -218,6 +217,7 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 			wg, pathClaimed := u.nodeCache.Load(key)
 			if !pathClaimed {
 				err = errors.Join(serrorf(ctx, "attempted to post-access a non-claimed path", "path", path), err)
+				// traceTag(ctx, "err", err)
 				return false
 			}
 			defer func() {
@@ -236,9 +236,9 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 				node, b, errDigest := digestDirectory(ctx, path, u.dirChildren.load(key))
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
+					// traceTag(ctx, "err", errDigest)
 					return false
 				}
-				debugf(ctx, "visit.post.dir", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
 				u.dirChildren.append(parentKey, node)
 				// ctx = traceStart(ctx, "walk->out", "path", req.Path, "real_path", realPath)
 				out <- UploadRequest{
@@ -247,7 +247,7 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 					Digest: digest.NewFromProtoUnvalidated(node.Digest),
 				}
 				u.nodeCache.Store(key, node)
-				// ctx = traceEnd(ctx)
+				// ctx = traceEnd(ctx, "dir", 1, "digest", node.Digest)
 				return true
 
 			case info.Mode().IsRegular():
@@ -256,14 +256,14 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 				node, blb, errDigest := u.digestFile(ctx, realPath, info)
 				if errDigest != nil {
 					err = errors.Join(errDigest, err)
+					// traceTag(ctx, "err", errDigest)
 					return false
 				}
-				debugf(ctx, "visit.post.file", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
 				node.Name = path.Base().String()
 				u.nodeCache.Store(key, node)
 				u.dirChildren.append(parentKey, node)
 				if blb == nil {
-					debugf(ctx, "visit.post.file.cached", "path", path, "real_path", realPath, "digest", node.Digest, "fid", req.Exclude)
+					// traceTag(ctx, "cached", 1, "digest", node.Digest)
 					return true
 				}
 				// ctx = traceStart(ctx, "walk->out", "path", req.Path, "real_path", realPath)
@@ -273,22 +273,22 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 					reader: blb.r,
 					Digest: digest.NewFromProtoUnvalidated(node.Digest),
 				}
-				// ctx = traceEnd(ctx)
+				// ctx = traceEnd(ctx, "file", 1, "digest", node.Digest)
 				return true
 
 			default:
 				// Ignore everything else (e.g. sockets and pipes).
-				debugf(ctx, "visit.post.other", "path", path, "real_path", realPath)
+				// traceTag(ctx, "other", 1)
+				return true
 			}
-			return true
 		},
 
 		Symlink: func(path impath.Absolute, realPath impath.Absolute, _ fs.FileInfo) (action walker.SymlinkAction, ok bool) {
-			debugf(ctx, "visit.symlink", "path", path, "real_path", realPath, "slo", req.SymlinkOptions, "fid", req.Exclude)
+			// traceTag(ctx, "symlink", 1, "slo", req.SymlinkOptions)
 
 			select {
 			case <-ctx.Done():
-				debugf(ctx, "cancel")
+				// traceTag(ctx, "canceled", 1)
 				return walker.SkipSymlink, false
 			default:
 			}
@@ -301,6 +301,7 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 			wg, pathClaimed := u.nodeCache.Load(key)
 			if !pathClaimed {
 				err = errors.Join(serrorf(ctx, "attempted to post-access a non-claimed path", "path", path), err)
+				// traceTag(ctx, "err", err)
 				return walker.SkipSymlink, false
 			}
 			defer func() {
@@ -316,6 +317,7 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 			node, nextStep, errDigest := digestSymlink(ctx, req.Path, realPath, req.SymlinkOptions)
 			if errDigest != nil {
 				err = errors.Join(errDigest, err)
+				// traceTag(ctx, errDigest)
 				return walker.SkipSymlink, false
 			}
 			if node != nil {
@@ -326,7 +328,7 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 				// Unclaim so that other walkers can add the target to their queue.
 				u.nodeCache.Delete(key)
 			}
-			debugf(ctx, "visit.symlink.symlink", "path", path, "real_path", realPath, "slo", req.SymlinkOptions, "step", nextStep, "fid", req.Exclude)
+			// traceTag(ctx, "step", nextStep)
 			return nextStep, true
 		},
 	})
@@ -341,9 +343,6 @@ func (u *uploader) walkDigest(ctx context.Context, req UploadRequest, out chan<-
 // Note that the target includes hierarchy information, without specific names.
 // Another example: if the root is /a, the symilnk is b/c and the target is foo, the name will be c, and the target will be foo.
 func digestSymlink(ctx context.Context, root impath.Absolute, path impath.Absolute, slo slo.Options) (*repb.SymlinkNode, walker.SymlinkAction, error) {
-	// ctx = traceStart(ctx, "digest_link")
-	// defer traceEnd(ctx)
-
 	if slo.Skip() {
 		return nil, walker.SkipSymlink, nil
 	}
@@ -407,9 +406,6 @@ func digestSymlink(ctx context.Context, root impath.Absolute, path impath.Absolu
 // No syscalls are made in this method.
 // Only the base of path is used. No ancenstory information is included in the returned node.
 func digestDirectory(ctx context.Context, path impath.Absolute, children []proto.Message) (*repb.DirectoryNode, []byte, error) {
-	// ctx = traceStart(ctx, "digest_dir")
-	// defer traceEnd(ctx)
-
 	dir := &repb.Directory{}
 	node := &repb.DirectoryNode{
 		Name: path.Base().String(),
@@ -451,7 +447,7 @@ func digestDirectory(ctx context.Context, path impath.Absolute, children []proto
 //
 // If the returned err is not nil, both tokens are released before returning.
 func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs.FileInfo) (node *repb.FileNode, blb *blob, err error) {
-	// ctx = traceStart(ctx, "digest_file")
+	// ctx = traceStart(ctx, "digest_file", "path", path, "size", info.Size())
 	// defer traceEnd(ctx)
 
 	// Always return a clone to ensure the cached version remains owned by the cache.
@@ -469,16 +465,16 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 		m, ok := u.fileNodeCache.LoadOrStore(path, wg)
 		// Claimed.
 		if !ok {
-			debugf(ctx, "file.claimed", "path", path)
+			// traceTag(ctx, "claimed", 1)
 			break
 		}
 		// Cached.
 		if n, ok := m.(*repb.FileNode); ok {
-			debugf(ctx, "file.cached", "path", path)
+			// traceTag(ctx, "cached", 1)
 			return n, nil, nil
 		}
 		// Previously calimed; wait for it.
-		debugf(ctx, "file.defer", "path", path)
+		// traceTag(ctx, "defered", 1)
 		m.(*sync.WaitGroup).Wait()
 	}
 	// Not cached or previously calimed; Compute it.
@@ -515,7 +511,7 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 			return nil, nil, errors.Join(serrorf(ctx, "failed to parse digest from x-attribute", "path", path), err)
 		}
 		node.Digest = dg.ToProto()
-		debugf(ctx, "file.xattr", "path", path, "size", info.Size())
+		// traceTag(ctx, "xattr", 1)
 		return node, &blob{}, nil
 	}
 
@@ -546,7 +542,7 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 
 	// Small: in-memory blob.
 	if info.Size() <= u.ioCfg.SmallFileSizeThreshold {
-		debugf(ctx, "file.small", "path", path, "size", info.Size())
+		// traceTag(ctx, "small", 1)
 		f, err := os.Open(path.String())
 		if err != nil {
 			return nil, nil, err
@@ -568,7 +564,7 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 
 	// Medium: blob with path.
 	if info.Size() < u.ioCfg.LargeFileSizeThreshold {
-		debugf(ctx, "file.medium", "path", path, "size", info.Size())
+		// traceTag(ctx, "medium", 1)
 		dg, errDigest := digest.NewFromFile(path.String())
 		if errDigest != nil {
 			return nil, nil, errDigest
@@ -578,7 +574,7 @@ func (u *uploader) digestFile(ctx context.Context, path impath.Absolute, info fs
 	}
 
 	// Large: blob with a reader.
-	debugf(ctx, "file.large", "path", path, "size", info.Size())
+	// traceTag(ctx, "large", 1)
 	f, err := os.Open(path.String())
 	if err != nil {
 		return nil, nil, err

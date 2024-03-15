@@ -16,7 +16,7 @@ func (t *throttler) acquire(ctx context.Context) bool {
 	for {
 		select {
 		case t.ch <- struct{}{}:
-			debugf(ctxWithLogDepthInc(ctx), "throttler.acquire")
+			// traceTag(ctx, "throttler.acquire", 1)
 			return true
 		case <-ctx.Done():
 			return false
@@ -28,7 +28,7 @@ func (t *throttler) acquire(ctx context.Context) bool {
 func (t *throttler) release(ctx context.Context) {
 	select {
 	case <-t.ch:
-		debugf(ctxWithLogDepthInc(ctx), "throttler.release")
+        // traceTag(ctx, "throttler.release", 1)
 	default:
 		errorf(ctx, "no token to release")
 	}
@@ -37,6 +37,11 @@ func (t *throttler) release(ctx context.Context) {
 // len returns the number of acquired tokens.
 func (t *throttler) len() int {
 	return len(t.ch)
+}
+
+// cap returns the total number of tokens (the limit).
+func (t *throttler) cap() int {
+    return cap(t.ch)
 }
 
 // newThrottler creates a new instance that allows up to n tokens to be acquired.

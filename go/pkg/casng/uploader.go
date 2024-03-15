@@ -81,6 +81,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -161,7 +162,7 @@ type uploader struct {
 	// gRPC throttling controls.
 	queryThrottler  *throttler // Controls concurrent calls to the query API.
 	uploadThrottler *throttler // Controls concurrent calls to the batch API.
-	streamThrottle  *throttler // Controls concurrent calls to the byte streaming API.
+	streamThrottler *throttler // Controls concurrent calls to the byte streaming API.
 
 	// IO controls.
 	ioCfg            IOConfig
@@ -329,7 +330,7 @@ func newUploader(
 
 		queryThrottler:  newThrottler(int64(queryCfg.ConcurrentCallsLimit)),
 		uploadThrottler: newThrottler(int64(uploadCfg.ConcurrentCallsLimit)),
-		streamThrottle:  newThrottler(int64(streamCfg.ConcurrentCallsLimit)),
+		streamThrottler: newThrottler(int64(streamCfg.ConcurrentCallsLimit)),
 
 		ioCfg: ioCfg,
 		buffers: sync.Pool{
@@ -372,6 +373,11 @@ func newUploader(
 		u.cleanupWg.Done()
 	}()
 
+	go func() {
+		for x := range traceCountCh {
+			traceCount += x
+		}
+	}()
 	return u, nil
 }
 
@@ -402,6 +408,7 @@ func (u *uploader) close(ctx context.Context) {
 
 	log.Info("waiting for trace collectors")
 	traceWg.Wait()
+	close(traceCountCh)
 
 	log.Info("waiting for cleanup")
 	close(metricsCh)
@@ -419,7 +426,7 @@ func (u *uploader) Done() chan struct{} {
 
 func (u *uploader) logBeat() {
 	interval := time.Minute
-	if log.V(3) {
+	if bool(log.V(3)) {
 		interval = time.Second
 	} else if log.V(2) {
 		interval = 30 * time.Second
@@ -428,6 +435,15 @@ func (u *uploader) logBeat() {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	i := 0
+	kvs := []string{
+		"#", "0",
+		"open_files_tokens_util", "0",
+		"large_open_files_tokens_util", "0",
+		"query_tokens_util", "0",
+		"batch_tokens_util", "0",
+		"stream_tokens_util", "0",
+		"traces", "0",
+	}
 	for {
 		select {
 		case <-u.logBeatCloseCh:
@@ -436,15 +452,20 @@ func (u *uploader) logBeat() {
 		}
 
 		i++
-		log.Infof("beat; %s", fmtKv(
-			"#", i,
-			"open_files", u.ioThrottler.len(),
-			"large_open_files", u.ioLargeThrottler.len(),
-			"querying", u.queryThrottler.len(),
-			"batching", u.uploadThrottler.len(),
-			"streaming", u.streamThrottle.len(),
-		))
+
+		kvs[1] = strconv.Itoa(i)
+		kvs[3] = fmtRate(u.ioThrottler.len(), u.ioThrottler.cap())
+		kvs[5] = fmtRate(u.ioLargeThrottler.len(), u.ioLargeThrottler.cap())
+		kvs[7] = fmtRate(u.queryThrottler.len(), u.queryThrottler.cap())
+		kvs[9] = fmtRate(u.uploadThrottler.len(), u.uploadThrottler.cap())
+		kvs[11] = fmtRate(u.streamThrottler.len(), u.streamThrottler.cap())
+		kvs[13] = strconv.Itoa(traceCount)
+		log.Infof("beat; %s", strings.Join(kvs, ", "))
 	}
+}
+
+func fmtRate(x, y int) string {
+	return fmt.Sprintf("%.2f", (float64(x)/float64(y))*100)
 }
 
 func isExec(mode fs.FileMode) bool {

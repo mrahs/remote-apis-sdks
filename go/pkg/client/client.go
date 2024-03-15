@@ -785,7 +785,7 @@ func NewClientFromConnection(ctx context.Context, instanceName string, conn, cas
 		}
 		queryCfg := casng.GRPCConfig{
 			InstanceName:         instanceName,
-			ConcurrentCallsLimit: int(client.casConcurrency),
+			ConcurrentCallsLimit: int(client.casConcurrency * 10),
 			BytesLimit:           int(client.MaxBatchSize),
 			ItemsLimit:           queryItemsLimit,
 			BundleTimeout:        time.Duration(client.UnifiedUploadTickDuration),
