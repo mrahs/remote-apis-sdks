@@ -9,7 +9,6 @@ import (
 	"time"
 
 	log "github.com/golang/glog"
-	"github.com/pborman/uuid"
 
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 )
@@ -32,76 +31,6 @@ func serrorf(ctx context.Context, msg string, kv ...any) error {
 
 func errorf(ctx context.Context, msg string, kv ...any) {
 	log.ErrorDepthf(1, "%s; %s", msg, fmtCtx(ctx, kv...))
-}
-
-func traceStart(ctx context.Context, region string, kv ...any) context.Context {
-	if !verbose {
-		return ctx
-	}
-
-	traceCountCh <- 1
-	traceWg.Add(1)
-
-	trace := &ctxTrace{
-		id:        uuid.New(),
-		region:    region,
-		start:     time.Now(),
-		labels:    mergeKv(nil, kv...),
-		metrics:   mergeKvMetrics(nil, kv...),
-		parentCtx: ctx,
-	}
-	if parentTrace := traceFromCtx(ctx); parentTrace != nil {
-		prefix := ""
-		if parentTrace.prefix != "" {
-			prefix = "." + parentTrace.prefix
-		}
-		trace.prefix = prefix + parentTrace.region
-	}
-	return context.WithValue(ctx, ctxKeyTrace, trace)
-}
-
-// also add numeric labels to metrics.
-func traceTag(ctx context.Context, kv ...any) {
-	if !verbose {
-		return
-	}
-
-	trace := traceFromCtx(ctx)
-	if trace == nil {
-		log.WarningDepth(1, "no trace to tag")
-		return
-	}
-	trace.labels = mergeKv(trace.labels, kv...)
-	trace.metrics = mergeKvMetrics(trace.metrics, kv...)
-}
-
-func traceEnd(ctx context.Context, kv ...any) context.Context {
-	if !verbose {
-		return ctx
-	}
-
-	trace := traceFromCtx(ctx)
-	if trace == nil {
-		log.WarningDepth(1, "no trace to end")
-		return ctx
-	}
-
-	traceCountCh <- -1
-
-	trace.labels = mergeKv(trace.labels, kv...)
-	trace.metrics = mergeKvMetrics(trace.metrics, kv...)
-	trace.end = time.Now()
-
-	if trace.labels["err"] != nil {
-		log.ErrorDepth(1, fmtTrace(trace))
-	}
-
-	go func() {
-		collectTraceMetrics(trace)
-		traceWg.Done()
-	}()
-
-	return trace.parentCtx
 }
 
 // Internal stuff that should not be used outside this file.
@@ -292,14 +221,14 @@ func fmtCtx(ctx context.Context, kv ...any) string {
 }
 
 func fmtTrace(trace *ctxTrace) string {
-    if trace == nil {
-        return ""
-    }
+	if trace == nil {
+		return ""
+	}
 	sb := strings.Builder{}
 	sb.WriteString(fmt.Sprintf("%s, %s", trace.region, trace.end.Sub(trace.start)))
 	if len(trace.labels) > 0 {
 		for k, v := range trace.labels {
-            sb.WriteString(", ")
+			sb.WriteString(", ")
 			sb.WriteString(fmt.Sprintf("%s=%v", k, v))
 		}
 	}

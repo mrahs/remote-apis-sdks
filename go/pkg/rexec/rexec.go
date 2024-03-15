@@ -304,7 +304,7 @@ func (ec *Context) ngUploadInputs() error {
 			continue
 		}
 		// Mark ancestors as seen to skip them if also included as virtual inputs.
-        // This is required to avoid caching an acenstor before processing its descendants.
+		// This is required to avoid caching an acenstor before processing its descendants.
 		parent := absPath.Dir()
 		for !pathSeen[parent] && parent.String() != execRoot.String() {
 			pathSeen[parent] = true

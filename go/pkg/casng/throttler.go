@@ -28,7 +28,7 @@ func (t *throttler) acquire(ctx context.Context) bool {
 func (t *throttler) release(ctx context.Context) {
 	select {
 	case <-t.ch:
-        // traceTag(ctx, "throttler.release", 1)
+		// traceTag(ctx, "throttler.release", 1)
 	default:
 		errorf(ctx, "no token to release")
 	}
@@ -41,7 +41,7 @@ func (t *throttler) len() int {
 
 // cap returns the total number of tokens (the limit).
 func (t *throttler) cap() int {
-    return cap(t.ch)
+	return cap(t.ch)
 }
 
 // newThrottler creates a new instance that allows up to n tokens to be acquired.

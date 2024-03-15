@@ -31,8 +31,8 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 	u.batchWorkerWg.Add(1)
 	defer u.batchWorkerWg.Done()
 
-	// ctx = traceStart(ctx, "batch_processor")
-	// defer traceEnd(ctx)
+	ctx = traceStart(ctx, "batch_processor")
+	defer traceEnd(ctx)
 
 	// Ensure all in-flight responses are sent before returning.
 	callWg := sync.WaitGroup{}
@@ -63,8 +63,8 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 		}
 		// Block the batcher if the concurrency limit is reached.
 		if !u.uploadThrottler.acquire(ctx) {
-            // new ctx for this scope
-            // ctx := traceStart(ctx, "dispatch", "dst", "out", "err", ctx.Err())
+			// new ctx for this scope
+			ctx := traceStart(ctx, "dispatch", "dst", "out", "err", ctx.Err())
 			// Ensure responses are dispatched before aborting.
 			for d := range bundle {
 				out <- UploadResponse{
@@ -73,7 +73,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 					Err:    context.Canceled,
 				}
 			}
-			// traceEnd(ctx)
+			traceEnd(ctx)
 			return
 		}
 
@@ -101,7 +101,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 			case bool:
 				done = true
 				if deferred == 0 {
-					// traceTag(ctx, "bundle.done", len(bundle))
+					traceTag(ctx, "bundle.done", len(bundle))
 					dispatch()
 					return
 				}
@@ -110,7 +110,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 				// A deferred request was sent back.
 				deferred--
 				if done && deferred == 0 {
-					// traceTag(ctx, "bundle.done", len(bundle))
+					traceTag(ctx, "bundle.done", len(bundle))
 					dispatch()
 					return
 				}
@@ -122,15 +122,15 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 				continue
 			}
 
-            // new ctx for curent req
-            // ctx := traceStart(ctx, "bundle.append", "digest", req.Digest)
+			// new ctx for curent req
+			ctx := traceStart(ctx, "bundle.append", "digest", req.Digest)
 
 			// Unify.
 			item, ok := bundle[req.Digest]
 			if ok {
 				item.copies++
 				bundle[req.Digest] = item
-				// traceEnd(ctx, "dst", "unified", "copies", item.copies+1)
+				traceEnd(ctx, "dst", "unified", "copies", item.copies+1)
 				continue
 			}
 
@@ -149,13 +149,13 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 							CacheHitCount:      1,
 						},
 					}
-					// traceEnd(ctx, "dst", "cached")
+					traceEnd(ctx, "dst", "cached")
 					continue
 				}
 				cachedWg, ok := cached.(*sync.WaitGroup)
 				if !ok {
 					log.Errorf("unexpected item type in batchCache: %T", cached)
-					// traceEnd(ctx, "err", "unexpected message type")
+					traceEnd(ctx, "err", "unexpected message type")
 					continue
 				}
 				deferred++
@@ -166,7 +166,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 					pipe <- req
 					pipe <- -1
 				}()
-				// traceEnd(ctx, "dst", "deferred")
+				traceEnd(ctx, "dst", "deferred")
 				continue
 			}
 
@@ -179,7 +179,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 						Err:    err,
 					}
 					cachedWg.Done()
-					// traceEnd(ctx, "dst", "out", "err", err)
+					traceEnd(ctx, "dst", "out", "err", err)
 					continue
 				}
 				req.Bytes = bytes
@@ -188,7 +188,7 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 			// If the blob doesn't fit in the current bundle, cycle it.
 			itemSize := u.uploadBatchRequestItemBaseSize + int(req.Digest.Size)
 			if bundleSize+itemSize >= u.batchRPCCfg.BytesLimit {
-				// traceTag(ctx, "bundle.size", bundleSize, "bundle.excess", itemSize)
+				traceTag(ctx, "bundle.size", bundleSize, "bundle.excess", itemSize)
 				dispatch()
 			}
 
@@ -202,12 +202,12 @@ func (u *uploader) batchProcessor(ctx context.Context, in <-chan UploadRequest, 
 
 			// If the bundle is full, cycle it.
 			if len(bundle) >= u.batchRPCCfg.ItemsLimit {
-				// traceTag(ctx, "bundle.full", len(bundle))
+				traceTag(ctx, "bundle.full", len(bundle))
 				dispatch()
 			}
-			// traceEnd(ctx)
+			traceEnd(ctx)
 		case <-bundleTicker.C:
-			// traceTag(ctx, "bundle.timeout", len(bundle))
+			traceTag(ctx, "bundle.timeout", len(bundle))
 			dispatch()
 		}
 	}
@@ -224,7 +224,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 	failed := make(map[digest.Digest]error)
 	digestRetryCount := make(map[digest.Digest]int64)
 
-	// ctx = traceStart(ctx, "grpc")
+	ctx = traceStart(ctx, "grpc")
 	err := retry.WithPolicy(ctx, u.batchRPCCfg.RetryPredicate, u.batchRPCCfg.RetryPolicy, func() error {
 		// This call can have partial failures. Only retry retryable failed requests.
 		ctx, ctxCancel := context.WithTimeout(ctx, u.batchRPCCfg.Timeout)
@@ -251,15 +251,15 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 			uploaded = append(uploaded, digest.NewFromProtoUnvalidated(r.Digest))
 		}
 		if l := len(req.Requests); l > 0 {
-			// traceTag(ctx, "batch.grpc.retry", l)
+			traceTag(ctx, "batch.grpc.retry", l)
 		}
 		return reqErr
 	})
-	// ctx = traceEnd(ctx,
-		// "count", len(bundle), "uploaded", len(uploaded), "failed", len(failed),
-		// "req_failed", len(bundle)-len(uploaded)-len(failed))
+	ctx = traceEnd(ctx,
+		"count", len(bundle), "uploaded", len(uploaded), "failed", len(failed),
+		"req_failed", len(bundle)-len(uploaded)-len(failed))
 
-	// ctx = traceStart(ctx, "grpc->out")
+	ctx = traceStart(ctx, "grpc->out")
 	// Report uploaded.
 	for _, d := range uploaded {
 		item := bundle[d]
@@ -289,7 +289,7 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 				Stats:  sCached,
 			}
 		}
-		// traceTag(ctx, "uploaded", 1, "digest", d)
+		traceTag(ctx, "uploaded", 1, "digest", d)
 		u.batchCache.Store(d, true)
 		item.wg.Done()
 		delete(bundle, d)
@@ -314,20 +314,20 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 			Stats:  s,
 			Err:    errors.Join(ErrGRPC, dErr),
 		}
-		// traceTag(ctx, "failed", 1, "digest", d)
+		traceTag(ctx, "failed", 1, "digest", d)
 		u.batchCache.Delete(d)
 		item.wg.Done()
 		delete(bundle, d)
 	}
 
 	if len(bundle) == 0 {
-		// traceEnd(ctx)
+		traceEnd(ctx)
 		return
 	}
 
 	if err == nil {
 		err = serrorf(ctx, "server did not return a response for some requests", "count", len(bundle))
-		// traceTag(ctx, "err", "incomplete response")
+		traceTag(ctx, "err", "incomplete response")
 	}
 	err = errors.Join(ErrGRPC, err)
 
@@ -348,11 +348,11 @@ func (u *uploader) callBatchUpload(ctx context.Context, bundle uploadBundle, out
 			Stats:  s,
 			Err:    err,
 		}
-		// traceTag(ctx, "failed", 1, "digest", d)
+		traceTag(ctx, "failed", 1, "digest", d)
 		u.batchCache.Delete(d)
 		item.wg.Done()
 	}
-	// traceEnd(ctx)
+	traceEnd(ctx)
 }
 
 func (u *uploader) loadRequestBytes(ctx context.Context, req UploadRequest) (bytes []byte, err error) {

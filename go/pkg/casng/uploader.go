@@ -73,7 +73,7 @@ package casng
 //       this ensures the whole pipeline is drained properly.
 //
 // Logging:
-//  Level 4 turns on verbose logging.
+//  Level 4 turns on debug logs and tracing. Tracing only logs errors, but also prints a summary of metrics.
 //  Level 5 turns on merkle tree comparison with the client pkg.
 
 import (

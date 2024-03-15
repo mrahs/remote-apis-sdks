@@ -40,8 +40,8 @@ type namedDigest interface {
 // In other words, if an error is returned, any digest that is not in the returned slice is not missing.
 // If no error is returned, the returned slice contains all the missing digests.
 func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Digest) (missing []digest.Digest, err error) {
-	// ctx = traceStart(ctx, "missing_blobs", "count", len(digests))
-	// defer traceEnd(ctx, "err", err)
+	ctx = traceStart(ctx, "missing_blobs", "count", len(digests))
+	defer traceEnd(ctx, "err", err)
 
 	if len(digests) == 0 {
 		return nil, nil
@@ -71,7 +71,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 	if len(batches) == 0 {
 		return nil, nil
 	}
-	// traceTag(ctx, "deduped", len(dgSet))
+	traceTag(ctx, "deduped", len(dgSet))
 
 	// Call remote.
 	missing = make([]digest.Digest, 0, len(dgSet))
@@ -99,7 +99,7 @@ func (u *BatchingUploader) MissingBlobs(ctx context.Context, digests []digest.Di
 			delete(dgSet, d)
 		}
 	}
-	// traceTag(ctx, "missing", len(missing))
+	traceTag(ctx, "missing", len(missing))
 
 	// Record cache hits.
 	for d := range dgSet {
@@ -144,8 +144,8 @@ func (u *BatchingUploader) WriteBytesPartial(ctx context.Context, name string, r
 }
 
 func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, size, offset int64, finish bool) (stats Stats, err error) {
-	// ctx = traceStart(ctx, "write_bytes", "name", name, "size", size, "offset", offset, "finish", finish, "chunk_size", u.ioCfg.BufferSize)
-	// defer traceEnd(ctx, "err", err)
+	ctx = traceStart(ctx, "write_bytes", "name", name, "size", size, "offset", offset, "finish", finish, "chunk_size", u.ioCfg.BufferSize)
+	defer traceEnd(ctx, "err", err)
 
 	// Read raw bytes if compression is disabled.
 	src := r
@@ -156,7 +156,7 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 	var encWg sync.WaitGroup
 	var withCompression bool // Used later to ensure the pipe is closed.
 	if IsCompressedWriteResourceName(name) {
-		// traceTag(ctx, "compressing", true)
+		traceTag(ctx, "compressing", true)
 		withCompression = true
 		pr, pw := io.Pipe()
 		// Closing pr always returns a nil error, but also sends ErrClosedPipe to pw.
@@ -322,14 +322,14 @@ func (u *uploader) writeBytes(ctx context.Context, name string, r io.Reader, siz
 //
 // This method must not be called after cancelling the uploader's context.
 func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) (uploaded []digest.Digest, stats Stats, err error) {
-	// ctx = traceStart(ctx, "upload", "count", len(reqs))
-	// defer traceEnd(ctx, "err", err)
+	ctx = traceStart(ctx, "upload", "count", len(reqs))
+	defer traceEnd(ctx, "err", err)
 
 	if len(reqs) == 0 {
 		return nil, stats, nil
 	}
 
-    undigested := make([]UploadRequest, 0, len(reqs))
+	undigested := make([]UploadRequest, 0, len(reqs))
 	digested := make(map[digest.Digest]UploadRequest)
 	var digests []digest.Digest
 	for _, r := range reqs {
@@ -346,7 +346,7 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) (u
 	if err != nil {
 		return nil, stats, err
 	}
-	// traceTag(ctx, "undigested", len(undigested))
+	traceTag(ctx, "undigested", len(undigested))
 
 	reqs = undigested
 	for _, d := range missing {
@@ -406,8 +406,8 @@ func (u *BatchingUploader) Upload(ctx context.Context, reqs ...UploadRequest) (u
 
 // DigestTree returns the digest of the merkle tree for root.
 func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute, slo symlinkopts.Options, exclude walker.Filter) (rootDg digest.Digest, stats Stats, err error) {
-	// ctx = traceStart(ctx, "digest_tree", "path", root, "slo", slo, "filter", exclude)
-	// defer traceEnd(ctx, "err", err)
+	ctx = traceStart(ctx, "digest_tree", "path", root, "slo", slo, "filter", exclude)
+	defer traceEnd(ctx, "err", err)
 
 	in := make(chan UploadRequest)
 	out := make(chan any)
@@ -432,7 +432,7 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 
 	for dr := range out {
 		if ur, ok := dr.(UploadRequest); ok {
-			// traceTag(ctx, "ignored", 1, "path", ur.Path)
+			traceTag(ctx, "ignored", 1, "path", ur.Path)
 			if ur.reader != nil {
 				u.ioThrottler.release(ctx)
 				u.ioLargeThrottler.release(ctx)
@@ -466,8 +466,8 @@ func (u *BatchingUploader) DigestTree(ctx context.Context, root impath.Absolute,
 // All requests must share the same filter. Digest fields on the requests are ignored to ensure proper hierarchy caching via the internal digestion process.
 // remoteWorkingDir replaces workingDir inside the merkle tree such that the server is only aware of remoteWorkingDir.
 func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats Stats, err error) {
-	// ctx = traceStart(ctx, "upload_tree", "count", len(reqs))
-	// defer traceEnd(ctx, "err", err)
+	ctx = traceStart(ctx, "upload_tree", "count", len(reqs))
+	defer traceEnd(ctx, "err", err)
 
 	if len(reqs) == 0 {
 		return
@@ -488,7 +488,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	pathSeen := make(map[impath.Absolute]bool, len(reqs))
 	localPrefix := execRoot.Append(workingDir)
 	i := 0
-	// ctx = traceStart(ctx, "filter_id")
+	ctx = traceStart(ctx, "filter_id")
 	for _, r := range reqs {
 		if r.Exclude.ID != filterID {
 			err = serrorf(ctx, "cannot create a tree from requests with different exclusion filters", "f1", filterID, "f2", r.Exclude.ID)
@@ -503,8 +503,8 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		skip := false
 		for ; parent.String() != execRoot.String() && parent.String() != localPrefix.String(); parent = parent.Dir() {
 			if pathSeen[parent] {
-                // First iteration: parent == r.Path, and this means a duplicate request because the list is sorted (If not sorted, it may also mean a redundant ancestor).
-                // Other iterations: it means this request is redundant because an ancestor request already exist.
+				// First iteration: parent == r.Path, and this means a duplicate request because the list is sorted (If not sorted, it may also mean a redundant ancestor).
+				// Other iterations: it means this request is redundant because an ancestor request already exist.
 				skip = true
 				break
 			}
@@ -522,11 +522,11 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		reqs[i] = r
 		i++
 	}
-	// ctx = traceEnd(ctx, "fid", filterID, "count", len(reqs), "filtered", i, "err", err)
-    if err != nil {
-        return
-    }
-	// traceTag(ctx, "fid", filterID)
+	ctx = traceEnd(ctx, "fid", filterID, "count", len(reqs), "filtered", i, "err", err)
+	if err != nil {
+		return
+	}
+	traceTag(ctx, "fid", filterID)
 
 	// Reslice to take included (shifted) requests only.
 	reqs = reqs[:i]
@@ -542,7 +542,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 	// This block creates a flattened tree of the paths in reqs rooted at execRoot.
 	// Each key is an absolute path to a node in the tree and its value is a list of absolute paths that any of them can be a key as well.
 	// Example: /a: [/a/b /a/c], /a/b: [/a/b/foo.go], /a/c: [/a/c/bar.go]
-	// ctx = traceStart(ctx, "construct_tree")
+	ctx = traceStart(ctx, "construct_tree")
 	dirChildren := make(map[impath.Absolute]map[impath.Absolute]proto.Message, len(pathSeen))
 	for _, r := range reqs {
 		// Each request in reqs must correspond to a cached node.
@@ -580,13 +580,13 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			}
 		}
 	}
-	// ctx = traceEnd(ctx, "err", err)
-    if err != nil {
-        return
-    }
+	ctx = traceEnd(ctx, "err", err)
+	if err != nil {
+		return
+	}
 
 	// This block generates directory nodes for shared ancestors starting from leaf nodes and going up (DFS-style).
-	// ctx = traceStart(ctx, "fill_tree")
+	ctx = traceStart(ctx, "fill_tree")
 	dirReqs := make([]UploadRequest, 0, len(dirChildren))
 	stack := make([]impath.Absolute, 0, len(dirChildren))
 	stack = append(stack, execRoot)
@@ -641,10 +641,10 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		// Attach the node to its parent if it's not the exec root.
 		dirChildren[dir.Dir()][dir] = node
 	}
-	// ctx = traceEnd(ctx, "err", err)
-    if err != nil {
-        return
-    }
+	ctx = traceEnd(ctx, "err", err)
+	if err != nil {
+		return
+	}
 
 	// Upload the blobs of the shared ancestors.
 	moreUploaded, moreStats, moreErr := u.Upload(ctx, dirReqs...)
