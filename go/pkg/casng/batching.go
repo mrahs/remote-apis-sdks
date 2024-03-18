@@ -2,6 +2,7 @@ package casng
 
 import (
 	"context"
+	"crypto/md5"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -475,11 +476,16 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 
 	// 1st, Preprocess the set to deduplicate by ancestor and generate a deterministic filter ID.
 
-	// Multiple reqs sets may share some of the paths which would cause the u.dirChildren lookup below to mix children from two different sets which would corrupt the merkle tree.
-	// Updating the filterID for the set to a deterministic one ensures it gets its unique keys that are still shared between identical sets.
-	// The deterministic ID is the digest of the sorted list of paths concatenated with the ID of the original filter.
+	// Multiple reqs sets may share some of the paths but ultimately represent different views of the same tree.
+	// For example, in a set of [a/b/c.go, a/b/d.go], the directory a/b has two children, even if on disk there is also a/b/e.go.
+	// Another set like [a/b/c.go, a/b/d.go, a/b] would include a/b/e.go from disk because the parent a/b will be traversed.
+	// To ensure those two sets are cached in two unique entries, the filter ID includes a digest of all paths in the set after deduplication.
+	// I.e. the first set would have both a/b/c.go and a/b/d.go in the digest, but the second set only has a/b.
+	// This allows sharing cached nodes with seemingly different sets such as [a/b/c.go, a/b] and [a/b/e.go, a/b].
 	filter := reqs[0].Exclude
 	filterID := filter.ID
+	filterHasher := md5.New()
+	io.WriteString(filterHasher, filterID)
 
 	// An ancestor directory takes precedence over all of its descendants to ensure unlisted files are also included in traversal.
 	// Sorting the requests by path length ensures ancestors appear before descendants.
@@ -513,7 +519,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 			continue
 		}
 
-		r.Exclude.ID = filterID
+		io.WriteString(filterHasher, r.Path.String())
 		// Clear the digest to ensure proper hierarchy caching in the digester.
 		r.Digest.Hash = ""
 		r.Digest.Size = 0
@@ -522,6 +528,7 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 		reqs[i] = r
 		i++
 	}
+	filterID = fmt.Sprintf("%x", filterHasher.Sum(nil))
 	ctx = traceEnd(ctx, "fid", filterID, "count", len(reqs), "filtered", i, "err", err)
 	if err != nil {
 		return
@@ -530,6 +537,10 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 
 	// Reslice to take included (shifted) requests only.
 	reqs = reqs[:i]
+	// Update filter IDs to the unified one.
+	for _, r := range reqs {
+		r.Exclude.ID = filterID
+	}
 
 	// 2nd, Upload the requests first to digest the files and cache the nodes.
 	uploaded, stats, err = u.Upload(ctx, reqs...)
@@ -696,23 +707,34 @@ func (u *BatchingUploader) UploadTree(ctx context.Context, execRoot impath.Absol
 // replaceWorkingDir swaps remoteWorkingDir for workingDir in path which must be prefixed by root.
 // workingDir is assumed to be prefixed by root, and the returned path will be a descendant of root, but not necessarily a descendant of remoteWorkingDir.
 // Example: path=/root/out/foo.c, root=/root, workdingDir=out/reclient, remoteWorkingDir=set_by_reclient/a, result=/root/set_by_reclient/foo.c
+// An empty remoteWorkingDir means it should be the same as workdingDir.
 func replaceWorkingDir(ctx context.Context, path, root impath.Absolute, workingDir, remoteWorkingDir impath.Relative) (impath.Absolute, error) {
 	if !strings.HasPrefix(path.String(), root.String()) {
-		return impath.Absolute{}, serrorf(ctx, "cannot replace working dir", "path", path, "root", root)
+		return impath.Absolute{}, serrorf(ctx, "cannot replace working dir for path outside root", "path", path, "root", root)
 	}
 
-	p := strings.TrimPrefix(path.String(), root.String()) // if root == '/', p is now relative
+	pRelRoot := strings.TrimPrefix(path.String(), root.String()) // if root == '/', p is now relative
 	// if root isn't the system root, there would be a leading path separator.
-	p = strings.TrimPrefix(p, string(filepath.Separator))
+	pRelRoot = strings.TrimPrefix(pRelRoot, string(filepath.Separator))
 
-	p, err := filepath.Rel(workingDir.String(), p)
+    if remoteWorkingDir.String() == "" {
+        return impath.Abs(root.String(), pRelRoot)
+    }
+
+	pRelWd, err := filepath.Rel(workingDir.String(), pRelRoot)
 	if err != nil {
 		return impath.Absolute{}, err
 	}
 
-	rp, err := impath.Rel(remoteWorkingDir.String(), p)
+	rp, err := impath.Rel(remoteWorkingDir.String(), pRelWd)
 	if err != nil {
 		return impath.Absolute{}, err
 	}
+
+    // If this leads to a path outside the root
+    if strings.HasPrefix(rp.String(), "..") {
+        return impath.Absolute{}, serrorf(ctx, "remote path is outside root", "path", path, "wd", workingDir, "rwd", remoteWorkingDir)
+    }
+
 	return root.Append(rp), nil
 }

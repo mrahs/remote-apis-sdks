@@ -257,13 +257,14 @@ func (ec *Context) ngUploadInputs() error {
 	if err != nil {
 		return err
 	}
+
 	slo := symlinkOpts(ec.client.GrpcClient.TreeSymlinkOpts, ec.cmd.InputSpec.SymlinkBehavior)
 	filter, err := exclusionsFilter(ec.cmd.InputSpec.InputExclusions)
 	if err != nil {
 		return err
 	}
-	log.V(2).Infof("req; m=ng.upload, exec_root=%s, working_dir=%s, remote_working_dir=%s, symlink_opts=%s, inputs=%d, virtual_inputs=%d, cmd_id=%s, exec_id=%s", execRoot, workingDir, remoteWorkingDir, slo, len(ec.cmd.InputSpec.Inputs), len(ec.cmd.InputSpec.VirtualInputs), cmdID, executionID)
-	log.V(4).Infof("req; m=ng.upload, exec_root=%s, working_dir=%s, remote_working_dir=%s, symlink_opts=%s, inputs=%+v, virtual_inputs=%+v, cmd_id=%s, exec_id=%s", execRoot, workingDir, remoteWorkingDir, slo, ec.cmd.InputSpec.Inputs, ec.cmd.InputSpec.VirtualInputs, cmdID, executionID)
+
+    // Start with real inputs because they trake precedence over virtual ones.
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+len(ec.cmd.InputSpec.VirtualInputs))
 	pathSeen := make(map[impath.Absolute]bool)
 	for _, p := range ec.cmd.InputSpec.Inputs {
@@ -274,6 +275,7 @@ func (ec *Context) ngUploadInputs() error {
 		absPath := execRoot.Append(rel)
 		pathSeen[absPath] = true
 		// Mark ancestors as seen to ensure any potential virtual parent is excluded.
+        // If a/b is virtual while a/b/c.go is real, we want to ignore the virtual a/b and compute the merkle tree node for the real one.
 		parent := absPath.Dir()
 		for !pathSeen[parent] && parent.String() != execRoot.String() {
 			pathSeen[parent] = true
@@ -281,14 +283,17 @@ func (ec *Context) ngUploadInputs() error {
 		}
 		reqs = append(reqs, casng.UploadRequest{Path: absPath, SymlinkOptions: slo, Exclude: filter})
 	}
+
 	// Append virtual inputs after real inputs in order to ignore any redundant virtual inputs.
-	// Sorting by path length descending is necessary to skip redundant ancestors. Otherwise, the conslidation in casng.UploadTree will skip descendants.
+    // Sorting by length (longest first) is necessary to skip redundant ancestors.
+    // If a/b, a/b/foo.c and a/b/bar.c are virtual paths, we want to skip a/b and compute it instead to ensure
+    // it contains the other two children.
 	sort.Slice(ec.cmd.InputSpec.VirtualInputs, func(i, j int) bool {
 		return len(ec.cmd.InputSpec.VirtualInputs[i].Path) > len(ec.cmd.InputSpec.VirtualInputs[j].Path)
 	})
 	for _, p := range ec.cmd.InputSpec.VirtualInputs {
 		if p.Path == "" {
-			return fmt.Errorf("empty virtual path; m=ng.upload, cmd_id=%s, exec_id=%s", cmdID, executionID)
+			return fmt.Errorf("empty virtual path; cmd_id=%s, exec_id=%s", cmdID, executionID)
 		}
 		// If the virtual path points to the execRoot, ignore it.
 		if p.Path == "." {
@@ -299,7 +304,7 @@ func (ec *Context) ngUploadInputs() error {
 			return err
 		}
 		absPath := execRoot.Append(rel)
-		// If it collides with a real path, ignore it to avoid corrupting the node cache.
+		// If a real path is already in the list, skip the virtual one.
 		if pathSeen[absPath] {
 			continue
 		}
@@ -323,7 +328,8 @@ func (ec *Context) ngUploadInputs() error {
 		}
 		reqs = append(reqs, r)
 	}
-	log.V(1).Infof("uploading inputs; m=ng.upload, count=%d, cmd_id=%s, exec_id=%s", len(reqs), cmdID, executionID)
+
+    log.V(1).Infof("uploading inputs: count=%d, cmd_id=%s, exec_id=%s", len(reqs), cmdID, executionID)
 	ctx := ec.ctx
 	var ngTree, clTree *string
 	if log.V(5) {
@@ -335,7 +341,7 @@ func (ec *Context) ngUploadInputs() error {
 	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ctx, execRoot, workingDir, remoteWorkingDir, reqs...)
 	if err != nil {
 		if log.V(5) {
-			log.Infof("upload error; m=ng.upload, cmd_id=%s, exec_id=%s\n%q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
+            log.Infof("upload error: cmd_id=%s, exec_id=%s\n%q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
 		}
 		return err
 	}
@@ -347,10 +353,10 @@ func (ec *Context) ngUploadInputs() error {
 		specStr := formatInputSpec(ec.cmd.InputSpec, "    ")
 		msg := fmt.Sprintf("ng=%s\n  cl=%s\n  spec\n%s\n  client_slo=%+v\n  ng_slo=%s\n  ng_tree\n%s\n  cl_tree\n%s", rootDg, rootDg2, specStr, ec.client.GrpcClient.TreeSymlinkOpts, slo, *ngTree, *clTree)
 		if rootDg.Hash != rootDg2.Hash {
-			log.Infof("root digest mismatch; m=ng.upload, cmd_id=%s, exec_id=%s\n  %s", cmdID, executionID, msg)
+			log.Infof("root digest mismatch; m=ng.upload, cmd_id=%s, exec_id=%s, exec_root=%s, wd=%s, rwd=%s\n  %s", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, msg)
 			return fmt.Errorf("root digest mismatch: ng=%s, cl=%s", rootDg, rootDg2)
 		}
-		log.Infof("root digest match; m=ng.upload, cmd_id=%s, exec_id=%s\n  %s", cmdID, executionID, msg)
+        // log.Infof("root digest match: cmd_id=%s, exec_id=%s, exec_root=%s, wd=%s, rwd=%s\n  %s", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, msg)
 	}
 	ec.Metadata.InputFiles = int(stats.InputFileCount)
 	ec.Metadata.InputDirectories = int(stats.InputDirCount)
@@ -363,12 +369,12 @@ func (ec *Context) ngUploadInputs() error {
 	if err != nil {
 		return err
 	}
-	log.V(1).Infof("command; m=ng.upload, digest=%s, cmd_id=%s, exec_id=%s", ec.cmdUe.Digest, cmdID, executionID)
+    log.V(1).Infof("command: digest=%s, cmd_id=%s, exec_id=%s", ec.cmdUe.Digest, cmdID, executionID)
 	err = ec.computeActionDg(rootDg, cmdPlatform)
 	if err != nil {
 		return err
 	}
-	log.V(1).Infof("action; m=ng.upload, digest=%s, cmd_id=%s, exec_id=%s", ec.acUe.Digest, cmdID, executionID)
+    log.V(1).Infof("action: digest=%s, cmd_id=%s, exec_id=%s", ec.acUe.Digest, cmdID, executionID)
 	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx,
 		casng.UploadRequest{Bytes: ec.acUe.Contents, Digest: ec.acUe.Digest},
 		casng.UploadRequest{Bytes: ec.cmdUe.Contents, Digest: ec.cmdUe.Digest},

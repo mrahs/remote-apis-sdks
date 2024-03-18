@@ -47,7 +47,7 @@ func TestReplaceWorkingDir(t *testing.T) {
 			root:     impath.MustAbs("/root"),
 			wd:       impath.MustRel("wd"),
 			rwd:      impath.MustRel(""),
-			wantPath: impath.MustAbs("/root/foo"),
+			wantPath: impath.MustAbs("/root/wd/foo"),
 		},
 		{
 			name:     "root_not_prefix",
@@ -65,6 +65,23 @@ func TestReplaceWorkingDir(t *testing.T) {
 			wd:       impath.MustRel("out/src"),
 			rwd:      impath.MustRel("rwd/a/b"),
 			wantPath: impath.MustAbs("/root/rwd/a/foo"),
+		},
+		{
+			name:     "outside_wd_empty_rwd",
+			path:     impath.MustAbs("/root/foo"),
+			root:     impath.MustAbs("/root"),
+			wd:       impath.MustRel("out/src"),
+			rwd:      impath.MustRel(""),
+			wantPath: impath.MustAbs("/root/foo"),
+		},
+		{
+			name:     "outside_wd_shallow_rwd",
+			path:     impath.MustAbs("/root/foo"),
+			root:     impath.MustAbs("/root"),
+			wd:       impath.MustRel("out/src"),
+			rwd:      impath.MustRel("rwd"),
+			wantPath: impath.Absolute{},
+			wantErr:  true,
 		},
 	}
 
