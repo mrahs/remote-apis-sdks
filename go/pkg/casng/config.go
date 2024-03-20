@@ -149,36 +149,36 @@ type Stats struct {
 	// It does not necessarily equal the total number of bytes uploaded/downloaded.
 	BytesRequested int64
 
-	// LogicalBytesMoved is the amount of BytesRequested that was processed.
+	// BytesTransferred is the amount of BytesRequested that was uploaded or downloaded.
 	// It cannot be larger than BytesRequested, but may be smaller in case of a partial response.
 	// The quantity is more granular for streaming than it is for batching. In streaming, it is an increment of the buffer size.
 	// For batching, it is a sum of the size of items that were batched.
-	LogicalBytesMoved int64
+	BytesTransferred int64
 
-	// TotalBytesMoved is the total number of bytes moved over the wire.
+	// BytesWiredTotal is the total number of bytes moved over the wire.
 	// This may not be accurate since a gRPC call may be interrupted in which case this number may be higher than the real one.
 	// It may be larger than (retries) or smaller than BytesRequested (compression, cache hits or partial response).
-	TotalBytesMoved int64
+	BytesWiredTotal int64
 
-	// EffectiveBytesMoved is the total number of bytes moved over the wire, excluding retries.
+	// BytesWiredEffective is the total number of bytes moved over the wire, excluding retries.
 	// This may not be accurate since a gRPC call may be interrupted in which case this number may be higher than the real one.
 	// For failures, this is reported as 0.
 	// It may be higher than BytesRequested (compression headers), but never higher than TotalBytesMoved.
-	EffectiveBytesMoved int64
+	BytesWiredEffective int64
 
-	// LogicalBytesCached is the total number of bytes not moved over the wire due to caching (either remotely or locally).
+	// BytesCached is the total number of bytes not moved over the wire due to caching (either remotely or locally).
 	// For failures, this is reported as 0.
-	LogicalBytesCached int64
+	BytesCached int64
 
-	// LogicalBytesStreamed is the total number of logical bytes moved by the streaming API.
+	// BytesStreamed is the total number of logical bytes moved by the streaming API.
 	// It may be larger than (retries) or smaller than (cache hits or partial response) than the requested size.
 	// For failures, this is reported as 0.
-	LogicalBytesStreamed int64
+	BytesStreamed int64
 
-	// LogicalBytesBatched is the total number of logical bytes moved by the batching API.
+	// BytesBatched is the total number of logical bytes moved by the batching API.
 	// It may be larger than (retries) or smaller than (cache hits or partial response) the requested size.
 	// For failures, this is reported as 0.
-	LogicalBytesBatched int64
+	BytesBatched int64
 
 	// InputFileCount is the number of processed regular files.
 	InputFileCount int64
@@ -189,11 +189,11 @@ type Stats struct {
 	// InputSymlinkCount is the number of processed symlinks (not the number of symlinks in the uploaded merkle tree which may be lower).
 	InputSymlinkCount int64
 
-	// CacheHitCount is the number of cache hits.
-	CacheHitCount int64
+	// CasHitCount is the number of cache hits from the CAS.
+	CasHitCount int64
 
-	// CacheMissCount is the number of cache misses.
-	CacheMissCount int64
+	// CasMissCount is the number of cache misses from the CAS.
+	CasMissCount int64
 
 	// DigestCount is the number of processed digests.
 	// The counter is incremened regardless of digestion failures.
@@ -205,6 +205,19 @@ type Stats struct {
 	// StreamedCount is the number of streamed files.
 	// For methods that accept bytes, the value is 1 upon success, 0 otherwise.
 	StreamedCount int64
+
+	// CachedInputCount is the number of inputs that were cached as merkle tree nodes.
+	CachedInputCount int64
+
+    CachedInputFileCount int64
+    CachedInputDirCount int64
+    CachedInputSymlinkCount int64
+
+	// InputStatCount is the number of accessed inputs (including files, directories and symlinks).
+	InputStatCount int64
+
+	// InputReadCount is the number of files read from disk.
+	InputReadCount int64
 }
 
 // Add mutates the stats by adding all the corresponding fields of the specified instance.
@@ -213,20 +226,26 @@ func (s *Stats) Add(other Stats) {
 		return
 	}
 	s.BytesRequested += other.BytesRequested
-	s.LogicalBytesMoved += other.LogicalBytesMoved
-	s.TotalBytesMoved += other.TotalBytesMoved
-	s.EffectiveBytesMoved += other.EffectiveBytesMoved
-	s.LogicalBytesCached += other.LogicalBytesCached
-	s.LogicalBytesStreamed += other.LogicalBytesStreamed
-	s.LogicalBytesBatched += other.LogicalBytesBatched
+	s.BytesTransferred += other.BytesTransferred
+	s.BytesWiredTotal += other.BytesWiredTotal
+	s.BytesWiredEffective += other.BytesWiredEffective
+	s.BytesCached += other.BytesCached
+	s.BytesStreamed += other.BytesStreamed
+	s.BytesBatched += other.BytesBatched
 	s.InputFileCount += other.InputFileCount
 	s.InputDirCount += other.InputDirCount
 	s.InputSymlinkCount += other.InputSymlinkCount
-	s.CacheHitCount += other.CacheHitCount
-	s.CacheMissCount += other.CacheMissCount
+	s.CasHitCount += other.CasHitCount
+	s.CasMissCount += other.CasMissCount
 	s.DigestCount += other.DigestCount
 	s.BatchedCount += other.BatchedCount
 	s.StreamedCount += other.StreamedCount
+	s.CachedInputCount += other.CachedInputCount
+    s.CachedInputFileCount += other.CachedInputFileCount
+    s.CachedInputDirCount += other.CachedInputDirCount
+    s.CachedInputSymlinkCount += other.CachedInputSymlinkCount
+	s.InputStatCount += other.InputStatCount
+	s.InputReadCount += other.InputReadCount
 }
 
 // ToCacheHit returns a copy of the stats that represents a cache hit of the original.
@@ -238,19 +257,19 @@ func (s *Stats) ToCacheHit() Stats {
 		return Stats{}
 	}
 	hit := *s
-	hit.LogicalBytesMoved = 0
-	hit.TotalBytesMoved = 0
-	hit.EffectiveBytesMoved = 0
-	hit.LogicalBytesCached = s.BytesRequested
-	hit.LogicalBytesStreamed = 0
-	hit.LogicalBytesBatched = 0
+	hit.BytesTransferred = 0
+	hit.BytesWiredTotal = 0
+	hit.BytesWiredEffective = 0
+	hit.BytesCached = s.BytesRequested
+	hit.BytesStreamed = 0
+	hit.BytesBatched = 0
 	// for trees
-	hit.CacheHitCount = hit.DigestCount
+	hit.CasHitCount = hit.DigestCount
 	// for blobs
-	if hit.CacheHitCount == 0 && hit.LogicalBytesCached > 0 {
-		hit.CacheHitCount = 1
+	if hit.CasHitCount == 0 && hit.BytesCached > 0 {
+		hit.CasHitCount = 1
 	}
-	hit.CacheMissCount = 0
+	hit.CasMissCount = 0
 	hit.BatchedCount = 0
 	hit.StreamedCount = 0
 	return hit

@@ -217,6 +217,8 @@ type uploader struct {
 	workerWg        sync.WaitGroup
 	cleanupWg       sync.WaitGroup
 
+	stats          Stats
+	statsCh        chan Stats
 	logBeatCloseCh chan struct{}
 	closeCh        chan struct{}
 }
@@ -354,6 +356,7 @@ func newUploader(
 		uploadBatchRequestItemBaseSize:   uploadBatchRequestItemBaseSize,
 		uploadBatchRequestItemBytesLimit: uploadBatchRequestItemBytesLimit,
 
+		statsCh:        make(chan Stats, queryCfg.ConcurrentCallsLimit),
 		logBeatCloseCh: make(chan struct{}),
 		closeCh:        make(chan struct{}),
 	}
@@ -373,9 +376,15 @@ func newUploader(
 		u.cleanupWg.Done()
 	}()
 
+	// go func() {
+	// for x := range traceCountCh {
+	// traceCount += x
+	// }
+	// }()
+
 	go func() {
-		for x := range traceCountCh {
-			traceCount += x
+		for s := range u.statsCh {
+			u.stats.Add(s)
 		}
 	}()
 	return u, nil
@@ -406,15 +415,17 @@ func (u *uploader) close(ctx context.Context) {
 	log.Info("waiting for other workers")
 	u.workerWg.Wait()
 
-	log.Info("waiting for trace collectors")
-	traceWg.Wait()
-	close(traceCountCh)
+	// log.Info("waiting for trace collectors")
+	// traceWg.Wait()
+	// close(traceCountCh)
 
 	log.Info("waiting for cleanup")
+	close(u.statsCh)
 	close(metricsCh)
 	close(u.logBeatCloseCh)
 	u.cleanupWg.Wait()
 
+	log.Infof("casng stats: %+v", u.stats)
 	log.Info("casng uploader done")
 	close(u.closeCh)
 }
@@ -425,11 +436,9 @@ func (u *uploader) Done() chan struct{} {
 }
 
 func (u *uploader) logBeat() {
-	interval := time.Minute
-	if bool(log.V(3)) {
+	interval := 5 * time.Second
+	if log.V(1) {
 		interval = time.Second
-	} else if log.V(2) {
-		interval = 30 * time.Second
 	}
 
 	ticker := time.NewTicker(interval)
@@ -442,7 +451,7 @@ func (u *uploader) logBeat() {
 		"query_tokens_util", "0",
 		"batch_tokens_util", "0",
 		"stream_tokens_util", "0",
-		"traces", "0",
+		// "traces", "0",
 	}
 	for {
 		select {
@@ -459,13 +468,45 @@ func (u *uploader) logBeat() {
 		kvs[7] = fmtRate(u.queryThrottler.len(), u.queryThrottler.cap())
 		kvs[9] = fmtRate(u.uploadThrottler.len(), u.uploadThrottler.cap())
 		kvs[11] = fmtRate(u.streamThrottler.len(), u.streamThrottler.cap())
-		kvs[13] = strconv.Itoa(traceCount)
+		// kvs[13] = strconv.Itoa(traceCount)
 		log.Infof("beat; %s", strings.Join(kvs, ", "))
 	}
 }
 
 func fmtRate(x, y int) string {
-	return fmt.Sprintf("%.2f", (float64(x)/float64(y))*100)
+	return fmt.Sprintf("%.2f%%", (float64(x)/float64(y))*100)
+}
+
+func fmtByteCount(c int64) string {
+	const unit = 1024
+	if c < unit {
+		return fmt.Sprintf("%d B", c)
+	}
+	div, exp := unit, 0
+	for n := c / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %ciB", float64(c)/float64(div), "KMGTPE"[exp])
+}
+
+func fmtCount(c int64) string {
+	in := strconv.FormatInt(c, 10)
+	numOfDigits := len(in)
+	numOfCommas := (numOfDigits - 1) / 3
+
+	out := make([]byte, len(in)+numOfCommas)
+
+	for i, j, k := len(in)-1, len(out)-1, 0; ; i, j = i-1, j-1 {
+		out[j] = in[i]
+		if i == 0 {
+			return string(out)
+		}
+		if k++; k == 3 {
+			j, k = j-1, 0
+			out[j] = ','
+		}
+	}
 }
 
 func isExec(mode fs.FileMode) bool {

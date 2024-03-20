@@ -19,8 +19,8 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 	u.queryWorkerWg.Add(1)
 	defer u.queryWorkerWg.Done()
 
-	ctx = traceStart(ctx, "query_processor")
-	defer traceEnd(ctx)
+	// ctx = traceStart(ctx, "query_processor")
+	// defer traceEnd(ctx)
 
 	// Ensure all in-flight responses are sent before returning.
 	callWg := sync.WaitGroup{}
@@ -35,14 +35,14 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 		// Block the processor if the concurrency limit is reached.
 		if !u.queryThrottler.acquire(ctx) {
 			// new ctx for this scope
-			ctx := traceStart(ctx, "query->out")
+			// ctx := traceStart(ctx, "query->out")
 			// Ensure responses are dispatched before aborting.
 			for d, reqs := range bundle {
 				for _, req := range reqs {
 					out <- MissingBlobsResponse{Digest: d, Err: ctx.Err(), req: req}
 				}
 			}
-			traceEnd(ctx)
+			// traceEnd(ctx)
 			return
 		}
 
@@ -62,16 +62,16 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 		select {
 		case req, ok := <-in:
 			if !ok {
-				traceTag(ctx, "bundle.done", len(bundle))
+				// traceTag(ctx, "bundle.done", len(bundle))
 				dispatch()
 				return
 			}
 			// new ctx for current req
-			ctx := traceStart(ctx, "bundle.append", "digest", req.Digest)
+			// ctx := traceStart(ctx, "bundle.append", "digest", req.Digest)
 
 			if _, ok := u.casPresenceCache.Load(req.Digest); ok {
 				out <- MissingBlobsResponse{Digest: req.Digest}
-				traceEnd(ctx, "dst", "cached")
+				// traceEnd(ctx, "dst", "cached")
 				continue
 			}
 
@@ -79,12 +79,12 @@ func (u *uploader) queryProcessor(ctx context.Context, in <-chan UploadRequest, 
 
 			// Check length threshold.
 			if len(bundle) >= u.queryRPCCfg.ItemsLimit {
-				traceTag(ctx, "bundle.full", len(bundle))
+				// traceTag(ctx, "bundle.full", len(bundle))
 				dispatch()
 			}
-			traceEnd(ctx)
+			// traceEnd(ctx)
 		case <-bundleTicker.C:
-			traceTag(ctx, "bundle.timeout", len(bundle))
+			// traceTag(ctx, "bundle.timeout", len(bundle))
 			dispatch()
 		}
 	}
@@ -105,7 +105,7 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryBundle, out
 
 	var res *repb.FindMissingBlobsResponse
 	var err error
-	ctx = traceStart(ctx, "grpc")
+	// ctx = traceStart(ctx, "grpc")
 	err = retry.WithPolicy(ctx, u.queryRPCCfg.RetryPredicate, u.queryRPCCfg.RetryPolicy, func() error {
 		ctx, ctxCancel := context.WithTimeout(ctx, u.queryRPCCfg.Timeout)
 		defer ctxCancel()
@@ -121,9 +121,9 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryBundle, out
 		err = errors.Join(ErrGRPC, err)
 		missing = digests
 	}
-	ctx = traceEnd(ctx, "count", len(digests), "missing", len(missing), "err", err)
+	// ctx = traceEnd(ctx, "count", len(digests), "missing", len(missing), "err", err)
 
-	ctx = traceStart(ctx, "grpc->out")
+	// ctx = traceStart(ctx, "grpc->out")
 	for _, dg := range missing {
 		d := digest.NewFromProtoUnvalidated(dg)
 		for _, req := range bundle[d] {
@@ -145,5 +145,5 @@ func (u *uploader) callMissingBlobs(ctx context.Context, bundle queryBundle, out
 			}
 		}
 	}
-	ctx = traceEnd(ctx)
+	// ctx = traceEnd(ctx)
 }

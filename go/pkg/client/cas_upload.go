@@ -622,6 +622,14 @@ func updateAndNotify(st *uploadState, bytesMoved int64, err error, missing bool)
 	st.ue = nil
 }
 
+func (c *Client) NgComputeMerkleTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...casng.UploadRequest) (rootDigest digest.Digest, upReqs []casng.UploadRequest, stats casng.Stats, err error) {
+    return c.ngCasUploader.ComputeMerkleTree(ctx, execRoot, workingDir, remoteWorkingDir, reqs...)
+}
+
+func (c *Client) NgUploadDigested(ctx context.Context, reqs ...casng.UploadRequest) (uploaded []digest.Digest, stats casng.Stats, err error) {
+	return c.ngCasUploader.UploadDigested(ctx, reqs...)
+}
+
 // NgUploadTree delegates to UploadTree of the casng package.
 func (c *Client) NgUploadTree(ctx context.Context, execRoot impath.Absolute, workingDir, remoteWorkingDir impath.Relative, reqs ...casng.UploadRequest) (rootDigest digest.Digest, uploaded []digest.Digest, stats casng.Stats, err error) {
 	return c.ngCasUploader.UploadTree(ctx, execRoot, workingDir, remoteWorkingDir, reqs...)

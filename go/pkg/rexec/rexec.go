@@ -250,9 +250,6 @@ func (ec *Context) computeInputs() error {
 func (ec *Context) ngUploadInputs() error {
 	cmdID, executionID := ec.cmd.Identifiers.CommandID, ec.cmd.Identifiers.ExecutionID
 
-	ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
-	defer func() { ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now() }()
-
 	execRoot, workingDir, remoteWorkingDir, err := cmdDirs(ec.cmd)
 	if err != nil {
 		return err
@@ -264,7 +261,7 @@ func (ec *Context) ngUploadInputs() error {
 		return err
 	}
 
-    // Start with real inputs because they trake precedence over virtual ones.
+	// Start with real inputs because they trake precedence over virtual ones.
 	reqs := make([]casng.UploadRequest, 0, len(ec.cmd.InputSpec.Inputs)+len(ec.cmd.InputSpec.VirtualInputs))
 	pathSeen := make(map[impath.Absolute]bool)
 	for _, p := range ec.cmd.InputSpec.Inputs {
@@ -275,7 +272,7 @@ func (ec *Context) ngUploadInputs() error {
 		absPath := execRoot.Append(rel)
 		pathSeen[absPath] = true
 		// Mark ancestors as seen to ensure any potential virtual parent is excluded.
-        // If a/b is virtual while a/b/c.go is real, we want to ignore the virtual a/b and compute the merkle tree node for the real one.
+		// If a/b is virtual while a/b/c.go is real, we want to ignore the virtual a/b and compute the merkle tree node for the real one.
 		parent := absPath.Dir()
 		for !pathSeen[parent] && parent.String() != execRoot.String() {
 			pathSeen[parent] = true
@@ -285,9 +282,9 @@ func (ec *Context) ngUploadInputs() error {
 	}
 
 	// Append virtual inputs after real inputs in order to ignore any redundant virtual inputs.
-    // Sorting by length (longest first) is necessary to skip redundant ancestors.
-    // If a/b, a/b/foo.c and a/b/bar.c are virtual paths, we want to skip a/b and compute it instead to ensure
-    // it contains the other two children.
+	// Sorting by length (longest first) is necessary to skip redundant ancestors.
+	// If a/b, a/b/foo.c and a/b/bar.c are virtual paths, we want to skip a/b and compute it instead to ensure
+	// it contains the other two children.
 	sort.Slice(ec.cmd.InputSpec.VirtualInputs, func(i, j int) bool {
 		return len(ec.cmd.InputSpec.VirtualInputs[i].Path) > len(ec.cmd.InputSpec.VirtualInputs[j].Path)
 	})
@@ -329,7 +326,7 @@ func (ec *Context) ngUploadInputs() error {
 		reqs = append(reqs, r)
 	}
 
-    log.V(1).Infof("uploading inputs: count=%d, cmd_id=%s, exec_id=%s", len(reqs), cmdID, executionID)
+	log.V(1).Infof("uploading inputs: count=%d, cmd_id=%s, exec_id=%s", len(reqs), cmdID, executionID)
 	ctx := ec.ctx
 	var ngTree, clTree *string
 	if log.V(5) {
@@ -338,10 +335,12 @@ func (ec *Context) ngUploadInputs() error {
 		ctx = context.WithValue(ctx, casng.CtxKeyNGTree, ngTree)
 		ctx = context.WithValue(ctx, casng.CtxKeyClientTree, clTree)
 	}
-	rootDg, missing, stats, err := ec.client.GrpcClient.NgUploadTree(ctx, execRoot, workingDir, remoteWorkingDir, reqs...)
+	ec.Metadata.EventTimes[command.EventComputeMerkleTree] = &command.TimeInterval{From: time.Now()}
+	rootDg, reqs, stats, err := ec.client.GrpcClient.NgComputeMerkleTree(ctx, execRoot, workingDir, remoteWorkingDir, reqs...)
+	ec.Metadata.EventTimes[command.EventComputeMerkleTree].To = time.Now()
 	if err != nil {
 		if log.V(5) {
-            log.Infof("upload error: cmd_id=%s, exec_id=%s\n%q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
+			log.Infof("upload error: cmd_id=%s, exec_id=%s\n%q\n%s", cmdID, executionID, err, formatInputSpec(ec.cmd.InputSpec, "  "))
 		}
 		return err
 	}
@@ -356,25 +355,28 @@ func (ec *Context) ngUploadInputs() error {
 			log.Infof("root digest mismatch; m=ng.upload, cmd_id=%s, exec_id=%s, exec_root=%s, wd=%s, rwd=%s\n  %s", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, msg)
 			return fmt.Errorf("root digest mismatch: ng=%s, cl=%s", rootDg, rootDg2)
 		}
-        // log.Infof("root digest match: cmd_id=%s, exec_id=%s, exec_root=%s, wd=%s, rwd=%s\n  %s", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, msg)
+		// log.Infof("root digest match: cmd_id=%s, exec_id=%s, exec_root=%s, wd=%s, rwd=%s\n  %s", cmdID, executionID, execRoot, workingDir, remoteWorkingDir, msg)
 	}
+	ec.Metadata.EventTimes[command.EventUploadInputs] = &command.TimeInterval{From: time.Now()}
+	missing, stats, err := ec.client.GrpcClient.NgUploadDigested(ctx, reqs...)
+	ec.Metadata.EventTimes[command.EventUploadInputs].To = time.Now()
 	ec.Metadata.InputFiles = int(stats.InputFileCount)
 	ec.Metadata.InputDirectories = int(stats.InputDirCount)
 	ec.Metadata.TotalInputBytes = stats.BytesRequested
-	ec.Metadata.LogicalBytesUploaded = stats.LogicalBytesMoved
-	ec.Metadata.RealBytesUploaded = stats.TotalBytesMoved
+	ec.Metadata.LogicalBytesUploaded = stats.BytesTransferred
+	ec.Metadata.RealBytesUploaded = stats.BytesWiredTotal
 	ec.Metadata.MissingDigests = missing
 
 	cmdPlatform, err := ec.computeCmdDg()
 	if err != nil {
 		return err
 	}
-    log.V(1).Infof("command: digest=%s, cmd_id=%s, exec_id=%s", ec.cmdUe.Digest, cmdID, executionID)
+	log.V(1).Infof("command: digest=%s, cmd_id=%s, exec_id=%s", ec.cmdUe.Digest, cmdID, executionID)
 	err = ec.computeActionDg(rootDg, cmdPlatform)
 	if err != nil {
 		return err
 	}
-    log.V(1).Infof("action: digest=%s, cmd_id=%s, exec_id=%s", ec.acUe.Digest, cmdID, executionID)
+	log.V(1).Infof("action: digest=%s, cmd_id=%s, exec_id=%s", ec.acUe.Digest, cmdID, executionID)
 	missing, stats, err = ec.client.GrpcClient.NgUpload(ec.ctx,
 		casng.UploadRequest{Bytes: ec.acUe.Contents, Digest: ec.acUe.Digest},
 		casng.UploadRequest{Bytes: ec.cmdUe.Contents, Digest: ec.cmdUe.Digest},
@@ -387,8 +389,8 @@ func (ec *Context) ngUploadInputs() error {
 	ec.Metadata.TotalInputBytes += ec.cmdUe.Digest.Size + ec.acUe.Digest.Size
 	ec.Metadata.MissingDigests = append(ec.Metadata.MissingDigests, missing...)
 	ec.Metadata.TotalInputBytes += stats.BytesRequested
-	ec.Metadata.LogicalBytesUploaded += stats.LogicalBytesMoved
-	ec.Metadata.RealBytesUploaded += stats.TotalBytesMoved
+	ec.Metadata.LogicalBytesUploaded += stats.BytesTransferred
+	ec.Metadata.RealBytesUploaded += stats.BytesWiredTotal
 	return nil
 }
 
