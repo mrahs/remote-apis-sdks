@@ -378,12 +378,22 @@ func loadFiles(execRoot, localWorkingDir, remoteWorkingDir string, excl []*comma
 			}
 
 			if shouldCache(remoteNormPath) {
-				if nodeRaw, ok := nodeCache.Load(remoteNormPath); ok {
+				// attempt to claim
+				wg := &sync.WaitGroup{}
+				wg.Add(1)
+				if nodeRaw, ok := nodeCache.LoadOrStore(remoteNormPath, wg); ok {
+					// already claimed or computed
+					if wg, ok := nodeRaw.(*sync.WaitGroup); ok {
+						// already claimed, wait
+						wg.Wait()
+						nodeRaw, _ = nodeCache.Load(remoteNormPath)
+					}
+					// already computed, use result
 					log.Infof("cached input dir: %s", remoteNormPath)
 					fs[remoteNormPath] = &fileSysNode{node: nodeRaw.(proto.Message)}
 					continue
 				} else {
-					log.Infof("missed dir: %s", remoteNormPath)
+					log.Infof("claimed input dir: %s", remoteNormPath)
 				}
 			}
 
@@ -578,10 +588,17 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 		}
 
 		if shouldCache(path) {
-			if nodeRaw, ok := nodeCache.Load(path); ok {
-				node := nodeRaw.(*repb.DirectoryNode)
-				log.Infof("cached child dir: %s", path)
-				return digest.NewFromProtoUnvalidated(node.Digest), nil, nil
+			wg := &sync.WaitGroup{}
+			wg.Add(1)
+			if nodeRaw, ok := nodeCache.LoadOrStore(path, wg); ok {
+				// if previously claimed, continue computing, otherwise, use the result
+				if _, ok := nodeRaw.(*sync.WaitGroup); !ok {
+					node := nodeRaw.(*repb.DirectoryNode)
+					log.Infof("cached child dir: %s", path)
+					return digest.NewFromProtoUnvalidated(node.Digest), nil, nil
+				}
+			} else {
+				log.Infof("claimed child dir: %s", path)
 			}
 		}
 
@@ -597,7 +614,12 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 		dn := &repb.DirectoryNode{Name: name, Digest: dg.ToProto()}
 		if shouldCache(path) {
 			log.Infof("caching dir: %s", path)
-			nodeCache.LoadOrStore(path, dn)
+			if wgRaw, ok := nodeCache.Load(path); ok {
+				nodeCache.Store(path, dn)
+				wgRaw.(*sync.WaitGroup).Done()
+			} else {
+				log.Errorf("invalid state: path %q should have been claimed", path)
+			}
 		}
 		dir.Directories = append(dir.Directories, dn)
 		for d, b := range childBlobs {
