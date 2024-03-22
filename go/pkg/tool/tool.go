@@ -339,7 +339,7 @@ type UploadStats struct {
 // UploadDirectory uploads a directory from the specified path as a Merkle-tree to the remote cache.
 func (c *Client) UploadDirectory(ctx context.Context, path string) (*UploadStats, error) {
 	log.Infof("Computing Merkle tree rooted at %s", path)
-	root, blobs, stats, err := c.GrpcClient.ComputeMerkleTree(ctx, path, "", "", &command.InputSpec{Inputs: []string{"."}}, filemetadata.NewNoopCache())
+	root, blobs, stats, _, err := c.GrpcClient.ComputeMerkleTree(ctx, path, "", "", &command.InputSpec{Inputs: []string{"."}}, filemetadata.NewNoopCache())
 	if err != nil {
 		return &UploadStats{Error: err.Error()}, err
 	}

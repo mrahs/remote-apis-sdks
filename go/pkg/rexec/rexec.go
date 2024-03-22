@@ -227,7 +227,7 @@ func (ec *Context) computeInputs() error {
 
 	log.V(1).Infof("%s %s> Computing input Merkle tree...", cmdID, executionID)
 	execRoot, workingDir, remoteWorkingDir := ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir
-	root, blobs, stats, err := ec.client.GrpcClient.ComputeMerkleTree(ec.ctx, execRoot, workingDir, remoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
+	root, blobs, stats, _, err := ec.client.GrpcClient.ComputeMerkleTree(ec.ctx, execRoot, workingDir, remoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
 	if err != nil {
 		return err
 	}
@@ -341,7 +341,7 @@ func (ec *Context) ngUploadInputs() error {
 		return err
 	}
 	if log.V(5) {
-		rootDg2, _, _, err := ec.client.GrpcClient.ComputeMerkleTree(ctx, ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
+		rootDg2, _, _, _, err := ec.client.GrpcClient.ComputeMerkleTree(ctx, ec.cmd.ExecRoot, ec.cmd.WorkingDir, ec.cmd.RemoteWorkingDir, ec.cmd.InputSpec, ec.client.FileMetadataCache)
 		if err != nil {
 			return err
 		}

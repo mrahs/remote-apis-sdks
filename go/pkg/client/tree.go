@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	cpb "github.com/bazelbuild/remote-apis-sdks/go/api/command"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/command"
@@ -409,29 +410,29 @@ func loadFiles(execRoot, localWorkingDir, remoteWorkingDir string, excl []*comma
 }
 
 // ComputeMerkleTree packages an InputSpec into uploadable inputs, returned as uploadinfo.Entrys
-func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, remoteWorkingDir string, is *command.InputSpec, cache filemetadata.Cache) (root digest.Digest, inputs []*uploadinfo.Entry, stats *TreeStats, err error) {
+func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, remoteWorkingDir string, is *command.InputSpec, cache filemetadata.Cache) (root digest.Digest, inputs []*uploadinfo.Entry, stats *TreeStats, timings []*command.TimeInterval, err error) {
 	stats = &TreeStats{}
 	fs := make(map[string]*fileSysNode)
 	slOpts := treeSymlinkOpts(c.TreeSymlinkOpts, is.SymlinkBehavior)
 	for _, i := range is.VirtualInputs {
 		if i.Path == "" {
-			return digest.Empty, nil, nil, errors.New("empty Path in VirtualInputs")
+			return digest.Empty, nil, nil, nil, errors.New("empty Path in VirtualInputs")
 		}
 		path := i.Path
 		if slOpts.Preserved {
 			evaledPath, parentSymlinks, err := evalParentSymlinks(execRoot, path, slOpts.MaterializeOutsideExecRoot, cache)
 			log.V(3).Infof("ComputeMerkleTree.VirtualInput: path=%s, evaled=%s, parentSymlinks=%v, err=%v", path, evaledPath, parentSymlinks, err)
 			if err != nil {
-				return digest.Empty, nil, nil, err
+				return digest.Empty, nil, nil, nil, err
 			}
 			path = evaledPath
 			if err := loadIntermediateSymlinks(parentSymlinks, execRoot, workingDir, remoteWorkingDir, cache, fs); err != nil {
-				return digest.Empty, nil, nil, err
+				return digest.Empty, nil, nil, nil, err
 			}
 		}
 		normPath, remoteNormPath, err := getExecRootRelPaths(path, execRoot, workingDir, remoteWorkingDir)
 		if err != nil {
-			return digest.Empty, nil, nil, err
+			return digest.Empty, nil, nil, nil, err
 		}
 		np := is.InputNodeProperties[remoteNormPath]
 		if i.IsEmptyDirectory {
@@ -441,13 +442,13 @@ func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, re
 			continue
 		}
 		if i.Digest != "" && len(i.Contents) > 0 {
-			return digest.Empty, nil, nil, errors.New("digest and file content cannot be provided for the same virtual input")
+			return digest.Empty, nil, nil, nil, errors.New("digest and file content cannot be provided for the same virtual input")
 		}
 		var entry *uploadinfo.Entry
 		if i.Digest != "" {
 			dg, err := digest.NewFromString(i.Digest)
 			if err != nil {
-				return digest.Empty, nil, nil, err
+				return digest.Empty, nil, nil, nil, err
 			}
 			absPath := filepath.Join(execRoot, normPath)
 			entry = uploadinfo.EntryFromVirtualFile(dg, absPath)
@@ -462,19 +463,26 @@ func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, re
 			nodeProperties: np,
 		}
 	}
-	if err := loadFiles(execRoot, workingDir, remoteWorkingDir, is.InputExclusions, is.Inputs, fs, cache, slOpts, is.InputNodeProperties); err != nil {
-		return digest.Empty, nil, nil, err
-	}
-	ft, err := buildTree(fs)
+	timeLf := &command.TimeInterval{From: time.Now()}
+	err = loadFiles(execRoot, workingDir, remoteWorkingDir, is.InputExclusions, is.Inputs, fs, cache, slOpts, is.InputNodeProperties)
+	timeLf.To = time.Now()
 	if err != nil {
-		return digest.Empty, nil, nil, err
+		return digest.Empty, nil, nil, nil, err
+	}
+	timeBt := &command.TimeInterval{From: time.Now()}
+	ft, err := buildTree(fs)
+	timeBt.To = time.Now()
+	if err != nil {
+		return digest.Empty, nil, nil, nil, err
 	}
 	var blobs map[digest.Digest]*uploadinfo.Entry
 	var tree map[string]digest.Digest
 	if log.V(5) {
 		tree = make(map[string]digest.Digest)
 	}
+	timePt := &command.TimeInterval{From: time.Now()}
 	root, blobs, err = packageTree(ft, stats, "", tree)
+	timePt.To = time.Now()
 	if log.V(5) {
 		if s, ok := ctx.Value("cl_tree").(*string); ok {
 			treePaths := make([]string, 0, len(tree))
@@ -490,12 +498,12 @@ func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, re
 		}
 	}
 	if err != nil {
-		return digest.Empty, nil, nil, err
+		return digest.Empty, nil, nil, nil, err
 	}
 	for _, ue := range blobs {
 		inputs = append(inputs, ue)
 	}
-	return root, inputs, stats, nil
+	return root, inputs, stats, []*command.TimeInterval{timeLf, timeBt, timePt}, nil
 }
 
 func buildTree(files map[string]*fileSysNode) (*treeNode, error) {
