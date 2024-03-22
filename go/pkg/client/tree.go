@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	cpb "github.com/bazelbuild/remote-apis-sdks/go/api/command"
@@ -17,6 +18,7 @@ import (
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/uploadinfo"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/proto"
 
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	log "github.com/golang/glog"
@@ -43,6 +45,7 @@ type fileSysNode struct {
 	file                 *fileNode
 	emptyDirectoryMarker bool
 	symlink              *symlinkNode
+	node                 proto.Message
 	nodeProperties       *cpb.NodeProperties
 }
 
@@ -277,6 +280,13 @@ func loadIntermediateSymlinks(symlinks []string, execRoot, workingDir, remoteWor
 	return nil
 }
 
+var nodeCache sync.Map
+var cacheDirsStr string = "," + os.Getenv("RBE_MT_CACHE_DIRS") + ","
+
+func shouldCache(path string) bool {
+	return strings.Contains(cacheDirsStr, ","+path+",")
+}
+
 // loadFiles reads all files specified by the given InputSpec (descending into subdirectories
 // recursively), and loads their contents into the provided map.
 func loadFiles(execRoot, localWorkingDir, remoteWorkingDir string, excl []*command.InputExclusion, filesToProcess []string, fs map[string]*fileSysNode, cache filemetadata.Cache, opts *TreeSymlinkOpts, nodeProperties map[string]*cpb.NodeProperties) error {
@@ -365,6 +375,16 @@ func loadFiles(execRoot, localWorkingDir, remoteWorkingDir string, excl []*comma
 					continue
 				}
 				return meta.Err
+			}
+
+			if shouldCache(remoteNormPath) {
+				if nodeRaw, ok := nodeCache.Load(remoteNormPath); ok {
+					log.Infof("cached input dir: %s", remoteNormPath)
+					fs[remoteNormPath] = &fileSysNode{node: nodeRaw.(proto.Message)}
+					continue
+				} else {
+					log.Infof("missed dir: %s", remoteNormPath)
+				}
 			}
 
 			f, err := os.Open(absPath)
@@ -551,8 +571,18 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 
 	var path string
 	for name, child := range t.children {
-		if tree != nil {
-			path = prefix + "/" + name
+		if prefix == "" {
+			path = name
+		} else {
+			path = prefix + string(filepath.Separator) + name
+		}
+
+		if shouldCache(path) {
+			if nodeRaw, ok := nodeCache.Load(path); ok {
+				node := nodeRaw.(*repb.DirectoryNode)
+				log.Infof("cached child dir: %s", path)
+				return digest.NewFromProtoUnvalidated(node.Digest), nil, nil
+			}
 		}
 
 		dg, childBlobs, err := packageTree(child, stats, path, tree)
@@ -564,7 +594,12 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 			tree[path] = dg
 		}
 
-		dir.Directories = append(dir.Directories, &repb.DirectoryNode{Name: name, Digest: dg.ToProto()})
+		dn := &repb.DirectoryNode{Name: name, Digest: dg.ToProto()}
+		if shouldCache(path) {
+			log.Infof("caching dir: %s", path)
+			nodeCache.LoadOrStore(path, dn)
+		}
+		dir.Directories = append(dir.Directories, dn)
 		for d, b := range childBlobs {
 			blobs[d] = b
 		}
@@ -587,6 +622,18 @@ func packageTree(t *treeNode, stats *TreeStats, prefix string, tree map[string]d
 		if n.symlink != nil {
 			dir.Symlinks = append(dir.Symlinks, &repb.SymlinkNode{Name: name, Target: n.symlink.target, NodeProperties: command.NodePropertiesToAPI(n.nodeProperties)})
 			stats.InputSymlinks++
+		}
+		if n.node != nil {
+			switch nd := n.node.(type) {
+			case *repb.FileNode:
+				dir.Files = append(dir.Files, nd)
+			case *repb.DirectoryNode:
+				dir.Directories = append(dir.Directories, nd)
+			case *repb.SymlinkNode:
+				dir.Symlinks = append(dir.Symlinks, nd)
+			default:
+				log.Errorf("unexpected node type %T", n.node)
+			}
 		}
 	}
 
